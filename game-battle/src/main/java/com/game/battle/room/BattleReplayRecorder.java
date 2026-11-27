@@ -1,5 +1,9 @@
 package com.game.battle.room;
 
+import com.game.battle.engine.WuxingExpansionRules;
+import com.game.proto.BattleActorBuildSummary;
+import com.game.proto.BattlePetSnapshot;
+import com.game.proto.BattlePlayerSnapshot;
 import com.game.proto.BattleReplay;
 import com.game.proto.BattleReplayEnvelope;
 import com.game.proto.BattleStateS2C;
@@ -61,7 +65,40 @@ final class BattleReplayRecorder {
                 .setStartedAtMs(request.getCreatedAtMs())
                 .setTableFingerprint(tableFingerprint == null ? "" : tableFingerprint)
                 .setStartState(start);
-        this.recordedBytes = start.getSerializedSize();
+        int extraBytes = 0;
+        boolean usedFreePreset = request.hasRankedContext() && request.getRankedContext().getUseFreePreset();
+        for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
+            BattleActorBuildSummary.Builder summary = BattleActorBuildSummary.newBuilder()
+                    .setPlayerId(snapshot.getPlayerId())
+                    .setName(snapshot.getPlayerName())
+                    .setTeamIndex(snapshot.getTeamIndex())
+                    .setClassId(snapshot.getClassId())
+                    .setLevel(snapshot.getLevel())
+                    .setFormationId(snapshot.getFormationId())
+                    .setWuxingElement(WuxingExpansionRules.elementOfClass(snapshot.getClassId()))
+                    .setUsedFreePreset(usedFreePreset);
+            if (snapshot.hasEquipmentEffects() && snapshot.getEquipmentEffects().hasSeasonSeal()) {
+                summary.setSeasonSealId(snapshot.getEquipmentEffects().getSeasonSeal().getSealId());
+            }
+            if (snapshot.getPetsCount() > 0) {
+                BattlePetSnapshot pet = snapshot.getPets(0);
+                int petTableId = pet.getCombatPetTableId() != 0 ? pet.getCombatPetTableId() : pet.getPetTableId();
+                summary.setActivePetTableId(petTableId)
+                        .setActivePetName(pet.getPetName())
+                        .setActivePetElement(WuxingExpansionRules.elementOfPet(petTableId));
+            }
+            int skillCap = Math.min(12, snapshot.getSkillTableIdsCount());
+            for (int i = 0; i < skillCap; i++) {
+                summary.addSkillTableIds(snapshot.getSkillTableIds(i));
+            }
+            if (snapshot.hasTowerContext()) {
+                summary.addAllWuxingSigilIds(snapshot.getTowerContext().getActiveSigilIdsList());
+            }
+            BattleActorBuildSummary built = summary.build();
+            this.replay.addActorBuilds(built);
+            extraBytes += built.getSerializedSize();
+        }
+        this.recordedBytes = start.getSerializedSize() + extraBytes;
     }
 
     /** 录制一回合的观众版帧；超出录制预算时标 truncated 并停止追加后续回合。 */

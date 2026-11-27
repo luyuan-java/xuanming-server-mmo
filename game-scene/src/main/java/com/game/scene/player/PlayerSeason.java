@@ -3,6 +3,8 @@ package com.game.scene.player;
 import com.game.battle.engine.SeasonRules;
 import com.game.player.store.state.PlayerSeasonSealRecordState;
 import com.game.player.store.state.PlayerSeasonState;
+import com.game.player.store.state.SavedBattleBuildBookmarkState;
+import com.game.player.store.state.WuxingTowerState;
 import com.google.protobuf.UnknownFieldSet;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -11,7 +13,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * 玩家单槽赛季印存档状态（对齐 C++ {@code PlayerSeasonComp}，含 V4 永久徽章动态位图与往季追忆状态）。
+ * 玩家单槽赛季印存档状态（对齐 C++ {@code PlayerSeasonComp}，含 V4 永久徽章动态位图、往季追忆、五行阵法/幻境与配装书签）。
  * 按 {@code season_id} 索引保留全部历史赛季记录及未知字段；仅在场景逻辑线程读写。
  */
 public final class PlayerSeason {
@@ -20,6 +22,9 @@ public final class PlayerSeason {
     private final List<Long> unlockedHonorWords = new ArrayList<>();
     private int retroHonorTargetSeasonId;
     private final Map<Integer, Integer> retroHonorProgress = new TreeMap<>(Integer::compareUnsigned);
+    private int equippedFormationId;
+    private WuxingTowerState wuxingTower = WuxingTowerState.getDefaultInstance();
+    private final List<SavedBattleBuildBookmarkState> savedBuilds = new ArrayList<>();
     private UnknownFieldSet unknownFields = UnknownFieldSet.getDefaultInstance();
 
     private PlayerSeason() {
@@ -46,6 +51,11 @@ public final class PlayerSeason {
                 out.retroHonorProgress.put(entry.getKey(), entry.getValue());
             }
         }
+        out.equippedFormationId = state.getEquippedFormationId();
+        if (state.hasWuxingTower()) {
+            out.wuxingTower = state.getWuxingTower();
+        }
+        out.savedBuilds.addAll(state.getSavedBuildsList());
         out.unknownFields = state.getUnknownFields();
         return out;
     }
@@ -100,11 +110,41 @@ public final class PlayerSeason {
         retroHonorProgress.remove(seasonId);
     }
 
+    public int equippedFormationId() {
+        return equippedFormationId;
+    }
+
+    public void setEquippedFormationId(int formationId) {
+        this.equippedFormationId = formationId;
+    }
+
+    public WuxingTowerState wuxingTower() {
+        return wuxingTower;
+    }
+
+    public void setWuxingTower(WuxingTowerState wuxingTower) {
+        this.wuxingTower = wuxingTower == null ? WuxingTowerState.getDefaultInstance() : wuxingTower;
+    }
+
+    public List<SavedBattleBuildBookmarkState> savedBuilds() {
+        return List.copyOf(savedBuilds);
+    }
+
+    public void setSavedBuilds(List<SavedBattleBuildBookmarkState> next) {
+        savedBuilds.clear();
+        if (next != null) {
+            savedBuilds.addAll(next);
+        }
+    }
+
     public boolean isEmpty() {
         return records.isEmpty()
                 && unlockedHonorWords.isEmpty()
                 && retroHonorTargetSeasonId == 0
                 && retroHonorProgress.isEmpty()
+                && equippedFormationId == 0
+                && wuxingTower.equals(WuxingTowerState.getDefaultInstance())
+                && savedBuilds.isEmpty()
                 && unknownFields.asMap().isEmpty();
     }
 
@@ -116,6 +156,15 @@ public final class PlayerSeason {
         out.addAllUnlockedHonorWords(unlockedHonorWords);
         out.setRetroHonorTargetSeasonId(retroHonorTargetSeasonId);
         out.putAllRetroHonorProgress(retroHonorProgress);
+        if (equippedFormationId != 0) {
+            out.setEquippedFormationId(equippedFormationId);
+        }
+        if (!wuxingTower.equals(WuxingTowerState.getDefaultInstance())) {
+            out.setWuxingTower(wuxingTower);
+        }
+        if (!savedBuilds.isEmpty()) {
+            out.addAllSavedBuilds(savedBuilds);
+        }
         out.setUnknownFields(unknownFields);
         return out.build();
     }

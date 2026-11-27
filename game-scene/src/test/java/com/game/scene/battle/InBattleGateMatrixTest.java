@@ -233,6 +233,12 @@ class InBattleGateMatrixTest {
             new Row(542, REWARDED_AD, "ClaimRewardedAd", BattlePolicy.GATED, REWARDED_AD_IN_BATTLE),
             new Row(454, SEASON, "EquipSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(455, SEASON, "CatchupSeasonSeal", BattlePolicy.GATED, SEASON_IN_BATTLE),
+            new Row(515, SEASON, "EquipWuxingFormation", BattlePolicy.GATED, SEASON_IN_BATTLE),
+            new Row(517, SEASON, "StartWuxingTowerRun", BattlePolicy.GATED, SEASON_IN_BATTLE),
+            new Row(518, SEASON, "PickWuxingTowerSigil", BattlePolicy.GATED, SEASON_IN_BATTLE),
+            new Row(519, SEASON, "AbandonWuxingTowerRun", BattlePolicy.GATED, SEASON_IN_BATTLE),
+            new Row(520, SEASON, "SaveBattleBuildBookmark", BattlePolicy.GATED, SEASON_IN_BATTLE),
+            new Row(521, SEASON, "DeleteBattleBuildBookmark", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(569, SEASON, "SetRetroHonorTarget", BattlePolicy.GATED, SEASON_IN_BATTLE),
             new Row(457, TRIAL_JOURNAL, "ClaimTrialJournalMilestone", BattlePolicy.GATED, TRIAL_JOURNAL_IN_BATTLE),
             new Row(458, TRIAL_JOURNAL, "RedeemBoundArtifactVoucher", BattlePolicy.GATED, TRIAL_JOURNAL_IN_BATTLE),
@@ -255,6 +261,7 @@ class InBattleGateMatrixTest {
             new Row(509, SPIRIT_SHOP, "GetSpiritShopInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(540, REWARDED_AD, "GetRewardedAdInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(453, SEASON, "GetSeasonState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(516, SEASON, "GetWuxingTowerState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(456, TRIAL_JOURNAL, "GetTrialJournal", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(459, SKILL, "GetSkillCraftingState", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(464, SKILL, "ListCraftProxyStalls", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -288,6 +295,8 @@ class InBattleGateMatrixTest {
             new Row(430, AFK_PASS, "GetAfkPass", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(431, AFK_PASS, "BuyAfkPass", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(432, AFK_PASS, "GmSetAfkPass", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(522, AFK_PASS, "SetAfkPassSettings", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(523, AFK_PASS, "AckHostedRecap", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(193, MISSION, "GetMissionList", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             // ALLOW：只给建议
             new Row(173, ATTRIBUTE, "AutoAllocateAttributePoints", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -626,6 +635,8 @@ class InBattleGateMatrixTest {
                     .setExpectedCurrencyType(rule.priceCurrencyType()).setExpectedPrice(rule.price()).build();
         });
         out.put(AFK_PASS + "GmSetAfkPass", s -> com.game.proto.GmSetAfkPassRequest.newBuilder().setRemainingSeconds(3600).build());
+        out.put(AFK_PASS + "SetAfkPassSettings", s -> com.game.proto.SetAfkPassSettingsRequest.newBuilder().setAutoReturnCityOnTeamEnd(true).build());
+        out.put(AFK_PASS + "AckHostedRecap", s -> com.game.proto.AckHostedRecapRequest.getDefaultInstance());
         out.put(SCENE + "EnterScene", s -> EnterSceneC2SRequest.newBuilder().setSceneInfo(SceneInfoComp.newBuilder()
                 .setSceneId(s.world().scene2.sceneId()).setSceneConfigId(s.world().scene2.configId())).build());
         out.put(SCENE + "SceneInfoC2S", s -> SceneInfoRequest.getDefaultInstance());
@@ -741,6 +752,18 @@ class InBattleGateMatrixTest {
         });
         out.put(SEASON + "SetRetroHonorTarget", s -> com.game.proto.SetRetroHonorTargetRequest.newBuilder()
                 .setSeasonId(2).build());
+        out.put(SEASON + "EquipWuxingFormation", s -> com.game.proto.EquipWuxingFormationRequest.newBuilder()
+                .setFormationId(1).build());
+        out.put(SEASON + "GetWuxingTowerState", s -> com.game.proto.GetWuxingTowerStateRequest.getDefaultInstance());
+        out.put(SEASON + "StartWuxingTowerRun", s -> com.game.proto.StartWuxingTowerRunRequest.getDefaultInstance());
+        out.put(SEASON + "PickWuxingTowerSigil", s -> com.game.proto.PickWuxingTowerSigilRequest.newBuilder()
+                .setExpectedRunId(1L).setSigilId(101).build());
+        out.put(SEASON + "AbandonWuxingTowerRun", s -> com.game.proto.AbandonWuxingTowerRunRequest.newBuilder()
+                .setExpectedRunId(1L).build());
+        out.put(SEASON + "SaveBattleBuildBookmark", s -> com.game.proto.SaveBattleBuildBookmarkRequest.newBuilder()
+                .setBookmark(com.game.proto.SavedBattleBuildBookmarkView.newBuilder().setTitle("测试").setFormationId(1)).build());
+        out.put(SEASON + "DeleteBattleBuildBookmark", s -> com.game.proto.DeleteBattleBuildBookmarkRequest.newBuilder()
+                .setBookmarkId(1L).build());
         out.put(BATTLE_RESULT + "GetRecentBattleResults", s -> com.game.proto.GetRecentBattleResultsRequest.getDefaultInstance());
         out.put(BATTLE_RESULT + "AckBattleResults", s -> com.game.proto.AckBattleResultsRequest.getDefaultInstance());
         out.put(BAG + "SortBag", s -> SortBagRequest.newBuilder().setBagType(BagType.INVENTORY.code()).build());
@@ -1315,6 +1338,16 @@ class InBattleGateMatrixTest {
                 assertThat(w.currency.add(subject.player(), rule.getCatchupCurrencyType(),
                         Math.max(rule.getCatchupPricePerPoint() * 2L, 100L), Reason.GM_GRANT).ok()).isTrue();
                 w.sink.clear();
+            } else if (row.method().equals("PickWuxingTowerSigil") || row.method().equals("AbandonWuxingTowerRun")) {
+                subject.player().season().setWuxingTower(com.game.player.store.state.WuxingTowerState.newBuilder()
+                        .setWeekKey(com.game.battle.engine.WuxingExpansionRules.computeWuxingTowerWeekKey(w.clock.epochMillis()))
+                        .setRunActive(true).setRunId(1L).setCurrentFloor(1)
+                        .addPendingOfferSigilIds(101).addPendingOfferSigilIds(201).addPendingOfferSigilIds(301)
+                        .build());
+            } else if (row.method().equals("DeleteBattleBuildBookmark")) {
+                subject.player().season().setSavedBuilds(List.of(
+                        com.game.player.store.state.SavedBattleBuildBookmarkState.newBuilder()
+                                .setBookmarkId(1L).setTitle("测试").setFormationId(1).build()));
             }
         }
         if (row.service().equals(TRIAL_JOURNAL)) {

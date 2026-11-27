@@ -43,7 +43,23 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
                          TacticalPuzzleBattleContext tacticalPuzzleContext,
                          RankedMatchContext freePresetContext,
                          CustomDuelRules customDuelRules,
-                         JianghuDuelBattleContext jianghuDuelContext) {
+                         JianghuDuelBattleContext jianghuDuelContext,
+                         boolean isWuxingTower) {
+
+    public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
+                      FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext,
+                      TournamentBattleContext tournamentContext,
+                      Map<Long, Integer> memberTeams,
+                      List<BattlePlayerSnapshot> aiDefenderSnapshots,
+                      int trialVowMask,
+                      TacticalPuzzleBattleContext tacticalPuzzleContext,
+                      RankedMatchContext freePresetContext,
+                      CustomDuelRules customDuelRules,
+                      JianghuDuelBattleContext jianghuDuelContext) {
+        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext,
+                memberTeams, aiDefenderSnapshots, trialVowMask, tacticalPuzzleContext, freePresetContext,
+                customDuelRules, jianghuDuelContext, false);
+    }
 
     public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
                       FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext) {
@@ -168,8 +184,12 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
     }
 
     public static GatherPlan soloPve(int battleConfigId, long playerId, String ticketId, int trialVowMask) {
+        return soloPve(battleConfigId, playerId, ticketId, trialVowMask, false);
+    }
+
+    public static GatherPlan soloPve(int battleConfigId, long playerId, String ticketId, int trialVowMask, boolean isWuxingTower) {
         return new GatherPlan(MatchMode.MATCH_MODE_PVE_SOLO, battleConfigId, List.of(playerId), Map.of(playerId, ticketId),
-                FailPolicy.DELETE_ALL, 0, null, null, Map.of(), List.of(), trialVowMask, null, null);
+                FailPolicy.DELETE_ALL, 0, null, null, Map.of(), List.of(), trialVowMask, null, null, null, null, isWuxingTower);
     }
 
     /** 万象残局坊 V1 单人开战：免费公平预设 + 固定种子 + 可选作者自证录播。 */

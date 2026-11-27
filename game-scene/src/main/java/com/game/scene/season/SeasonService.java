@@ -4,15 +4,30 @@ import static com.game.scene.world.SceneMessageIds.tip;
 import static com.game.table.SeasonErrorTip.season_error.*;
 
 import com.game.battle.engine.SeasonRules;
+import com.game.battle.engine.WuxingExpansionRules;
 import com.game.player.store.state.ClientRequestRecordState;
 import com.game.player.store.state.PlayerSeasonSealRecordState;
+import com.game.player.store.state.SavedBattleBuildBookmarkState;
+import com.game.player.store.state.WuxingTowerState;
+import com.game.proto.AbandonWuxingTowerRunRequest;
+import com.game.proto.AbandonWuxingTowerRunResponse;
 import com.game.proto.BattleSettlementData;
 import com.game.proto.CatchupSeasonSealRequest;
 import com.game.proto.CatchupSeasonSealResponse;
+import com.game.proto.DeleteBattleBuildBookmarkRequest;
+import com.game.proto.DeleteBattleBuildBookmarkResponse;
 import com.game.proto.EquipSeasonSealRequest;
 import com.game.proto.EquipSeasonSealResponse;
+import com.game.proto.EquipWuxingFormationRequest;
+import com.game.proto.EquipWuxingFormationResponse;
 import com.game.proto.EquipmentEffects;
 import com.game.proto.GetSeasonStateResponse;
+import com.game.proto.GetWuxingTowerStateResponse;
+import com.game.proto.PickWuxingTowerSigilRequest;
+import com.game.proto.PickWuxingTowerSigilResponse;
+import com.game.proto.SaveBattleBuildBookmarkRequest;
+import com.game.proto.SaveBattleBuildBookmarkResponse;
+import com.game.proto.SavedBattleBuildBookmarkView;
 import com.game.proto.SeasonHonorView;
 import com.game.proto.SeasonSealEffect;
 import com.game.proto.SeasonSealOption;
@@ -21,6 +36,11 @@ import com.game.proto.SeasonStateSnapshot;
 import com.game.proto.SeasonWeeklyAffixView;
 import com.game.proto.SetRetroHonorTargetRequest;
 import com.game.proto.SetRetroHonorTargetResponse;
+import com.game.proto.StartWuxingTowerRunRequest;
+import com.game.proto.StartWuxingTowerRunResponse;
+import com.game.proto.WuxingTowerBattleContext;
+import com.game.proto.WuxingTowerLeaderboardEntry;
+import com.game.proto.WuxingTowerStateSnapshot;
 import com.game.proto.eBattleOutcome;
 import com.game.proto.match.MatchMode;
 import com.game.scene.attribute.AttributeService;
@@ -40,8 +60,12 @@ import com.game.table.SeasonRuleTable;
 import com.game.table.SeasonSealTable;
 import com.game.table.SkillTable;
 import com.google.protobuf.ByteString;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,6 +90,29 @@ public final class SeasonService {
     public record RetroHonorTargetOutcome(SetRetroHonorTargetResponse response, boolean changed) {
     }
 
+    public record EquipFormationOutcome(EquipWuxingFormationResponse response, boolean changed) {
+    }
+
+    public record StartTowerOutcome(StartWuxingTowerRunResponse response, boolean changed) {
+    }
+
+    public record PickSigilOutcome(PickWuxingTowerSigilResponse response, boolean changed) {
+    }
+
+    public record AbandonTowerOutcome(AbandonWuxingTowerRunResponse response, boolean changed) {
+    }
+
+    public record SaveBookmarkOutcome(SaveBattleBuildBookmarkResponse response, boolean changed) {
+    }
+
+    public record DeleteBookmarkOutcome(DeleteBattleBuildBookmarkResponse response, boolean changed) {
+    }
+
+    private static final int MAX_BOOKMARK_TEXT_BYTES = 48;
+    private static final int MAX_BOOKMARK_SKILLS = 12;
+    private static final int MAX_BOOKMARK_SIGILS = 10;
+    private static final int TOWER_LEADERBOARD_TOP_N = 20;
+
     public record BattleCreditOutcome(int seasonId, boolean pointsIncreased,
                                       int pointsAdded, int progressAfter, int maxPoints,
                                       boolean honorNewlyUnlocked,
@@ -85,6 +132,8 @@ public final class SeasonService {
     private final AttributeService attributes;
     private final SceneClock clock;
     private final SceneMetrics metrics;
+    private int towerLeaderboardWeekKey;
+    private final Map<Long, WuxingTowerLeaderboardEntry> towerLeaderboardByPlayer = new HashMap<>();
 
     public SeasonService(SeasonTables tables, CurrencyService currency, AttributeService attributes,
                          SceneClock clock, SceneMetrics metrics) {
@@ -334,8 +383,471 @@ public final class SeasonService {
         return new RetroHonorTargetOutcome(retroTargetReply(player, nowMs, OK), true);
     }
 
-    /** 结算应用同帧原子累计本季进度点，满级后免费溢出至「往季徽章追忆」。 */
+    // ---- 五行玩法三大扩展 V1（515–521：五行阵法、五行幻境 10 层轻肉鸽周常爬塔与 Top-20 周榜、战报配装收藏夹） ----
+
+    /** 当前角色佩戴的合法五行阵法（0=无，1..5）。 */
+    public int equippedFormationId(ScenePlayer player) {
+        if (player == null) {
+            return 0;
+        }
+        int id = player.season().equippedFormationId();
+        return WuxingExpansionRules.isValidFormationId(id) ? id : 0;
+    }
+
+    /** 备战侧权威校验并填充五行幻境上下文（仅 PVE_SOLO 有效，校验进行中轮次、无待选符印及层数副本一致）。 */
+    public int prepareWuxingTowerContext(ScenePlayer player, long nowMs, int battleConfigId,
+                                         WuxingTowerBattleContext.Builder out) {
+        if (player == null || out == null) {
+            return INVALID_PARAMETER;
+        }
+        WuxingTowerState tower = player.season().wuxingTower();
+        if (!tower.getRunActive() || tower.getRunId() == 0L) {
+            return INVALID_PARAMETER;
+        }
+        int floor = tower.getCurrentFloor();
+        if (floor < 1 || floor > WuxingExpansionRules.TOWER_MAX_FLOORS) {
+            return INVALID_PARAMETER;
+        }
+        if (tower.getPendingOfferSigilIdsCount() > 0) {
+            return INVALID_PARAMETER;
+        }
+        if (battleConfigId != WuxingExpansionRules.towerFloorDungeonId(floor)) {
+            return INVALID_PARAMETER;
+        }
+        int weekKey = tower.getWeekKey() != 0
+                ? tower.getWeekKey()
+                : WuxingExpansionRules.computeWuxingTowerWeekKey(nowMs);
+        int leyline = WuxingExpansionRules.towerFloorLeylineElement(weekKey, floor);
+        out.clear()
+                .setWeekKey(weekKey)
+                .setRunId(tower.getRunId())
+                .setFloor(floor)
+                .setLeylineElement(WuxingExpansionRules.toLeylineEnum(leyline))
+                .addAllActiveSigilIds(tower.getActiveSigilIdsList());
+        return OK;
+    }
+
+    /** 515 战外免费切换五行阵法（0..5，全员免费无付费解锁）。 */
+    public EquipFormationOutcome equipWuxingFormation(ScenePlayer player, EquipWuxingFormationRequest request, long nowMs) {
+        int formationId = request.getFormationId();
+        if (!WuxingExpansionRules.isValidFormationId(formationId)) {
+            return new EquipFormationOutcome(equipFormationReply(player, nowMs, INVALID_PARAMETER), false);
+        }
+        int writableErr = checkWritable(player, true);
+        if (writableErr != OK) {
+            return new EquipFormationOutcome(equipFormationReply(player, nowMs, writableErr), false);
+        }
+        boolean changed = player.season().equippedFormationId() != formationId;
+        if (changed) {
+            player.season().setEquippedFormationId(formationId);
+            log.info("wuxing_formation_equipped player={} formation_id={}",
+                    Long.toUnsignedString(player.playerId()), formationId);
+        }
+        return new EquipFormationOutcome(equipFormationReply(player, nowMs, OK), changed);
+    }
+
+    /** 516 纯只读查询五行幻境当前轮次与本周 Top-20 榜单。 */
+    public GetWuxingTowerStateResponse getWuxingTowerState(ScenePlayer player, long nowMs) {
+        return GetWuxingTowerStateResponse.newBuilder()
+                .setErrorMessage(tip(OK))
+                .setState(buildTowerSnapshot(player, nowMs))
+                .build();
+    }
+
+    /** 517 开启新一轮五行幻境 10 层挑战（按周一 05:00 周键自动轮换周统计）。 */
+    public StartTowerOutcome startWuxingTowerRun(ScenePlayer player, StartWuxingTowerRunRequest request, long nowMs) {
+        int writableErr = checkWritable(player, true);
+        if (writableErr != OK) {
+            return new StartTowerOutcome(StartWuxingTowerRunResponse.newBuilder()
+                    .setErrorMessage(tip(writableErr))
+                    .setState(buildTowerSnapshot(player, nowMs))
+                    .build(), false);
+        }
+        int weekKey = WuxingExpansionRules.computeWuxingTowerWeekKey(nowMs);
+        WuxingTowerState.Builder next = player.season().wuxingTower().toBuilder();
+        rotateTowerWeeklyStatsIfNeeded(next, weekKey);
+        next.setRunActive(true)
+                .setRunId(next.getRunId() + 1L)
+                .setCurrentFloor(1)
+                .setRunTotalRounds(0)
+                .clearActiveSigilIds()
+                .clearPendingOfferSigilIds()
+                .setRevision(bumpRevision(next.getRevision()));
+        player.season().setWuxingTower(next.build());
+        log.info("wuxing_tower_run_started player={} week_key={} run_id={}",
+                Long.toUnsignedString(player.playerId()), weekKey, next.getRunId());
+        return new StartTowerOutcome(StartWuxingTowerRunResponse.newBuilder()
+                .setErrorMessage(tip(OK))
+                .setState(buildTowerSnapshot(player, nowMs))
+                .build(), true);
+    }
+
+    /** 518 从本层结算生成的 3 选 1 符印中选取一枚并推进至下一层。 */
+    public PickSigilOutcome pickWuxingTowerSigil(ScenePlayer player, PickWuxingTowerSigilRequest request, long nowMs) {
+        int writableErr = checkWritable(player, true);
+        if (writableErr != OK) {
+            return new PickSigilOutcome(PickWuxingTowerSigilResponse.newBuilder()
+                    .setErrorMessage(tip(writableErr))
+                    .setState(buildTowerSnapshot(player, nowMs))
+                    .build(), false);
+        }
+        WuxingTowerState current = player.season().wuxingTower();
+        int sigilId = request.getSigilId();
+        if (!current.getRunActive()
+                || current.getRunId() == 0L
+                || request.getExpectedRunId() != current.getRunId()
+                || !WuxingExpansionRules.isValidTowerSigilId(sigilId)
+                || !current.getPendingOfferSigilIdsList().contains(sigilId)) {
+            return new PickSigilOutcome(PickWuxingTowerSigilResponse.newBuilder()
+                    .setErrorMessage(tip(INVALID_PARAMETER))
+                    .setState(buildTowerSnapshot(player, nowMs))
+                    .build(), false);
+        }
+        WuxingTowerState.Builder next = current.toBuilder();
+        if (!next.getActiveSigilIdsList().contains(sigilId)) {
+            next.addActiveSigilIds(sigilId);
+        }
+        next.clearPendingOfferSigilIds();
+        int nextFloor = Math.min(WuxingExpansionRules.TOWER_MAX_FLOORS, current.getCurrentFloor() + 1);
+        next.setCurrentFloor(nextFloor)
+                .setRevision(bumpRevision(current.getRevision()));
+        player.season().setWuxingTower(next.build());
+        log.info("wuxing_tower_sigil_picked player={} run_id={} sigil_id={} next_floor={}",
+                Long.toUnsignedString(player.playerId()), current.getRunId(), sigilId, nextFloor);
+        return new PickSigilOutcome(PickWuxingTowerSigilResponse.newBuilder()
+                .setErrorMessage(tip(OK))
+                .setState(buildTowerSnapshot(player, nowMs))
+                .build(), true);
+    }
+
+    /** 519 主动放弃当前五行幻境轮次（保留本周已达成首通与最佳成绩）。 */
+    public AbandonTowerOutcome abandonWuxingTowerRun(ScenePlayer player, AbandonWuxingTowerRunRequest request, long nowMs) {
+        int writableErr = checkWritable(player, true);
+        if (writableErr != OK) {
+            return new AbandonTowerOutcome(AbandonWuxingTowerRunResponse.newBuilder()
+                    .setErrorMessage(tip(writableErr))
+                    .setState(buildTowerSnapshot(player, nowMs))
+                    .build(), false);
+        }
+        WuxingTowerState current = player.season().wuxingTower();
+        if (!current.getRunActive()
+                || (request.getExpectedRunId() != 0L && request.getExpectedRunId() != current.getRunId())) {
+            return new AbandonTowerOutcome(AbandonWuxingTowerRunResponse.newBuilder()
+                    .setErrorMessage(tip(INVALID_PARAMETER))
+                    .setState(buildTowerSnapshot(player, nowMs))
+                    .build(), false);
+        }
+        WuxingTowerState.Builder next = current.toBuilder()
+                .setRunActive(false)
+                .setCurrentFloor(0)
+                .setRunTotalRounds(0)
+                .clearActiveSigilIds()
+                .clearPendingOfferSigilIds()
+                .setRevision(bumpRevision(current.getRevision()));
+        player.season().setWuxingTower(next.build());
+        log.info("wuxing_tower_run_abandoned player={} run_id={}",
+                Long.toUnsignedString(player.playerId()), current.getRunId());
+        return new AbandonTowerOutcome(AbandonWuxingTowerRunResponse.newBuilder()
+                .setErrorMessage(tip(OK))
+                .setState(buildTowerSnapshot(player, nowMs))
+                .build(), true);
+    }
+
+    /** 520 保存或覆盖战报配装书签（上限 12 条，UTF-8 48 字节截断，技能上限 12、符印上限 10）。 */
+    public SaveBookmarkOutcome saveBattleBuildBookmark(ScenePlayer player, SaveBattleBuildBookmarkRequest request, long nowMs) {
+        int writableErr = checkWritable(player, true);
+        if (writableErr != OK) {
+            return new SaveBookmarkOutcome(SaveBattleBuildBookmarkResponse.newBuilder()
+                    .setErrorMessage(tip(writableErr))
+                    .addAllAllBookmarks(buildBookmarkViews(player.season()))
+                    .build(), false);
+        }
+        SavedBattleBuildBookmarkView src = request.getBookmark();
+        if (!WuxingExpansionRules.isValidFormationId(src.getFormationId())) {
+            return new SaveBookmarkOutcome(SaveBattleBuildBookmarkResponse.newBuilder()
+                    .setErrorMessage(tip(INVALID_PARAMETER))
+                    .addAllAllBookmarks(buildBookmarkViews(player.season()))
+                    .build(), false);
+        }
+        List<SavedBattleBuildBookmarkState> list = new ArrayList<>(player.season().savedBuilds());
+        int targetIdx = -1;
+        long maxId = 0L;
+        for (int i = 0; i < list.size(); i++) {
+            long bid = list.get(i).getBookmarkId();
+            if (Long.compareUnsigned(bid, maxId) > 0) {
+                maxId = bid;
+            }
+            if (src.getBookmarkId() != 0L && bid == src.getBookmarkId()) {
+                targetIdx = i;
+            }
+        }
+        if (targetIdx < 0 && list.size() >= WuxingExpansionRules.MAX_SAVED_BUILD_BOOKMARKS) {
+            return new SaveBookmarkOutcome(SaveBattleBuildBookmarkResponse.newBuilder()
+                    .setErrorMessage(tip(INVALID_PARAMETER))
+                    .addAllAllBookmarks(buildBookmarkViews(player.season()))
+                    .build(), false);
+        }
+        long assignedId = targetIdx >= 0 ? list.get(targetIdx).getBookmarkId() : maxId + 1L;
+        String title = src.getTitle().isEmpty() ? "道友配装" : clampUtf8Bytes(src.getTitle(), MAX_BOOKMARK_TEXT_BYTES);
+        SavedBattleBuildBookmarkState.Builder item = SavedBattleBuildBookmarkState.newBuilder()
+                .setBookmarkId(assignedId)
+                .setTitle(title)
+                .setSourceBattleId(src.getSourceBattleId())
+                .setSourcePlayerId(src.getSourcePlayerId())
+                .setSourcePlayerName(clampUtf8Bytes(src.getSourcePlayerName(), MAX_BOOKMARK_TEXT_BYTES))
+                .setClassId(src.getClassId())
+                .setFormationId(src.getFormationId())
+                .setSeasonSealId(src.getSeasonSealId())
+                .setActivePetTableId(src.getActivePetTableId())
+                .setActivePetName(clampUtf8Bytes(src.getActivePetName(), MAX_BOOKMARK_TEXT_BYTES))
+                .setSavedAtMs(nowMs);
+        int skillCount = Math.min(MAX_BOOKMARK_SKILLS, src.getSkillTableIdsCount());
+        for (int i = 0; i < skillCount; i++) {
+            item.addSkillTableIds(src.getSkillTableIds(i));
+        }
+        int sigilAdded = 0;
+        for (int i = 0; i < src.getWuxingSigilIdsCount() && sigilAdded < MAX_BOOKMARK_SIGILS; i++) {
+            int sid = src.getWuxingSigilIds(i);
+            if (WuxingExpansionRules.isValidTowerSigilId(sid)) {
+                item.addWuxingSigilIds(sid);
+                sigilAdded++;
+            }
+        }
+        SavedBattleBuildBookmarkState built = item.build();
+        if (targetIdx >= 0) {
+            list.set(targetIdx, built);
+        } else {
+            list.add(built);
+        }
+        player.season().setSavedBuilds(list);
+        return new SaveBookmarkOutcome(SaveBattleBuildBookmarkResponse.newBuilder()
+                .setErrorMessage(tip(OK))
+                .setSaved(toBookmarkView(built))
+                .addAllAllBookmarks(buildBookmarkViews(player.season()))
+                .build(), true);
+    }
+
+    /** 521 删除指定战报配装书签。 */
+    public DeleteBookmarkOutcome deleteBattleBuildBookmark(ScenePlayer player, DeleteBattleBuildBookmarkRequest request, long nowMs) {
+        int writableErr = checkWritable(player, true);
+        if (writableErr != OK) {
+            return new DeleteBookmarkOutcome(DeleteBattleBuildBookmarkResponse.newBuilder()
+                    .setErrorMessage(tip(writableErr))
+                    .addAllAllBookmarks(buildBookmarkViews(player.season()))
+                    .build(), false);
+        }
+        List<SavedBattleBuildBookmarkState> list = new ArrayList<>(player.season().savedBuilds());
+        int foundIdx = -1;
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i).getBookmarkId() == request.getBookmarkId()) {
+                foundIdx = i;
+                break;
+            }
+        }
+        if (foundIdx < 0) {
+            return new DeleteBookmarkOutcome(DeleteBattleBuildBookmarkResponse.newBuilder()
+                    .setErrorMessage(tip(INVALID_PARAMETER))
+                    .addAllAllBookmarks(buildBookmarkViews(player.season()))
+                    .build(), false);
+        }
+        list.remove(foundIdx);
+        player.season().setSavedBuilds(list);
+        return new DeleteBookmarkOutcome(DeleteBattleBuildBookmarkResponse.newBuilder()
+                .setErrorMessage(tip(OK))
+                .addAllAllBookmarks(buildBookmarkViews(player.season()))
+                .build(), true);
+    }
+
+    private void applyWuxingTowerSettlement(ScenePlayer player, BattleSettlementData settlement, long nowMs) {
+        var ts = settlement.getTowerSettlement();
+        boolean won = settlement.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN
+                && settlement.getPlayerTeamIndex() == 0
+                && !settlement.getFled();
+        if (!won) {
+            return;
+        }
+        WuxingTowerState current = player.season().wuxingTower();
+        int floor = ts.getFloor();
+        if (!current.getRunActive()
+                || current.getWeekKey() != ts.getWeekKey()
+                || current.getRunId() != ts.getRunId()
+                || current.getCurrentFloor() != floor
+                || current.getPendingOfferSigilIdsCount() != 0
+                || floor < 1
+                || floor > WuxingExpansionRules.TOWER_MAX_FLOORS) {
+            return;
+        }
+        int currentWeekKey = WuxingExpansionRules.computeWuxingTowerWeekKey(nowMs);
+        boolean sameWeekRun = current.getWeekKey() == currentWeekKey;
+        WuxingTowerState.Builder next = current.toBuilder();
+        int addedRounds = Math.max(1, ts.getTotalRounds());
+        int totalRounds = current.getRunTotalRounds() + addedRounds;
+        next.setRunTotalRounds(totalRounds);
+        if (sameWeekRun) {
+            rotateTowerWeeklyStatsIfNeeded(next, currentWeekKey);
+            next.setWeeklyClearedMask(next.getWeeklyClearedMask() | (1 << (floor - 1)));
+            if (floor > next.getWeeklyBestFloor()) {
+                next.setWeeklyBestFloor(floor);
+                if (floor == WuxingExpansionRules.TOWER_MAX_FLOORS) {
+                    next.setWeeklyBestRounds(totalRounds);
+                }
+            } else if (floor == WuxingExpansionRules.TOWER_MAX_FLOORS
+                    && (next.getWeeklyBestRounds() == 0 || totalRounds < next.getWeeklyBestRounds())) {
+                next.setWeeklyBestRounds(totalRounds);
+            }
+        }
+        if (floor >= WuxingExpansionRules.TOWER_MAX_FLOORS) {
+            next.setRunActive(false).clearPendingOfferSigilIds();
+        } else {
+            List<Integer> offers = WuxingExpansionRules.rollTowerSigilOffer(
+                    current.getWeekKey(), ts.getRunId(), floor, current.getActiveSigilIdsList());
+            next.clearPendingOfferSigilIds().addAllPendingOfferSigilIds(offers);
+        }
+        next.setRevision(bumpRevision(current.getRevision()));
+        WuxingTowerState updated = next.build();
+        player.season().setWuxingTower(updated);
+        if (sameWeekRun) {
+            recordTowerLeaderboard(player, updated, currentWeekKey);
+        }
+        log.info("wuxing_tower_floor_cleared player={} week_key={} run_id={} floor={} total_rounds={} finished={}",
+                Long.toUnsignedString(player.playerId()), current.getWeekKey(), ts.getRunId(),
+                floor, totalRounds, floor >= WuxingExpansionRules.TOWER_MAX_FLOORS);
+    }
+
+    private void recordTowerLeaderboard(ScenePlayer player, WuxingTowerState tower, int weekKey) {
+        if (tower.getWeekKey() != weekKey || tower.getWeeklyBestFloor() <= 0) {
+            return;
+        }
+        if (towerLeaderboardWeekKey != weekKey) {
+            towerLeaderboardWeekKey = weekKey;
+            towerLeaderboardByPlayer.clear();
+        }
+        towerLeaderboardByPlayer.put(player.playerId(), WuxingTowerLeaderboardEntry.newBuilder()
+                .setPlayerId(player.playerId())
+                .setPlayerName(player.name() == null ? "" : player.name())
+                .setBestFloor(tower.getWeeklyBestFloor())
+                .setBestRounds(tower.getWeeklyBestRounds())
+                .setFormationId(equippedFormationId(player))
+                .addAllSigilIds(tower.getActiveSigilIdsList())
+                .build());
+    }
+
+    private List<WuxingTowerLeaderboardEntry> buildTop20TowerLeaderboard(int weekKey) {
+        if (towerLeaderboardWeekKey != weekKey || towerLeaderboardByPlayer.isEmpty()) {
+            return List.of();
+        }
+        List<WuxingTowerLeaderboardEntry> sorted = new ArrayList<>(towerLeaderboardByPlayer.values());
+        sorted.sort(Comparator
+                .comparingInt(WuxingTowerLeaderboardEntry::getBestFloor).reversed()
+                .thenComparingInt(e -> e.getBestRounds() == 0 ? Integer.MAX_VALUE : e.getBestRounds())
+                .thenComparing(WuxingTowerLeaderboardEntry::getPlayerId, Long::compareUnsigned));
+        int limit = Math.min(TOWER_LEADERBOARD_TOP_N, sorted.size());
+        List<WuxingTowerLeaderboardEntry> ranked = new ArrayList<>(limit);
+        for (int i = 0; i < limit; i++) {
+            ranked.add(sorted.get(i).toBuilder().setRank(i + 1).build());
+        }
+        return ranked;
+    }
+
+    private WuxingTowerStateSnapshot buildTowerSnapshot(ScenePlayer player, long nowMs) {
+        int weekKey = WuxingExpansionRules.computeWuxingTowerWeekKey(nowMs);
+        WuxingTowerState tower = player.season().wuxingTower();
+        int floor = (tower.getRunActive() && tower.getCurrentFloor() >= 1
+                && tower.getCurrentFloor() <= WuxingExpansionRules.TOWER_MAX_FLOORS)
+                ? tower.getCurrentFloor() : 1;
+        int effectiveRunWeek = tower.getWeekKey() != 0 ? tower.getWeekKey() : weekKey;
+        WuxingTowerStateSnapshot.Builder out = WuxingTowerStateSnapshot.newBuilder()
+                .setWeekKey(weekKey)
+                .setRunWeekKey(effectiveRunWeek)
+                .setRealmVersion(1)
+                .setRunActive(tower.getRunActive())
+                .setRunId(tower.getRunId())
+                .setCurrentFloor(floor)
+                .setMaxFloors(WuxingExpansionRules.TOWER_MAX_FLOORS)
+                .setCurrentFloorDungeonId(WuxingExpansionRules.towerFloorDungeonId(floor))
+                .setCurrentFloorLeylineElement(WuxingExpansionRules.towerFloorLeylineElement(effectiveRunWeek, floor))
+                .setRunTotalRounds(tower.getRunTotalRounds())
+                .addAllActiveSigilIds(tower.getActiveSigilIdsList())
+                .addAllPendingOfferSigilIds(tower.getPendingOfferSigilIdsList())
+                .setRevision(tower.getRevision())
+                .addAllWeeklyLeaderboard(buildTop20TowerLeaderboard(weekKey));
+        if (tower.getWeekKey() == weekKey) {
+            out.setWeeklyClearedMask(tower.getWeeklyClearedMask())
+                    .setWeeklyBestFloor(tower.getWeeklyBestFloor())
+                    .setWeeklyBestRounds(tower.getWeeklyBestRounds());
+        }
+        return out.build();
+    }
+
+    private EquipWuxingFormationResponse equipFormationReply(ScenePlayer player, long nowMs, int tipId) {
+        return EquipWuxingFormationResponse.newBuilder()
+                .setErrorMessage(tip(tipId))
+                .setEquippedFormationId(equippedFormationId(player))
+                .setState(buildSnapshot(player, nowMs))
+                .build();
+    }
+
+    private static void rotateTowerWeeklyStatsIfNeeded(WuxingTowerState.Builder tower, int weekKey) {
+        if (tower.getWeekKey() != weekKey) {
+            tower.setWeekKey(weekKey)
+                    .setWeeklyClearedMask(0)
+                    .setWeeklyBestFloor(0)
+                    .setWeeklyBestRounds(0);
+        }
+    }
+
+    private static long bumpRevision(long current) {
+        return current == -1L ? current : current + 1L;
+    }
+
+    private static List<SavedBattleBuildBookmarkView> buildBookmarkViews(PlayerSeason ps) {
+        List<SavedBattleBuildBookmarkState> saved = ps.savedBuilds();
+        List<SavedBattleBuildBookmarkView> out = new ArrayList<>(saved.size());
+        for (SavedBattleBuildBookmarkState bm : saved) {
+            out.add(toBookmarkView(bm));
+        }
+        return out;
+    }
+
+    private static SavedBattleBuildBookmarkView toBookmarkView(SavedBattleBuildBookmarkState bm) {
+        return SavedBattleBuildBookmarkView.newBuilder()
+                .setBookmarkId(bm.getBookmarkId())
+                .setTitle(bm.getTitle())
+                .setSourceBattleId(bm.getSourceBattleId())
+                .setSourcePlayerId(bm.getSourcePlayerId())
+                .setSourcePlayerName(bm.getSourcePlayerName())
+                .setClassId(bm.getClassId())
+                .setFormationId(bm.getFormationId())
+                .setSeasonSealId(bm.getSeasonSealId())
+                .setActivePetTableId(bm.getActivePetTableId())
+                .setActivePetName(bm.getActivePetName())
+                .addAllSkillTableIds(bm.getSkillTableIdsList())
+                .addAllWuxingSigilIds(bm.getWuxingSigilIdsList())
+                .setSavedAtMs(bm.getSavedAtMs())
+                .build();
+    }
+
+    private static String clampUtf8Bytes(String input, int maxBytes) {
+        if (input == null || input.isEmpty()) {
+            return "";
+        }
+        byte[] raw = input.getBytes(StandardCharsets.UTF_8);
+        if (raw.length <= maxBytes) {
+            return input;
+        }
+        int end = maxBytes;
+        while (end > 0 && (raw[end] & 0xC0) == 0x80) {
+            end--;
+        }
+        return new String(raw, 0, end, StandardCharsets.UTF_8);
+    }
+
+    /** 结算应用同帧原子累计本季进度点，满级后免费溢出至「往季徽章追忆」；五行幻境结算单独推进塔层与抽印。 */
     public BattleCreditOutcome creditBattlePoints(ScenePlayer player, BattleSettlementData settlement, long nowMs) {
+        if (settlement.hasTowerSettlement() && settlement.getTowerSettlement().getFloor() != 0) {
+            applyWuxingTowerSettlement(player, settlement, nowMs);
+            return BattleCreditOutcome.NONE;
+        }
         if (!isEligibleBattle(settlement)) {
             return BattleCreditOutcome.NONE;
         }
@@ -596,7 +1108,10 @@ public final class SeasonService {
     }
 
     private SeasonStateSnapshot buildSnapshot(ScenePlayer player, long nowMs) {
-        SeasonStateSnapshot.Builder out = SeasonStateSnapshot.newBuilder().setServerNowMs(nowMs);
+        SeasonStateSnapshot.Builder out = SeasonStateSnapshot.newBuilder()
+                .setServerNowMs(nowMs)
+                .setEquippedFormationId(equippedFormationId(player))
+                .addAllSavedBuilds(buildBookmarkViews(player.season()));
         SeasonTables.ActiveSeason active = tables.resolveActive(nowMs);
         int activeSeasonId = active == null ? 0 : active.rule().getId();
         boolean[] retroExplicit = new boolean[1];

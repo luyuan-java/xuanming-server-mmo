@@ -261,6 +261,8 @@ message GlobalFormationRow {
   bytes custom_duel_rules = 24;
   // 公平 3×3 切磋 / 预设模式：开局冻结的 RankedMatchContext 字节载荷。
   bytes ranked_context = 25;
+  // 五行幻境周常爬塔开战标记（PVE_SOLO，透传给 PrepareBattleRequest）。
+  bool is_wuxing_tower = 26;
 }
 message GlobalPreparedEndpoint {
   uint64 player_id = 1;

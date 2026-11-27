@@ -180,6 +180,9 @@ public final class QueueService {
         } else if (!MatchModes.joinable(mode)) {
             return rejected(mode, JoinOutcome.MODE_NOT_OPEN, MatchTip.JOIN_MODE_NOT_OPEN);
         }
+        if (request.getIsWuxingTower() && mode != MatchModes.PVE_SOLO) {
+            return rejected(mode, JoinOutcome.MODE_NOT_OPEN, MatchTip.JOIN_MODE_NOT_OPEN);
+        }
         int vowMask = request.getTrialVowMask();
         if (vowMask != 0) {
             if (!com.game.match.ranked.RankedTables.isValidTrialVowMask(vowMask)
@@ -255,13 +258,14 @@ public final class QueueService {
         }
         String ticketId = ticketIds.get();
         if (mode == MatchModes.PVE_SOLO) {
-            return joinSoloPve(playerId, mode, configId, zoneId, ticketId, vowMask, d);
+            return joinSoloPve(playerId, mode, configId, zoneId, ticketId, vowMask, request.getIsWuxingTower(), d);
         }
         return joinQueued(playerId, mode, configId, zoneId, ticketId, d);
     }
 
     /** PVE_SOLO：不入队，直接建 matched 票，gather 交出去不等。 */
-    private JoinQueueResponse joinSoloPve(long playerId, int mode, int configId, int zoneId, String ticketId, int vowMask, Deadline d) {
+    private JoinQueueResponse joinSoloPve(long playerId, int mode, int configId, int zoneId, String ticketId,
+                                          int vowMask, boolean isWuxingTower, Deadline d) {
         if (!ids.leaseValid()) {
             log.warn("[match] PVE_SOLO 被拒：发号租约此刻无效（续期滞后），不建票 player={}", id(playerId));
             return rejected(mode, JoinOutcome.INTERNAL, MatchTip.BUSY);
@@ -284,7 +288,7 @@ public final class QueueService {
             return duplicate(playerId, mode, exists);
         }
         try {
-            gather.launch(GatherPlan.soloPve(configId, playerId, ticketId, vowMask));
+            gather.launch(GatherPlan.soloPve(configId, playerId, ticketId, vowMask, isWuxingTower));
         } catch (RuntimeException e) { // 约定里 launch 不抛；真抛了也不能留下一张没人收尾的 matched 票
             log.error("[match] PVE_SOLO 交出 gather 时出错，删票 player={} ticket={}", id(playerId), ticketId, e);
             rollback(playerId, ticketId, () -> tickets.delete(ref, d));

@@ -89,6 +89,12 @@ final class BattleContext {
     private int trialVowMask;
     /** 道友切磋坊 / 论剑 V7：本局冻结的自定义切磋规则（非自定义为 null）。 */
     private com.game.proto.CustomDuelRules customDuelRules;
+    /** 模块 A/B：双方五行阵法 ID（0..5）、人宠相生合击本回合受益单位集合、五行幻境上下文与符印汇总。 */
+    private int teamAFormationId;
+    private int teamBFormationId;
+    private final java.util.Set<Long> wuxingSynergyActorIds = new java.util.HashSet<>();
+    private com.game.proto.WuxingTowerBattleContext towerContext;
+    private final WuxingExpansionRules.TowerSigilTotals towerSigilTotals = new WuxingExpansionRules.TowerSigilTotals();
 
     /**
      * @param matchMode 请求里的 match_mode（uint32）；只有 4 / 5 算 PVE，其余一律非 PVE（{@code IsPveMatch}，{@code engine.cpp:1312-1315}）
@@ -143,6 +149,75 @@ final class BattleContext {
 
     boolean hasCustomDuelPolarity() {
         return customDuelRules != null && customDuelRules.getEnablePolarityRotation();
+    }
+
+    void setTeamFormationId(int teamIndex, int formationId) {
+        if (teamIndex == 0 && teamAFormationId == 0) {
+            teamAFormationId = formationId;
+        } else if (teamIndex == 1 && teamBFormationId == 0) {
+            teamBFormationId = formationId;
+        }
+    }
+
+    int teamFormationId(int teamIndex) {
+        return teamIndex == 0 ? teamAFormationId : (teamIndex == 1 ? teamBFormationId : 0);
+    }
+
+    void clearWuxingSynergy() {
+        wuxingSynergyActorIds.clear();
+    }
+
+    void markWuxingSynergyActor(long actorId) {
+        wuxingSynergyActorIds.add(actorId);
+    }
+
+    boolean isWuxingSynergyActive() {
+        return !wuxingSynergyActorIds.isEmpty();
+    }
+
+    boolean isWuxingSynergyActive(long actorId) {
+        return wuxingSynergyActorIds.contains(actorId);
+    }
+
+    void setTowerContext(com.game.proto.WuxingTowerBattleContext context) {
+        this.towerContext = context;
+    }
+
+    boolean hasTowerContext() {
+        return towerContext != null && towerContext.getFloor() != 0;
+    }
+
+    com.game.proto.WuxingTowerBattleContext towerContext() {
+        return towerContext;
+    }
+
+    WuxingExpansionRules.TowerSigilTotals towerSigilTotals() {
+        return towerSigilTotals;
+    }
+
+    int wuxingHealShieldBonusPct(BattleUnit caster) {
+        if (caster == null) {
+            return 0;
+        }
+        int pct = WuxingExpansionRules.formationOf(teamFormationId(caster.teamIndex())).healShieldBonusPct();
+        if (isWuxingSynergyActive(caster.actorId())) {
+            pct += WuxingExpansionRules.SYNERGY_BONUS_PCT;
+        }
+        if (hasTowerContext() && caster.teamIndex() == 0) {
+            pct += towerSigilTotals.healShieldPct;
+        }
+        return pct;
+    }
+
+    int wuxingControlResistPct(BattleUnit target) {
+        if (target == null) {
+            return 0;
+        }
+        int pct = WuxingExpansionRules.formationOf(teamFormationId(target.teamIndex())).controlResistPct();
+        if (hasTowerContext() && target.teamIndex() == 0) {
+            pct += towerSigilTotals.controlResistPct;
+        }
+        return pct;
     }
 
     boolean isSkillBanned(int skillTableId) {
@@ -459,7 +534,14 @@ final class BattleContext {
         return multiplier == 1 ? actor.defense() : ClassSkillRules.floorRatio(actor.defense(), multiplier);
     }
 
-    long effectiveSpeed(BattleUnit actor) { return effective(actor, actor.speed(), ClassSkillCombat.Stat.SPEED, BattleEffect.SPEED); }
+    long effectiveSpeed(BattleUnit actor) {
+        long base = effective(actor, actor.speed(), ClassSkillCombat.Stat.SPEED, BattleEffect.SPEED);
+        int formSpeedPct = WuxingExpansionRules.formationOf(teamFormationId(actor.teamIndex())).speedBonusPct();
+        if (formSpeedPct > 0 && Long.compareUnsigned(base, 0L) > 0) {
+            base = Unsigned.fromDoubleSaturating(Math.floor(Unsigned.toDouble(base) * (100.0 + formSpeedPct) / 100.0));
+        }
+        return base;
+    }
 
     void snapshotRoundStartSpeeds() {
         roundStartSpeeds.clear();
@@ -543,7 +625,11 @@ final class BattleContext {
         boolean critical = false;
         // 满暴击依然掷一次，零概率短路；纯计算拆分不能平移本局后续 RNG 序列。
         if (critChance > 0.0 && rng.rand01() < critChance) {
-            finalDamage *= BattleConstants.CRITICAL_DAMAGE_MULTIPLIER;
+            double critMult = BattleConstants.CRITICAL_DAMAGE_MULTIPLIER;
+            if (hasTowerContext() && caster.teamIndex() == 0 && towerSigilTotals.critDamagePct > 0) {
+                critMult += towerSigilTotals.critDamagePct / 100.0;
+            }
+            finalDamage *= critMult;
             critical = true;
         }
         return new FinalDamage(finalDamage < 0.0 ? 0.0 : finalDamage, critical);
@@ -593,6 +679,40 @@ final class BattleContext {
         if (sharpBonusPct > 0) {
             damage *= (100.0 + sharpBonusPct) / 100.0;
         }
+        // 五行阵法 + 阵法互克 + 人宠五行相生合击 + 五行幻境局内符印（均 0 时零改动）。
+        int attackerBonusPct = 0;
+        var srcForm = WuxingExpansionRules.formationOf(teamFormationId(caster.teamIndex()));
+        int dstFormId = teamFormationId(target.teamIndex());
+        attackerBonusPct += srcForm.damageBonusPct();
+        attackerBonusPct += WuxingExpansionRules.formationCounterBonusPct(srcForm.id(), dstFormId);
+        if (caster.isPet()) {
+            attackerBonusPct += srcForm.petDamageBonusPct();
+        }
+        if (isWuxingSynergyActive(caster.actorId())) {
+            attackerBonusPct += WuxingExpansionRules.SYNERGY_BONUS_PCT;
+        }
+        if (hasTowerContext() && caster.teamIndex() == 0) {
+            attackerBonusPct += towerSigilTotals.damagePct;
+            if (caster.isPet()) {
+                attackerBonusPct += towerSigilTotals.petDamagePct;
+            }
+            if (roundIndex <= 3) {
+                attackerBonusPct += towerSigilTotals.first3RoundsDamagePct;
+            }
+            if (towerSigilTotals.shieldBreakBonusPct > 0 && hasAnyActiveShield(target)) {
+                attackerBonusPct += towerSigilTotals.shieldBreakBonusPct;
+            }
+        }
+        if (attackerBonusPct > 0) {
+            damage *= (100.0 + attackerBonusPct) / 100.0;
+        }
+        int defenderReducePct = WuxingExpansionRules.formationOf(dstFormId).damageTakenReducePct();
+        if (hasTowerContext() && target.teamIndex() == 0) {
+            defenderReducePct += towerSigilTotals.damageTakenReducePct;
+        }
+        if (defenderReducePct > 0) {
+            damage *= Math.max(0.1, (100.0 - Math.min(defenderReducePct, 80)) / 100.0);
+        }
         return damage;
     }
 
@@ -602,6 +722,13 @@ final class BattleContext {
         long critRate = EquipmentCombatRules.criticalRate(caster.critChance(), caster.combat(), damageType);
         if (activeTournamentLeyline == TournamentLeylineElement.TOURNAMENT_LEYLINE_METAL) {
             critRate = EquipmentCombatRules.addSaturated(critRate, 5L);
+        }
+        int formCrit = WuxingExpansionRules.formationOf(teamFormationId(caster.teamIndex())).critBonusPct();
+        if (formCrit > 0) {
+            critRate = EquipmentCombatRules.addSaturated(critRate, formCrit);
+        }
+        if (hasTowerContext() && caster.teamIndex() == 0 && towerSigilTotals.critPct > 0) {
+            critRate = EquipmentCombatRules.addSaturated(critRate, towerSigilTotals.critPct);
         }
         double critChance = Unsigned.toDouble(critRate) / 100.0;
         var equipment = caster.state().getEquipmentEffects();

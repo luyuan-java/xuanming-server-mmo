@@ -63,6 +63,10 @@ final class ConfiguredImpact {
             amount *= (100.0 + Integer.toUnsignedLong(ctx.activeNextRoundBoostPct)) / 100.0;
             applyNextRoundHealBoost = true;
         }
+        int wuxingHealPct = ctx.wuxingHealShieldBonusPct(source);
+        if (wuxingHealPct > 0) {
+            amount *= (100.0 + wuxingHealPct) / 100.0;
+        }
         long healed = ctx.applyHeal(target, SupportEffectRules.applyBonus(amount,bonus) * received);
         if (applyNextRoundHealBoost && Long.compareUnsigned(healed, beforeNextRoundHealBoost) > 0) {
             ctx.activeNextRoundBoostExtra = EquipmentCombatRules.addSaturated(
@@ -119,6 +123,10 @@ final class ConfiguredImpact {
                     : 0.0;
             damage *= Math.max(0, 1 + battle.modifier(source, OUT_DAMAGE) + typedOutgoing + selfGrowingDirect + oneShotOutgoing);
             if (hit.origin == DIRECT && kind != BATTLE_HIT_COUNTER) damage *= 1 + PetCultivationRules.damageBonus(source,type);
+            if (singleTarget(source, hit) && ctx.hasTowerContext() && source.teamIndex() == 0
+                    && ctx.towerSigilTotals().singleTargetDamagePct > 0) {
+                damage *= (100.0 + ctx.towerSigilTotals().singleTargetDamagePct) / 100.0;
+            }
             damage *= Math.max(0,1+battle.modifier(target,IN_DAMAGE)+battle.hitVulnerabilityBonus(target));
             if (type == CombatDamageRules.MAGIC_DAMAGE) damage *= Math.max(0,1-battle.modifier(target,MAGIC_REDUCTION));
             if (kind == BATTLE_HIT_COMBO || hit.damageOrdinal > 0) damage *= Math.max(0,1-battle.modifier(target,LATER_REDUCTION));
@@ -227,6 +235,41 @@ final class ConfiguredImpact {
         trigger.actualDamage = dealt;
         if (dealt != 0 && (hit.origin == DIRECT || hit.origin == REDIRECT) && target.isActive()) battle.trigger(target,source,AFTER_TAKE,type,trigger);
         if (dealt != 0 && hit.origin == DOT && source.isActive()) battle.trigger(source,target,AFTER_PERIODIC,type,trigger);
+        // 五行幻境 V1 局内符印受击/暴击联动（403 暴击灼伤封顶 1500、302 受击回蓝、502/503 反震）。
+        if (ctx.hasTowerContext() && direct && hit.origin != REFLECTED) {
+            var totals = ctx.towerSigilTotals();
+            if (hit.critical && source.teamIndex() == 0 && totals.critBurnMaxHpPct > 0 && target.isActive()) {
+                long burn = Math.min(WuxingExpansionRules.FIRE_CRIT_BURN_CAP_PER_HIT,
+                        Math.max(1L, Long.divideUnsigned(target.maxHealth() * totals.critBurnMaxHpPct, 100L)));
+                long burnDealt = minUnsigned(target.health(), burn);
+                if (burnDealt > 0L) {
+                    target.setHealth(target.health() - burnDealt);
+                    ctx.events().append(BATTLE_EVENT_DAMAGE, source.actorId(), target.actorId())
+                            .setSkillTableId(hit.skill).setValue(burnDealt)
+                            .setTargetHealthAfter(target.health()).setTargetManaAfter(target.mana())
+                            .setHitKind(BATTLE_HIT_NORMAL).setDamageOrigin(DOT);
+                    if (target.health() == 0L) {
+                        ctx.handleDeath(target, source.actorId());
+                    }
+                }
+            }
+            if (dealt != 0L && target.teamIndex() == 0 && target.isActive()
+                    && totals.onHitManaRegenPct > 0 && Long.compareUnsigned(target.maxMana(), 0L) > 0
+                    && Long.compareUnsigned(target.mana(), target.maxMana()) < 0) {
+                long manaGain = Math.max(1L, Long.divideUnsigned(target.maxMana() * totals.onHitManaRegenPct, 100L));
+                long actual = target.restoreMana(manaGain);
+                if (actual > 0L) {
+                    ctx.events().append(BATTLE_EVENT_MANA, target.actorId(), target.actorId())
+                            .setValue(actual).setManaDelta(EventLog.signedManaDelta(actual, true))
+                            .setTargetManaAfter(target.mana());
+                }
+            }
+            if (dealt != 0L && target.teamIndex() == 0 && totals.reflectPct > 0 && source.isActive() && source != target) {
+                long reflected = Math.max(1L, Long.divideUnsigned(dealt * totals.reflectPct, 100L));
+                damage(target, source, toDouble(reflected), CombatDamageRules.PHYSICAL_DAMAGE,
+                        hit.derived(REFLECTED), BATTLE_HIT_NORMAL);
+            }
+        }
         return dealt;
     }
 

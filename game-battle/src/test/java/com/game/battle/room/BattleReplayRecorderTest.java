@@ -188,4 +188,42 @@ class BattleReplayRecorderTest {
         BattleReplayEnvelope trailingEnv = valid.toBuilder().setPayload(trailing).build();
         assertThatThrownBy(() -> BattleReplayRecorder.decode(trailingEnv)).isInstanceOf(IOException.class);
     }
+
+    @Test
+    void 录制战报写入参战玩家配装摘要含阵法门派五行灵宠赛季印技能上限12与幻境符印() throws Exception {
+        CreateBattleRequest.Builder req = sampleRequest().toBuilder()
+                .setRankedContext(com.game.proto.RankedMatchContext.newBuilder().setUseFreePreset(true));
+        var p = req.addPlayersBuilder()
+                .setPlayerId(11L)
+                .setPlayerName("青云剑客")
+                .setTeamIndex(0)
+                .setClassId(1)
+                .setLevel(45)
+                .setFormationId(3);
+        p.getEquipmentEffectsBuilder().getSeasonSealBuilder().setSealId(104);
+        p.addPetsBuilder().setPetTableId(3).setPetName("沧溟灵蛟");
+        for (int i = 1; i <= 15; i++) {
+            p.addSkillTableIds(1000 + i);
+        }
+        p.getTowerContextBuilder().setWeekKey(100).setRunId(2).setFloor(4).addActiveSigilIds(101).addActiveSigilIds(501);
+
+        BattleReplayRecorder recorder = new BattleReplayRecorder(
+                req.build(), "fingerprint-v1", BattleViews.forObserver(sampleState(1)));
+        BattleReplayEnvelope env = recorder.freeze(
+                eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 1, 1_700_000_010_000L).orElseThrow();
+        BattleReplay replay = BattleReplayRecorder.decode(env);
+        assertThat(replay.getActorBuildsList()).singleElement().satisfies(b -> {
+            assertThat(b.getPlayerId()).isEqualTo(11L);
+            assertThat(b.getName()).isEqualTo("青云剑客");
+            assertThat(b.getFormationId()).isEqualTo(3);
+            assertThat(b.getWuxingElement()).isEqualTo(1);
+            assertThat(b.getSeasonSealId()).isEqualTo(104);
+            assertThat(b.getActivePetTableId()).isEqualTo(3);
+            assertThat(b.getActivePetName()).isEqualTo("沧溟灵蛟");
+            assertThat(b.getActivePetElement()).isEqualTo(3);
+            assertThat(b.getSkillTableIdsList()).hasSize(12);
+            assertThat(b.getWuxingSigilIdsList()).containsExactly(101, 501);
+            assertThat(b.getUsedFreePreset()).isTrue();
+        });
+    }
 }

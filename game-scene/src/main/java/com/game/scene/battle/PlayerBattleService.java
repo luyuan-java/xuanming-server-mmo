@@ -374,9 +374,29 @@ public final class PlayerBattleService implements BattleHooks {
                     Integer.toUnsignedString(request.getBattleConfigId()));
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
         }
-        // 免费预设娱乐场、正式人宠会武、帮会全天帮战 V2、首领试炼、瑞兽迎春与归元城演武/残局/奇谈均以局内满血蓝无耗材快照入场，不受场外残血或 0 血阻断。
+        // 五行幻境周常爬塔（V1 10 层）：仅允许 PVE_SOLO、非瑞兽、非免费预设，并权威校验当前轮次与层数副本。
+        boolean isWuxingTower = request.getIsWuxingTower();
+        com.game.proto.WuxingTowerBattleContext towerContext = null;
+        if (isWuxingTower) {
+            if (request.getMatchMode() != com.game.battle.engine.BattleConstants.MATCH_MODE_PVE_SOLO
+                    || isFestivalBeast || useFreePreset || seasonService == null) {
+                return prepareRejected(INVALID_PARAMETER, Prepare.INVALID);
+            }
+            com.game.proto.WuxingTowerBattleContext.Builder towerBuilder = com.game.proto.WuxingTowerBattleContext.newBuilder();
+            int towerTip = seasonService.prepareWuxingTowerContext(player, clock.epochMillis(),
+                    request.getBattleConfigId(), towerBuilder);
+            if (towerTip != OK) {
+                log.warn("备战被拒：五行幻境轮次或层数副本校验未通过 player={} battle_id={} battle_config_id={} tip={}",
+                        Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
+                        Integer.toUnsignedString(request.getBattleConfigId()), towerTip);
+                return prepareRejected(towerTip, Prepare.INVALID);
+            }
+            towerContext = towerBuilder.build();
+        }
+        // 免费预设娱乐场、正式人宠会武、帮会全天帮战 V2、首领试炼、瑞兽迎春、五行幻境与归元城演武/残局/奇谈均以局内满血蓝无耗材快照入场，不受场外残血或 0 血阻断。
         boolean isGuildWar = com.game.battle.engine.BattleConstants.isGuildWarMatchMode(request.getMatchMode());
-        boolean isolateBattleTempState = useFreePreset || isFormalRanked || isGuildWar || isBossTrial || isGuardRescue || isFestivalBeast || isNpcIsolatedEncounter;
+        boolean isolateBattleTempState = useFreePreset || isFormalRanked || isGuildWar || isBossTrial
+                || isGuardRescue || isFestivalBeast || isNpcIsolatedEncounter || isWuxingTower;
         if (!isolateBattleTempState && player.attributes().health() == 0) {
             return prepareRejected(FEATURE_UNAVAILABLE, Prepare.DEAD);
         }
@@ -407,11 +427,25 @@ public final class PlayerBattleService implements BattleHooks {
                         request.getRankedContext().getRuleVersion());
                 return prepareRejected(INVALID_PARAMETER, Prepare.INVALID);
             }
-            snapshot = rankedSnap.get();
+            int formationId = seasonService != null
+                    ? seasonService.equippedFormationId(player)
+                    : player.season().equippedFormationId();
+            snapshot = formationId != 0
+                    ? rankedSnap.get().toBuilder().setFormationId(formationId).build()
+                    : rankedSnap.get();
         } else {
             BattlePlayerSnapshot.Builder snapBuilder = BattleSnapshots.build(player, tables, pets.buildBattleSnapshot(player), route,
                             world == null ? 0 : world.activeSeasonId(), clock.epochMillis(), battleId).toBuilder()
                     .setPetCaptureSlots(pets.availableCaptureSlots(player));
+            int formationId = seasonService != null
+                    ? seasonService.equippedFormationId(player)
+                    : player.season().equippedFormationId();
+            if (formationId != 0) {
+                snapBuilder.setFormationId(formationId);
+            }
+            if (towerContext != null) {
+                snapBuilder.setTowerContext(towerContext);
+            }
             if (seasonService != null) {
                 int weeklyAffix = seasonService.activeWeeklyAffixId(clock.epochMillis());
                 if (weeklyAffix != 0) {

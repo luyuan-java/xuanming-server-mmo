@@ -408,6 +408,10 @@ final class BattleEquipment {
         if (ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_WATER) {
             resist += 800.0;
         }
+        int wuxingControlResistPct = ctx.wuxingControlResistPct(target);
+        if (wuxingControlResistPct > 0) {
+            resist += wuxingControlResistPct * 100.0;
+        }
         boolean consumed = false;
         if (primary) {
             for (int i=0; i<equipment.getArtifactsCount(); i++) {

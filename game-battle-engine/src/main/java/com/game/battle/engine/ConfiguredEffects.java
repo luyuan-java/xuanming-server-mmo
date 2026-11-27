@@ -66,6 +66,10 @@ final class ConfiguredEffects {
             if (seasonShieldPct > 0) {
                 value *= (100.0 + seasonShieldPct) / 100.0;
             }
+            int wuxingShieldPct = ctx.wuxingHealShieldBonusPct(source);
+            if (wuxingShieldPct > 0) {
+                value *= (100.0 + wuxingShieldPct) / 100.0;
+            }
         }
         if (op == SHIELD && ctx.escalationStacks() > 0)
             value *= ctx.escalationSupportPct() / 100.0;

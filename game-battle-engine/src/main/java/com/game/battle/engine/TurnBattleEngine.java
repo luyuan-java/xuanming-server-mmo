@@ -246,6 +246,43 @@ public final class TurnBattleEngine {
 
         TurnBattleEngine engine = new TurnBattleEngine(request, data);
 
+        // 模块 A/B：校验并加载阵法（0..5）与五行幻境上下文（1..10 层、101..503 符印）。
+        for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
+            int formId = snapshot.getFormationId();
+            if (!WuxingExpansionRules.isValidFormationId(formId)) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "五行阵法配置非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                + " formation_id=" + Integer.toUnsignedString(formId));
+            }
+            if (formId != 0 && Integer.compareUnsigned(snapshot.getTeamIndex(), 1) <= 0) {
+                engine.ctx.setTeamFormationId(snapshot.getTeamIndex(), formId);
+            }
+            if (snapshot.hasTowerContext() && snapshot.getTowerContext().getFloor() != 0) {
+                var tc = snapshot.getTowerContext();
+                if (request.getMatchMode() != BattleConstants.MATCH_MODE_PVE_SOLO
+                        || engine.ctx.hasTowerContext()
+                        || tc.getFloor() < 1 || tc.getFloor() > WuxingExpansionRules.TOWER_MAX_FLOORS
+                        || tc.getRunId() == 0L) {
+                    return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                            "五行幻境上下文非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                    + " floor=" + Integer.toUnsignedString(tc.getFloor()));
+                }
+                for (int sigilId : tc.getActiveSigilIdsList()) {
+                    var def = WuxingExpansionRules.findTowerSigil(sigilId);
+                    if (def.id() == 0) {
+                        return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                                "五行幻境符印非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                        + " sigil_id=" + Integer.toUnsignedString(sigilId));
+                    }
+                    engine.ctx.towerSigilTotals().add(def);
+                }
+                engine.ctx.setTowerContext(tc);
+                if (tc.getLeylineElement() != com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED) {
+                    engine.ctx.setActiveTournamentLeyline(tc.getLeylineElement());
+                }
+            }
+        }
+
         // 回合上限与玩法配置：优先 DungeonTable.round_limit，其次物法易势默认 16 回合，正式排位缺省收敛到 20 回合，其余沿用 time_limit 换算。
         Optional<DungeonTable> dungeonRow = data.dungeon(request.getBattleConfigId());
         int bossTrialKind = BattleConstants.BOSS_TRIAL_KIND_NONE;
@@ -413,7 +450,7 @@ public final class TurnBattleEngine {
         engine.ctx.setMaxRounds(engine.maxRounds);
         engine.ctx.encounter.configure(bossTrialKind, battleDifficulty);
         int weeklyAffixId = BossTrialWeeklyAffixRules.resolveForBattle(
-                BattleConstants.isBossTrialKind(bossTrialKind), false,
+                BattleConstants.isBossTrialKind(bossTrialKind), engine.ctx.hasTowerContext(),
                 request.getCreatedAtMs(), request.getBossWeeklyAffixId());
         engine.ctx.encounter.configureWeeklyAffix(weeklyAffixId);
         if (request.hasTrialContext()) {
@@ -484,13 +521,13 @@ public final class TurnBattleEngine {
                 engine.applyTournamentEarthShieldIfActive();
             }
         }
-        // 锦标赛 V2 五行灵脉初始化：设置生效灵脉；土厚灵脉 8% 护盾在非变阵期立刻赋予，变阵期延后到 finalizePrepPhase 锁阵后统一赋予。
+        // 锦标赛 V2 五行灵脉与五行阵法/幻境开局护盾：非变阵期立刻赋予，变阵期延后到 finalizePrepPhase 锁阵后统一赋予。
         if (request.hasTournamentContext()) {
             var leyline = request.getTournamentContext().getLeylineElement();
             engine.ctx.setActiveTournamentLeyline(leyline);
-            if (!engine.prepActive) {
-                engine.applyTournamentEarthShieldIfActive();
-            }
+        }
+        if (!engine.prepActive) {
+            engine.applyTournamentEarthShieldIfActive();
         }
         // 赛季全员对称周环境词缀：未启用锦标赛五行灵脉、非瑞兽迎春/五行幻境爬塔/万象残局坊且全体玩家快照一致携带 1..4 时激活，分歧 fail-closed 退回 0。
         boolean hasFestival = request.hasActivityContext()
@@ -579,7 +616,9 @@ public final class TurnBattleEngine {
                     .setMagicAttack(snapshot.getMagicAttack())
                     .setDefense(snapshot.getDefense())
                     .setFormationSlot(ctx.nextFormationSlot(snapshot.getTeamIndex()))
-                    .putAllEquippedSkillVfx(snapshot.getEquippedSkillVfxMap());
+                    .putAllEquippedSkillVfx(snapshot.getEquippedSkillVfxMap())
+                    .setFormationSkinId(snapshot.getFormationSkinId())
+                    .setEntranceVictorySkinId(snapshot.getEntranceVictorySkinId());
             if (isRankedBattle()) {
                 int streak = request.getRankedContext().getMemberWinStreaksOrDefault(playerId, 0);
                 if (Integer.compareUnsigned(streak, BattleConstants.MIN_WIN_STREAK_HIGHLIGHT) >= 0) {
@@ -1125,6 +1164,15 @@ public final class TurnBattleEngine {
                     .setCritchance(BattleConstants.MONSTER_DEFAULT_CRIT_CHANCE)
                     .setSpeed(BattleConstants.MONSTER_DEFAULT_SPEED);
             actor.setMaxHealth(BattleConstants.MONSTER_DEFAULT_HEALTH);
+        }
+        if (ctx.hasTowerContext()) {
+            int floor = ctx.towerContext().getFloor();
+            int hpPct = WuxingExpansionRules.towerMonsterHealthPct(floor);
+            int atkPct = WuxingExpansionRules.towerMonsterAttackPct(floor);
+            long scaledHp = Math.max(1L, Long.divideUnsigned(actor.getMaxHealth() * hpPct, 100L));
+            long scaledStr = Math.max(1L, Long.divideUnsigned(attributes.getStrength() * atkPct, 100L));
+            actor.setMaxHealth(scaledHp);
+            attributes.setHealth(scaledHp).setStrength(scaledStr);
         }
         var dungeon = ctx.data().dungeon(request.getBattleConfigId());
         var pet = monsterRow.flatMap(row -> ctx.data().pet(row.getCapturePetTableId()));
@@ -1755,13 +1803,19 @@ public final class TurnBattleEngine {
     }
 
     private void applyTournamentEarthShieldIfActive() {
-        if (ctx.activeTournamentLeyline() != com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_EARTH) {
-            return;
-        }
+        boolean earthLeyline = ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_EARTH;
         for (BattleUnit unit : ctx.units()) {
-            if (unit.isActive() && Long.compareUnsigned(unit.maxHealth(), 0L) > 0
-                    && unit.tournamentEarthShield() == 0L) {
-                long shield = Math.max(1L, Long.divideUnsigned(unit.maxHealth() * 8L, 100L));
+            if (!unit.isActive() || Long.compareUnsigned(unit.maxHealth(), 0L) == 0
+                    || unit.tournamentEarthShield() != 0L) {
+                continue;
+            }
+            long shieldPct = earthLeyline ? 8L : 0L;
+            shieldPct += WuxingExpansionRules.formationOf(ctx.teamFormationId(unit.teamIndex())).openingShieldPct();
+            if (ctx.hasTowerContext() && unit.teamIndex() == 0) {
+                shieldPct += ctx.towerSigilTotals().openingShieldPct;
+            }
+            if (shieldPct > 0L) {
+                long shield = Math.max(1L, Long.divideUnsigned(unit.maxHealth() * shieldPct, 100L));
                 unit.addTournamentEarthShield(shield);
             }
         }
@@ -2292,22 +2346,58 @@ public final class TurnBattleEngine {
         }
 
         ctx.configured.beginRound();
-        // 锦标赛 V2 水润灵脉：每回合初为存活单位额外恢复 5% 最大法力（封顶至 max_mana）。
-        if (ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_WATER) {
-            for (BattleUnit unit : ctx.units()) {
-                if (!unit.isActive() || Long.compareUnsigned(unit.maxMana(), 0L) == 0) {
+        ctx.events().startRound(result);
+        // 模块 A：每第 3/6/9 回合检测人宠五行相生共鸣（金→水→木→火→土→金），触发 BATTLE_EVENT_WUXING_SYNERGY 并赋予伤害/治疗/护盾 +10%。
+        ctx.clearWuxingSynergy();
+        if (WuxingExpansionRules.isSynergyRound(ctx.roundIndex())) {
+            for (BattleUnit owner : ctx.units()) {
+                if (!owner.isPlayer() || !owner.isActive()) {
                     continue;
                 }
-                if (Long.compareUnsigned(unit.mana(), unit.maxMana()) >= 0) {
+                int ownerElem = WuxingExpansionRules.elementOfClass(owner.state().getClassId());
+                if (ownerElem == WuxingExpansionRules.ELEMENT_NONE) {
                     continue;
                 }
-                long regen = Math.max(1L, Long.divideUnsigned(unit.maxMana() * 5L, 100L));
+                for (BattleUnit pet : ctx.units()) {
+                    if (!pet.isPet() || pet.ownerPlayerId() != owner.actorId() || !pet.isActive()) {
+                        continue;
+                    }
+                    int petElem = WuxingExpansionRules.elementOfPet(pet.state().getPetTableId());
+                    if (WuxingExpansionRules.areElementsMutuallyGenerating(ownerElem, petElem)) {
+                        ctx.markWuxingSynergyActor(owner.actorId());
+                        ctx.markWuxingSynergyActor(pet.actorId());
+                        ctx.events().append(eBattleEventType.BATTLE_EVENT_WUXING_SYNERGY, owner.actorId(), pet.actorId())
+                                .setValue(WuxingExpansionRules.SYNERGY_BONUS_PCT);
+                        break;
+                    }
+                }
+            }
+        }
+        // 锦标赛 V2 水润灵脉 + 云垂阵 + 五行幻境回合初法力/气血恢复（均封顶至最大值）。
+        boolean waterLeyline = ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_WATER;
+        for (BattleUnit unit : ctx.units()) {
+            if (!unit.isActive()) {
+                continue;
+            }
+            long manaRegenPct = waterLeyline ? 5L : 0L;
+            manaRegenPct += WuxingExpansionRules.formationOf(ctx.teamFormationId(unit.teamIndex())).roundManaRegenPct();
+            if (ctx.hasTowerContext() && unit.teamIndex() == 0) {
+                manaRegenPct += ctx.towerSigilTotals().roundManaRegenPct;
+            }
+            if (manaRegenPct > 0L && Long.compareUnsigned(unit.maxMana(), 0L) > 0
+                    && Long.compareUnsigned(unit.mana(), unit.maxMana()) < 0) {
+                long regen = Math.max(1L, Long.divideUnsigned(unit.maxMana() * manaRegenPct, 100L));
                 unit.restoreMana(regen);
+            }
+            long hpRegenPct = (ctx.hasTowerContext() && unit.teamIndex() == 0) ? ctx.towerSigilTotals().roundHpRegenPct : 0L;
+            if (hpRegenPct > 0L && Long.compareUnsigned(unit.maxHealth(), 0L) > 0
+                    && Long.compareUnsigned(unit.health(), unit.maxHealth()) < 0) {
+                long regenHp = Math.max(1L, Long.divideUnsigned(unit.maxHealth() * hpRegenPct, 100L));
+                unit.setHealth(Math.min(unit.maxHealth(), EquipmentCombatRules.addSaturated(unit.health(), regenHp)));
             }
         }
         fillDefaultActions();
 
-        ctx.events().startRound(result);
         List<Long> order = buildTurnOrder();
         lastActionOrder = order;
         ctx.snapshotRoundStartSpeeds();
@@ -3498,6 +3588,14 @@ public final class TurnBattleEngine {
         if (tacticalPuzzleContext != null) {
             settlement.setTacticalPuzzleContext(tacticalPuzzleContext);
         }
+        if (ctx.hasTowerContext()) {
+            var tc = ctx.towerContext();
+            settlement.getTowerSettlementBuilder()
+                    .setWeekKey(tc.getWeekKey())
+                    .setRunId(tc.getRunId())
+                    .setFloor(tc.getFloor())
+                    .setTotalRounds(completedRounds());
+        }
         return settlement.build();
     }
 
@@ -3528,6 +3626,18 @@ public final class TurnBattleEngine {
                 .setSpectateChatEnabled(request.getSpectateChatEnabled());
         if (request.hasTournamentContext() && request.getTournamentContext().getMatchId() != 0L) {
             state.setTournamentContext(request.getTournamentContext());
+        }
+        if (ctx.teamFormationId(0) != 0) {
+            state.setTeamAFormationId(ctx.teamFormationId(0));
+        }
+        if (ctx.teamFormationId(1) != 0) {
+            state.setTeamBFormationId(ctx.teamFormationId(1));
+        }
+        if (ctx.isWuxingSynergyActive()) {
+            state.setWuxingSynergyActiveThisRound(true);
+        }
+        if (ctx.hasTowerContext()) {
+            state.setTowerContext(ctx.towerContext());
         }
         if (tacticalPuzzleContext != null) {
             state.setTacticalPuzzleContext(tacticalPuzzleContext);

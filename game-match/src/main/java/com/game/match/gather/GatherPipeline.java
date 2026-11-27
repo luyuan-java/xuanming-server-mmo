@@ -322,6 +322,9 @@ public final class GatherPipeline {
                 if (plan.activityContext() != null) {
                     reqBuilder.setActivityContext(plan.activityContext());
                 }
+                if (plan.isWuxingTower()) {
+                    reqBuilder.setIsWuxingTower(true);
+                }
                 PrepareBattleRequest request = reqBuilder.build();
                 switch (parts.scenes().prepare(request)) {
                     case ScenePreparer.Prepare.Ok ok -> {

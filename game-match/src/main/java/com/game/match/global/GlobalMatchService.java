@@ -290,6 +290,9 @@ public final class GlobalMatchService implements AutoCloseable {
                     return MatchTips.joinRejected(MatchTip.JOIN_MODE_NOT_OPEN);
                 }
             }
+            if(request.getIsWuxingTower()&&mode!=MatchModes.PVE_SOLO){
+                return MatchTips.joinRejected(MatchTip.JOIN_MODE_NOT_OPEN);
+            }
             int vowMask=request.getTrialVowMask();
             if(vowMask!=0){
                 boolean isSoloDirect=mode==MatchModes.PVE_SOLO||(mode==MatchModes.PVE_TEAM&&size==1);
@@ -379,9 +382,14 @@ public final class GlobalMatchService implements AutoCloseable {
         return store.joinRequestForTicket(ticket.getPlayerId(),ticket.getTicket())
                 .map(JoinQueueRequest::getTrialVowMask).orElse(0);
     }
+    private boolean isWuxingTowerForSoloTicket(GlobalTicketRow ticket){
+        if(ticket.getTeamSize()!=1||ticket.getMode()!=MatchModes.PVE_SOLO)return false;
+        return store.joinRequestForTicket(ticket.getPlayerId(),ticket.getTicket())
+                .map(JoinQueueRequest::getIsWuxingTower).orElse(false);
+    }
     private void tryImmediate(GlobalTicketRow ticket){
         try{var choice=GlobalRegionPolicy.choose(List.of(ticket),directory.list(0),store.now(),config);if(choice==null)return;
-            var battle=ids.nextBattleId();if(battle.isEmpty())return;launch(store.claim(choice.members(),formation(battle.getAsLong(),choice.node(),ticket.getMode(),ticket.getConfigId()).setRequeueOnFailure(true).setTrialVowMask(vowMaskForSoloTicket(ticket)).build(),false),true);
+            var battle=ids.nextBattleId();if(battle.isEmpty())return;launch(store.claim(choice.members(),formation(battle.getAsLong(),choice.node(),ticket.getMode(),ticket.getConfigId()).setRequeueOnFailure(true).setTrialVowMask(vowMaskForSoloTicket(ticket)).setIsWuxingTower(isWuxingTowerForSoloTicket(ticket)).build(),false),true);
         }catch(RuntimeException race){log.debug("单人原准入由全球恢复继续，不另造请求");}
     }
     public GetQueueStatusResponse status(long player) {
@@ -472,7 +480,7 @@ public final class GlobalMatchService implements AutoCloseable {
                     if(peers.size()+1!=anchor.getTeamSize())continue;
                     List<GlobalTicketRow> members=new ArrayList<>();members.add(anchor);members.addAll(peers);
                     var id=ids.nextBattleId();if(id.isEmpty())return;
-                    try{var f=store.claim(members,formation(id.getAsLong(),node,anchor.getMode(),anchor.getConfigId()).setRequeueOnFailure(true).setTrialVowMask(vowMaskForSoloTicket(anchor)).build(),false);launch(f,true);}
+                    try{var f=store.claim(members,formation(id.getAsLong(),node,anchor.getMode(),anchor.getConfigId()).setRequeueOnFailure(true).setTrialVowMask(vowMaskForSoloTicket(anchor)).setIsWuxingTower(isWuxingTowerForSoloTicket(anchor)).build(),false);launch(f,true);}
                     catch(RuntimeException e){log.debug("成局竞争失败，下一轮重读");}
                     return;
                 }
@@ -786,6 +794,9 @@ public final class GlobalMatchService implements AutoCloseable {
                 }
                 if (activityContext != null) {
                     prepBuilder.setActivityContext(activityContext);
+                }
+                if (f.getIsWuxingTower()) {
+                    prepBuilder.setIsWuxingTower(true);
                 }
                 var result=scenes.prepare(prepBuilder.build(),endpoint->store.prepared(initial,GlobalPreparedEndpoint.newBuilder().setPlayerId(player).setZoneId(endpoint.zoneId())
                         .setNodeId(endpoint.nodeId()).setHost(endpoint.target().host()).setPort(endpoint.target().port()).setInstanceId(endpoint.target().instanceId()).build()));
