@@ -98,13 +98,15 @@ public class MatchFeatureConfiguration {
     }
 
     @Bean
-    public MatchMethodHandler listBattleReportsHandler(BattleReportStore store) {
-        return BattleReportHandlers.listHandler(store);
+    public MatchMethodHandler listBattleReportsHandler(BattleReportStore store, DataSource dataSource) {
+        return BattleReportHandlers.listHandler(store,
+                com.game.common.player.PlayerSessionAuthority.readOnlyChecker(dataSource, 2));
     }
 
     @Bean
-    public MatchMethodHandler getBattleReportHandler(BattleReportStore store) {
-        return BattleReportHandlers.getHandler(store);
+    public MatchMethodHandler getBattleReportHandler(BattleReportStore store, DataSource dataSource) {
+        return BattleReportHandlers.getHandler(store,
+                com.game.common.player.PlayerSessionAuthority.readOnlyChecker(dataSource, 2));
     }
 
     // ---- 五行试炼志 V3 好友约战帖与受控 PVE 录像播放（570–572） ----
@@ -170,8 +172,10 @@ public class MatchFeatureConfiguration {
 
     @Bean
     public BattleScriptService battleScriptService(BattleScriptStore store, BattleScriptCatalog catalog,
-                                                   BattleScriptValidator.Tables tables, MatchIds matchIds) {
-        return new BattleScriptService(store, catalog, tables, () -> matchIds.nextBattleId().orElse(0L));
+                                                   BattleScriptValidator.Tables tables, MatchIds matchIds,
+                                                   DataSource dataSource) {
+        return new BattleScriptService(store, catalog, tables, () -> matchIds.nextBattleId().orElse(0L))
+                .withReadOnlyOwnerCheck(com.game.common.player.PlayerSessionAuthority.readOnlyChecker(dataSource, 2));
     }
 
     @Bean

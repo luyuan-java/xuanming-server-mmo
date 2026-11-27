@@ -157,4 +157,41 @@ class RenewSessionHandlerTest {
         assertThat(body.getRenewAfterSeconds()).isEqualTo(45);
         assertThat(reply.directives()).isEmpty();
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void 故障恢复后续租重建缺失反查键且不复活已关闭墓碑() {
+        // 1. 验证 TOUCH_SESSION_SCRIPT 在反查键过期缺失时使用 ARGV[3](account) 写回，遇到关闭墓碑返回 -1
+        RedissonClient redis = mock(RedissonClient.class);
+        RScript script = mock(RScript.class);
+        RBucket<Object> bucket = mock(RBucket.class);
+        when(redis.getBucket(anyString(), any(Codec.class))).thenReturn(bucket);
+        when(bucket.get()).thenReturn(null);
+        when(redis.getScript(any(Codec.class))).thenReturn(script);
+        when(script.eval(eq(RScript.Mode.READ_WRITE), anyString(), eq(RScript.ReturnType.INTEGER), anyList(), any(Object[].class)))
+                .thenReturn(1L);
+
+        RedisLoginDevices devices = new RedisLoginDevices(
+                redis, new RedisKeys(GameNamespace.of("game")),
+                Clock.fixed(Instant.ofEpochMilli(2_000_000L), ZoneOffset.UTC),
+                Duration.ofMinutes(30), 3);
+        assertThat(devices.admit("acc-recover", "gate-2/88")).isEqualTo(LoginDevices.Admission.ADMITTED);
+        ArgumentCaptor<String> scriptCaptor = ArgumentCaptor.forClass(String.class);
+        verify(script, org.mockito.Mockito.atLeast(2))
+                .eval(eq(RScript.Mode.READ_WRITE), scriptCaptor.capture(), eq(RScript.ReturnType.INTEGER), anyList(), any(Object[].class));
+        assertThat(scriptCaptor.getAllValues())
+                .anySatisfy(lua -> assertThat(lua).contains("elseif ARGV[3]").contains("SET"));
+
+        // 2. 已关闭会话留墓碑后，续租返回 renewed=false 不复活
+        LoginDevices closedDevices = mock(LoginDevices.class);
+        when(closedDevices.admit("acc-recover", "gate-2/89")).thenReturn(LoginDevices.Admission.CLOSED);
+        AccountLogin accountLogin = new AccountLogin(mock(LoginAuthenticator.class), mock(PlayerStore.class),
+                mock(LoginTokens.class), closedDevices);
+        RenewSessionHandler handler = new RenewSessionHandler(accountLogin, Duration.ofMinutes(30));
+        SessionContext closedSession = SessionContext.newBuilder()
+                .setGateNodeId(2).setGateInstanceId("gate-2").setSessionId(89).setAccount("acc-recover").build();
+        HandlerReply reply = handler.handle(closedSession, RenewSessionRequest.getDefaultInstance()).join();
+        RenewSessionResponse body = (RenewSessionResponse) reply.body().orElseThrow();
+        assertThat(body.getRenewed()).isFalse();
+    }
 }

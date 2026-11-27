@@ -1823,23 +1823,12 @@ C++ 版设计见 C++ 仓 `docs/design/gate-client-heartbeat.md` §14。
 - **服务端链路证据 PASS**：旧 session `131074` 被 gate 以 `silent_ms=30930` 强关，scene 进入断线保留，4906 ms 后由新 session `131076` 接回同场景、同实体。gate / scene 在验收期间未重启；场景退出、实体销毁与 `ExitRelease` 标记写入均在本次记录窗口内完成。证据为同目录 `server-heartbeat-evidence.json`、`server-heartbeat-evidence.log`。
 - **Java 与归档边界**：11-06 的 Java gate / robot **1054 项通过、3 项环境条件跳过（含新增心跳 22 项全部通过）**继续作为当日历史证据，原有整编/SQL 门禁失败记录保留；本次 C++ 实测不替代 Java 真栈验收，也不证明那些历史阻塞现已解除。11-10「战斗直连应用层心跳」是后续独立任务，其 Java 待做状态不变，不属于本次 gate 大厅心跳归档范围。
 
-### 2026-11-11 gate 会话身份签名改 Ed25519，验证方只持公钥（主仓已落码未编译，Java 待核对）
+### 2026-11-11 gate 会话身份签名改 Ed25519，验证方只持公钥（Java 已对齐）
 
-- 主仓 commit：工作区未提交（main）。Java 版本 `0.1.0-SNAPSHOT`，待核对。
-- 服务端内部改动，不涉及客户端契约。主仓说明见：
-  - `docs/design/gate-online-identity.md` §3、§4、§10.1；
-  - 验收清单 `docs/handoff/gate-online-identity-simplify-20261105/CODEX.md` 第 9 节。
-
-- **主仓的口径**：
-  - gate 发往在线服务的会话身份声明，签名由全体共用的 HMAC 密钥改成 gate 独有的 Ed25519 私钥；
-  - login 与 7 个在线服务只持公钥，签不出名，任何一个验证方被攻破都冒充不了 gate；
-  - 公钥列表可以新旧并列，用于不停服轮换；
-  - gate 启动时核对私钥与公钥列表配对。
-- **Java 要核对**：Java 网关把玩家身份传给 game-guild、game-trade 等在线服务时，验证方手里的凭据能不能用来签发新的身份声明。
-  - 例如：Dubbo 调用里的共享令牌，或者各服务共用的一把 HMAC。
-  - 能签的话，按同一口径改成「只有网关能签、验证方只能验」：非对称签名，或每个服务各自只持本服务的验证凭据。
-  - 改完补公开接口回归：验证方伪造的身份声明被拒；轮换期新旧公钥都认；配对错误时网关拒启。
-- 本条只登记待核对，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已对齐（设计见 `docs/design/gate-online-identity.md` §3、§4、§10.1）：
+- `game-common` 新增 `GateSessionIdentityAuth`（基于 JDK 21 原生 `Ed25519`）：仅 `game-gate` 持有私钥（`GAME_GATE_IDENTITY_PRIVATE_KEY`），login 与在线服务只持公钥列表（`GAME_GATE_IDENTITY_PUBLIC_KEYS`，支持多把公钥并列不停服轮换，验证端调用 `sign` 抛出 `UnsupportedOperationException`）；`forSigner` 启动时签发探针核对私钥与公钥列表配对，不配对直接拒启。
+- `game-api` 新增 `GateSessionPayload` 并接入 `DubboAuthConsumerFilter` / `DubboAuthProviderFilter`：对 `ClientMessageService`（`handle`/`sessionClosed`/`abandonEnter`）的完整 `SessionContext`（`gate_node_id`/`gate_instance_id`/`session_id`/`zone_id`/`account`/`player_id`/`owner_revision` 等）及时间戳附加并强验 Ed25519 签名（`x-gate-id-ts` / `x-gate-id-sig`，支持 `GAME_GATE_IDENTITY_REQUIRED=true` 生产强制 fail-closed）；`game-gate` `GateConfiguration.gateSessionIdentityKeyCheck` 在启动阶段执行密钥配对自检。
+- **验证**：`game-common` `GateSessionIdentityAuthTest` 2/2 PASS；`game-api` `GateSessionIdentityFilterTest` + `DubboAuthFilterTest` + `KillSwitchProviderFilterTest` **11/11 PASS**；`game-gate` `GateConfigurationTest` + `ClientDispatcherTest` **115/115 PASS**。
 
 ### 2026-11-11 缺口清单第 17、20、25 条不等压测直接定案(主仓已落码未编译,Java 待做)
 
@@ -2144,24 +2133,13 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 4. **收件箱单人对账键集翻页且只读判定列**：`game-inbox` `InboxSql.RECONCILE_ITEM_COLUMNS` + `InboxAdminStore.reconcilePlayer` 去掉 5000 行上限，按 `(domain, seq)` 键集翻页读完且不读 `payload`，预算耗尽抛错不回半份。
 5. **验证**：`game-trade` `DeliveryOrderAndTxTypeTest` 等 **28 tests / 0 fail**（1 TiDB skip）；`game-scene` `AssetOpServiceTest` 等 **50/50 PASS**；`game-inbox` `InboxAdminReconcilePaginationTest` 等 **18/18 PASS**。
 
-### 2026-11-12 gate 续租登录态、只读方法核归属、在线服务端口白名单与 Pod 间加密（主仓已落码未编译，Java 待做；补 11-11「gate 会话身份签名改 Ed25519」）
+### 2026-11-12 gate 续租登录态、只读方法核归属、在线服务端口白名单与 Pod 间加密（Java 已对齐；补 11-11「gate 会话身份签名改 Ed25519」）
 
-- 主仓 commit：工作区未提交（main）。Java 版本 `0.1.0-SNAPSHOT`，待做，本轮不写 Java 代码。
-- 主仓说明见：
-  - `docs/design/gate-online-identity.md` §9.3「读路径归属」、§10.2～§10.4；
-  - 验收清单 `docs/handoff/gate-online-identity-simplify-20261105/CODEX.md` 第 10 节。
-
-- **客户端契约（两版要同批的部分）**：`login.proto` 的 `ClientPlayerLogin` 多了一个 SERVER_ONLY 方法 `RenewSession`（请求体为空，应答 `renewed`、`renew_after_seconds`），消息号表多一个 `ClientPlayerLoginRenewSession`。只有 gate 合成，客户端不发；客户端发来的在 gate 入口拒绝。
-  - Java TODO：同步 `game-proto` 的 `login.proto` 与消息号表，保证两版消息号一致；网关对客户端发来的这个消息号同样拒绝。
-- **设备数上限按在线连接计数**：
-  - 主仓的口径：登录态有寿命，只作「连接断了、断线通知又没送到」时的回收兜底。连接活着期间由 gate 每三分之一寿命替它续租一次，登录态与账号设备集成员跟着续；连接断了没人续，最长一个寿命后过期。间隔由 login 给出，寿命只在 login 配。
-  - Java 要核对：账号的设备数上限是不是按「登录态没过期」计数；在线超过登录态寿命的连接会不会不再计入上限。会的话按 Java 惯用方式补续期（网关侧定时续，或用带滑动过期的会话存储），不照抄主仓的 RPC。
-- **只读方法核归属**：
-  - 主仓的口径：读调用者私有数据的方法必须核「角色此刻仍归这份登录时的账号与归属修订」，公开数据不核。写路径本来就在提交点核；这次补的是不进写事务的只读方法：战报列表与回放、作战脚本列表、我的货架、收藏、盘口挂单列表。角色过户、删除之后旧连接的这些请求一律拒绝；角色冻结期间仍可读。交易里的私有历史按合同里存的原账号与修订筛，新主看不到旧主留下的挂单。
-  - Java 要核对：game-match、game-trade、game-guild 等服务的只读接口在角色过户、删除之后，旧会话还能不能读到这名角色的数据；能的话补上归属检查。
-- **部署**：
-  - 主仓的口径：预发与生产必须给 login 与 7 个在线服务的 RPC 端口加 NetworkPolicy 白名单，只放行登记过的调用方；Pod 间流量必须透明加密（CNI 的 WireGuard），部署前检核不到就拒绝部署。
-  - Java 要核对：Java 版的 K8s 部署是否同样要求这两项；Dubbo 端口有没有只放行真实调用方。
+2026-11-27 已对齐（设计见 `docs/design/gate-online-identity.md` §9.3、§10.2～§10.4）：
+- **客户端契约与周期续租**：`game-proto` 已同步 `ClientPlayerLogin.RenewSession`（394，`SERVER_ONLY`），`game-gate` `ClientDispatcher` 在入口拒绝客户端上行并按 login 下发的 `sessionTtl / 3` 周期代发续租；`game-login` `RenewSessionHandler` + `AccountLogin.renewSession` 同步续期设备登记与防沉迷账本。
+- **只读方法核归属**：`game-common` `PlayerSessionAuthority` 新增 `verifyReadOnly` / `readOnlyChecker`（不加锁、不拒角色冻结 `trade_listing_id != 0`，角色过户或删除一律拒绝）；已接入 `game-match`（`BattleReportHandlers` 战报列表/回放、`BattleScriptService` 作战脚本列表与配置）、`game-trade`（`TradeDispatcher` 我的货架/收藏浏览/订单/盘口挂单，公开浏览不核；`CommerceClientService.matchesPrivateActor` 按合同 `seller_identity`/`buyer_identity` 原账号与修订过滤，新主看不到旧主挂单）与 `game-guild`（`GuildDispatcher` 私有只读接口，公开 `GetGuild`/排行榜不核）。
+- **K8s 端口白名单与 WireGuard 加密门禁**：新增 `deploy/k8s/network-policies.yaml`（`game-login-rpc-whitelist` 与 `game-online-services-rpc-whitelist` Dubbo 端口白名单）与 `tools/k8s-netpol-wg-check.ps1` 部署前/后门禁脚本（集群真环境待运维在目标 K8s 执行实测）。
+- **验证**：`game-common` 5/5、`game-api` 11/11、`game-gate` 115/115、`game-login` 25/25、`game-match` `ReadOnlyOwnershipTest` 1/1、`game-trade` `TradeReadOnlyOwnershipTest` + `TradeDispatcherTest` + `CommerceRuntimeTest` **27/27 PASS**（1 TiDB skip）、`game-guild` `GuildReadOnlyOwnershipTest` + `GuildDispatcherTest` **17/17 PASS**。
 
 ### 2026-11-12 微信 / 抖音小游戏登录（Java 已对齐）
 
@@ -2319,18 +2297,12 @@ Java 版按同一口径要做的事(只登记,没改 Java 代码):
 
 都是服务端内部行为,不涉及客户端契约。本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-12 gate 续租的故障恢复与 Pod 间加密逐节点核对(补同日「gate 续租登录态、只读方法核归属、在线服务端口白名单与 Pod 间加密」;主仓已落码未编译,Java 待做)
+### 2026-11-12 gate 续租的故障恢复与 Pod 间加密逐节点核对（Java 已对齐）
 
-- 主仓 commit:工作区未提交(main)。Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
-- 主仓说明见 `docs/design/gate-online-identity.md` §7.3、§10.3、§10.4,验收清单 `docs/handoff/gate-online-identity-simplify-20261105/CODEX.md` 第 11 节。
-- 不涉及客户端契约。
-- **设备上限在故障之后能否恢复计数**:
-  - 主仓的口径:登录态续期连续失败超过它的寿命(登录服务或它的 Redis 长时间不可用)时登录态会过期。已经进了游戏的连接,恢复后的第一次续期按登录服务自己在绑定角色时留的账号副本重建登录态,重新计入设备上限。重建只认登录服务自己的记录,不信网关带来的账号;被断线或离场清掉的登录态不会被重建。
-  - Java 要核对:如果 Java 版按上一条 TODO 补了续期,故障恢复之后在线连接能不能重新计数,还是要等玩家重新登录。
-- **Pod 间加密的部署前检逐节点核对**:
-  - 主仓的口径:只看网络插件的 WireGuard 开关不够,还要每个节点都有 WireGuard 公钥。Calico 看 Node 注解 `projectcalico.org/WireguardPublicKey`,Cilium 看 CiliumNode 注解 `network.cilium.io/wg-pub-key`。Calico 在内核不支持的节点上不报错,只是不加密。
-  - 部署后用 `tools/scripts/k8s_netpol_probe.ps1` 在集群上实测端口白名单与加密。
-  - Java 要核对:Java 版的部署如果也要求 Pod 间加密,是否同样逐节点核对;端口白名单是否有同类的集群实测。
+2026-11-27 已对齐（设计见 `docs/design/gate-online-identity.md` §7.3、§10.3、§10.4）：
+- **故障恢复后续租重建计数**：`game-login` `AccountLogin` 在绑定时留存本服务的 `recordedSessionAccounts` 副本（进游戏离窗与断线均清理），续租优先认本服务记录的归属账号（跨副本则认 gate Ed25519 签名后的 `SessionContext`）；`RedisLoginDevices.TOUCH_SESSION_SCRIPT` 保持单键 Redis Cluster 安全，遇到因 Redis 故障/重启过期的缺失反查键自动重建并续期，遇到已关闭墓碑 `CLOSED_MARKER` 一律返回 `-1` 不复活。
+- **Pod 间加密逐节点核对与集群实测脚本**：`tools/k8s-netpol-wg-check.ps1` 逐节点校验 Calico `projectcalico.org/WireguardPublicKey` 或 Cilium `network.cilium.io/wg-pub-key` 注解（任一节点缺失直接拒签部署），校验 `deploy/k8s/network-policies.yaml` 已生效，并提供 `-ProbeLive` 集群端口白名单实测入口（真实 K8s 集群待部署环境执行）。
+- **验证**：`game-login` `RenewSessionHandlerTest` 5/5 + `LoginHandlerTest` 20/20 = **25/25 PASS**。
 
 ### 2026-11-12 场景 lane 补旧场景消息闸(补上一条「场景 lane 收尾定案」;主仓已落码未编译,Java 待做)
 

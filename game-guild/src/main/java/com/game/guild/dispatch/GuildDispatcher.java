@@ -147,6 +147,23 @@ public final class GuildDispatcher {
     private final Executor executor;
     private final GuildMetrics metrics;
     private final long budgetMillis;
+    private volatile com.game.common.player.PlayerSessionAuthority.ReadOnlyOwnerCheck ownerCheck;
+
+    /** 帮会私有只读方法（公开帮会信息与排行榜不核）。 */
+    private static final Set<String> PRIVATE_READ_METHODS = Set.of(
+            GuildMethods.GET_PLAYER_GUILD,
+            GuildMethods.LIST_MY_GUILD_APPLICATIONS,
+            GuildMethods.LIST_GUILD_APPLICATIONS,
+            GuildMethods.GET_GUILD_DONATE_OPTIONS,
+            GuildMethods.GET_GUILD_SHOP
+    );
+
+    /** 挂载只读角色归属核对器：角色过户/删除后拒读调用者私有帮会信息，冻结期间仍允许读。 */
+    public GuildDispatcher withReadOnlyOwnerCheck(
+            com.game.common.player.PlayerSessionAuthority.ReadOnlyOwnerCheck ownerCheck) {
+        this.ownerCheck = ownerCheck;
+        return this;
+    }
 
     /**
      * @param executor     {@code guild-worker} 工作池（测试可传同步执行器）
@@ -392,6 +409,22 @@ public final class GuildDispatcher {
             metrics.requestCompleted(sample, route.method(), RequestResult.OVERLOADED);
             reply.complete(route.inBand(GuildTip.OVERLOADED.proto()));
             return;
+        }
+        var check = this.ownerCheck;
+        if (check != null && PRIVATE_READ_METHODS.contains(route.method())) {
+            try {
+                if (session == null || !check.isCurrentOwner(me, session.getAccount(), session.getOwnerRevision())) {
+                    log.warn("[guild] 私有只读接口角色归属已失效 method={} {}", route.method(), describe(session));
+                    metrics.requestCompleted(sample, route.method(), RequestResult.UNAUTHENTICATED);
+                    reply.complete(envelope(GuildTips.SERVICE_UNAVAILABLE));
+                    return;
+                }
+            } catch (java.sql.SQLException e) {
+                log.error("[guild] 私有只读接口归属查询失败 method={} {}", route.method(), describe(session), e);
+                metrics.requestCompleted(sample, route.method(), RequestResult.INTERNAL_ERROR);
+                reply.complete(envelope(GuildTips.SERVICE_UNAVAILABLE));
+                return;
+            }
         }
         CompletableFuture<? extends Message> response;
         try {

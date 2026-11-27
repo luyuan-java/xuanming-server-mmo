@@ -32,6 +32,12 @@ public final class BattleReportHandlers {
     }
 
     public static MatchMethodHandler listHandler(BattleReportStore store) {
+        return listHandler(store, null);
+    }
+
+    public static MatchMethodHandler listHandler(
+            BattleReportStore store,
+            com.game.common.player.PlayerSessionAuthority.ReadOnlyOwnerCheck ownerCheck) {
         Objects.requireNonNull(store, "store");
         return new MatchMethodHandler() {
             @Override public String method() { return MatchMethods.LIST_BATTLE_REPORTS; }
@@ -45,6 +51,10 @@ public final class BattleReportHandlers {
                     return Reply.body(ListBattleReportsResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build());
                 }
                 try {
+                    if (ownerCheck != null && !ownerCheck.isCurrentOwner(
+                            playerId, session.getAccount(), session.getOwnerRevision())) {
+                        return Reply.body(ListBattleReportsResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build());
+                    }
                     List<BattleReportSummary> reports = store.listReports(playerId);
                     return Reply.body(ListBattleReportsResponse.newBuilder()
                             .setErrorMessage(tip(0))
@@ -64,6 +74,12 @@ public final class BattleReportHandlers {
     }
 
     public static MatchMethodHandler getHandler(BattleReportStore store) {
+        return getHandler(store, null);
+    }
+
+    public static MatchMethodHandler getHandler(
+            BattleReportStore store,
+            com.game.common.player.PlayerSessionAuthority.ReadOnlyOwnerCheck ownerCheck) {
         Objects.requireNonNull(store, "store");
         return new MatchMethodHandler() {
             @Override public String method() { return MatchMethods.GET_BATTLE_REPORT; }
@@ -80,6 +96,10 @@ public final class BattleReportHandlers {
                     return Reply.body(GetBattleReportResponse.newBuilder().setErrorMessage(tip(ERR_NOT_FOUND)).build());
                 }
                 try {
+                    if (ownerCheck != null && !ownerCheck.isCurrentOwner(
+                            playerId, session.getAccount(), session.getOwnerRevision())) {
+                        return Reply.body(GetBattleReportResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build());
+                    }
                     Optional<BattleReplayEnvelope> found = store.getReport(playerId, req.getBattleId());
                     if (found.isEmpty()) {
                         return Reply.body(GetBattleReportResponse.newBuilder().setErrorMessage(tip(ERR_NOT_FOUND)).build());

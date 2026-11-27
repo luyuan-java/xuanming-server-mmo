@@ -1,0 +1,89 @@
+# 预发 / 生产环境在线服务 Dubbo RPC 端口白名单（对齐主仓 gate-online-identity.md §10.2）：
+# 默认拒绝全部非白名单 Pod 访问在线服务的 Dubbo Triple 端口，只放行登记过的调用方。
+# 部署前须配合 tools/k8s-netpol-wg-check.ps1 逐节点核对 CNI WireGuard 公钥加密。
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: game-login-rpc-whitelist
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: game-login
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [game-gate, game-gateway, game-trade, game-gm-admin]
+      ports:
+        - protocol: TCP
+          port: 20881
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: game-online-services-rpc-whitelist
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - game-chat
+          - game-friend
+          - game-mail
+          - game-guild
+          - game-trade
+          - game-team
+          - game-match
+          - game-rank
+          - game-inbox
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - game-gate
+                  - game-gateway
+                  - game-scene
+                  - game-scene-manager
+                  - game-login
+                  - game-guild
+                  - game-trade
+                  - game-team
+                  - game-match
+                  - game-rank
+                  - game-mail
+                  - game-inbox
+                  - game-gm-admin
+      ports:
+        - protocol: TCP
+          port: 20880
+        - protocol: TCP
+          port: 20882
+        - protocol: TCP
+          port: 20883
+        - protocol: TCP
+          port: 20884
+        - protocol: TCP
+          port: 20885
+        - protocol: TCP
+          port: 20886
+        - protocol: TCP
+          port: 20887
+        - protocol: TCP
+          port: 20888
+        - protocol: TCP
+          port: 20889
+        - protocol: TCP
+          port: 20890
+        - protocol: TCP
+          port: 20891
+        - protocol: TCP
+          port: 20892

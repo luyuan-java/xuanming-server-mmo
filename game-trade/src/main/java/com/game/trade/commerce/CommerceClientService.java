@@ -136,7 +136,13 @@ public final class CommerceClientService {
                     order(engine.mutate(me, id(((CancelConsignmentRequest) input).getListingId()), "cancel", d));
                 case "CancelCommerceOrder" ->
                     order(engine.mutate(me, id(((CancelCommerceOrderRequest) input).getOrderId()), "cancel", d));
-                case "GetCommerceOrder" -> order(engine.get(me, id(((GetCommerceOrderRequest) input).getOrderId())));
+                case "GetCommerceOrder" -> {
+                    var row = engine.get(me, id(((GetCommerceOrderRequest) input).getOrderId()));
+                    if (!matchesPrivateActor(row, me, engine.actor())) {
+                        throw new Refusal(MISSING);
+                    }
+                    yield order(row);
+                }
                 case "ListCommerceOrders" -> {
                     var in = (ListCommerceOrdersRequest) input;
                     var out = ListCommerceOrdersResponse.newBuilder().setServerNowMs(engine.clock.getAsLong());
@@ -153,8 +159,12 @@ public final class CommerceClientService {
                         after = "";
                     for (var r : engine.store.list("commerce_id>? AND kind<>1 AND (seller_player_id=? OR "
                                  + "buyer_player_id=?) ORDER BY commerce_id LIMIT ?",
-                             cursor(after), me, me, limit(in.getLimit(), 100)))
-                        out.addOrders(view(r)).setNextCursor(Long.toUnsignedString(r.getCommerceId()));
+                             cursor(after), me, me, limit(in.getLimit(), 100))) {
+                        out.setNextCursor(Long.toUnsignedString(r.getCommerceId()));
+                        if (matchesPrivateActor(r, me, engine.actor())) {
+                            out.addOrders(view(r));
+                        }
+                    }
                     yield out.build();
                 }
                 case "PlaceMarketOrder" ->
@@ -171,8 +181,12 @@ public final class CommerceClientService {
                     var out = ListMarketOrdersResponse.newBuilder();
                     for (var r : engine.store.list(
                              "commerce_id>? AND seller_player_id=? AND kind=4 AND side<>0 ORDER BY commerce_id LIMIT ?",
-                             cursor(in.getCursor()), me, limit(in.getLimit(), 100)))
-                        out.addOrders(market(r)).setNextCursor(Long.toUnsignedString(r.getCommerceId()));
+                             cursor(in.getCursor()), me, limit(in.getLimit(), 100))) {
+                        out.setNextCursor(Long.toUnsignedString(r.getCommerceId()));
+                        if (matchesPrivateActor(r, me, engine.actor())) {
+                            out.addOrders(market(r));
+                        }
+                    }
                     yield out.build();
                 }
                 case "ListTradeMarkets" ->
@@ -233,6 +247,26 @@ public final class CommerceClientService {
             return rejection(prototype, com.game.table.CommonErrorTip.common_error.kServiceUnavailable_VALUE);
         }
     }
+    /** 私有历史按合同内记录的原账号与 owner_revision 过滤，新主看不到旧主留下的挂单与订单。 */
+    static boolean matchesPrivateActor(TradeCommerceRow r, long me, com.game.api.proto.SessionContext actor) throws SQLException {
+        if (actor == null || actor.getOwnerRevision() <= 0 || actor.getAccount().isEmpty()) {
+            return true;
+        }
+        var w = CommerceEngine.workflow(r);
+        if (r.getSellerPlayerId() == me && identityMatches(w.getSellerIdentity(), actor)) {
+            return true;
+        }
+        return r.getBuyerPlayerId() == me && identityMatches(w.getBuyerIdentity(), actor);
+    }
+
+    private static boolean identityMatches(com.game.proto.trade.TradeRoleIdentity id, com.game.api.proto.SessionContext actor) {
+        if (id != null && id.getOwnerRevision() > 0) {
+            return actor.getAccount().equals(id.getAccount()) && actor.getOwnerRevision() == id.getOwnerRevision();
+        }
+        // 存量未写归属修订的旧合同仅允许首任持有者（owner_revision <= 1）读取，过户后新主一律不可见。
+        return actor.getOwnerRevision() <= 1L;
+    }
+
     public static Message rejection(Message p, int tip) {
         var b = p.newBuilderForType();
         b.setField(

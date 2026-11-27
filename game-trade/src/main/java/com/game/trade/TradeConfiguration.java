@@ -211,7 +211,8 @@ public class TradeConfiguration {
                         commerce.getIfAvailable(), tradeHomeZones, mall.getIfAvailable(),
                         rmb.getIfAvailable(),
                         com.game.trade.commerce.CommerceConfiguration.resolveTextGuard(
-                                textGuard.getIfAvailable(), seeds.runMode())));
+                                textGuard.getIfAvailable(), seeds.runMode())))
+                .withReadOnlyOwnerCheck(com.game.common.player.PlayerSessionAuthority.readOnlyChecker(dataSource, 2));
         MarketSettings market = props.market().settings();
         log.info("trade 接管的消息号={} 市场范围={} 页长={}/{} 页码上限={} 收藏上限={} 请求预算={} 播种={}（运行模式 {}） 库={} 用户={}",
                 dispatcher.clientMessageIds(), props.market().scope(), market.defaultPageSize(), market.maxPageSize(),

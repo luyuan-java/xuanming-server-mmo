@@ -52,6 +52,9 @@ public final class AccountLogin {
     private final InFlightKeys<String> accountsInFlight;
     private final AntiAddictionGate antiAddiction;
     private final boolean strictAccessTokenAccount;
+    /** 登录服务本地记录的会话归属账号副本（绑定时写，进游戏离窗/断线清；故障恢复续租优先认本服务记录）。 */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> recordedSessionAccounts =
+            new java.util.concurrent.ConcurrentHashMap<>();
     private volatile PassportSessionEnforcer passportEnforcer;
 
     public AccountLogin withPassportEnforcer(PassportSessionEnforcer enforcer) {
@@ -303,8 +306,11 @@ public final class AccountLogin {
         }
         String deviceKey = LoginDevices.sessionKey(session.getGateInstanceId(), session.getSessionId());
         if (session.getPlayerId() == 0) {
-            LoginDevices.Admission admission = devices.admit(session.getAccount(), deviceKey);
+            // 优先使用登录服务自己在绑定时留下的账号副本，防故障恢复期采信篡改账号；跨副本续租则使用 gate Ed25519 签名后的会话账号。
+            String effectiveAccount = recordedSessionAccounts.getOrDefault(deviceKey, session.getAccount());
+            LoginDevices.Admission admission = devices.admit(effectiveAccount, deviceKey);
             if (admission != LoginDevices.Admission.ADMITTED) {
+                recordedSessionAccounts.remove(deviceKey);
                 if (antiAddiction != null) {
                     antiAddiction.endWatchedSessionQuietly(deviceKey);
                 }
@@ -354,6 +360,7 @@ public final class AccountLogin {
      */
     public void leaveDeviceWindow(SessionContext session) {
         String deviceKey = LoginDevices.sessionKey(session.getGateInstanceId(), session.getSessionId());
+        recordedSessionAccounts.remove(deviceKey);
         try {
             devices.leave(deviceKey, session.getAccount());
         } catch (RuntimeException e) {
@@ -368,6 +375,7 @@ public final class AccountLogin {
      */
     public void closeDeviceSession(SessionContext session) {
         String deviceKey = LoginDevices.sessionKey(session.getGateInstanceId(), session.getSessionId());
+        recordedSessionAccounts.remove(deviceKey);
         if (antiAddiction != null) {
             antiAddiction.endWatchedSessionQuietly(deviceKey);
         }
@@ -398,8 +406,11 @@ public final class AccountLogin {
     private void bindQuietly(String account, String deviceKey, String previous) {
         try {
             if (!devices.bind(account, deviceKey, previous)) {
+                recordedSessionAccounts.remove(deviceKey);
                 log.info("会话已结束（gate 已注销），不记设备归属、撤销本次登记；登录应答送不到 gate account={} session={}", account,
                         deviceKey);
+            } else if (recordedSessionAccounts.size() < 200_000) {
+                recordedSessionAccounts.put(deviceKey, account);
             }
         } catch (RuntimeException e) {
             log.warn("记录设备归属失败（按登记有效期自愈） account={} session={}: {}", account, deviceKey, e.toString());

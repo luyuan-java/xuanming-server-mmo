@@ -38,8 +38,8 @@ public final class RedisLoginDevices implements LoginDevices {
             """;
 
     /**
-     * 单键脚本（Redis Cluster 槽位安全）：KEYS[1] = 会话反查键；ARGV：TTL 毫秒、关闭墓碑。
-     * 返回 -1 会话已关闭（墓碑不动），1 未关闭（反查键存在时顺带续期）。
+     * 单键脚本（Redis Cluster 槽位安全）：KEYS[1] = 会话反查键；ARGV：TTL 毫秒、关闭墓碑、归属账号（故障恢复时重建缺失的反查键）。
+     * 返回 -1 会话已关闭（墓碑不动），1 未关闭（反查键存在时续期；若因 Redis 故障/重启过期缺失则用 ARGV[3] 重建）。
      */
     static final String TOUCH_SESSION_SCRIPT = """
             local v = redis.call('GET', KEYS[1])
@@ -48,6 +48,8 @@ public final class RedisLoginDevices implements LoginDevices {
             end
             if v then
               redis.call('PEXPIRE', KEYS[1], ARGV[1])
+            elseif ARGV[3] and ARGV[3] ~= '' then
+              redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[1])
             end
             return 1
             """;
@@ -119,7 +121,7 @@ public final class RedisLoginDevices implements LoginDevices {
             return Admission.FULL;
         }
         Long sessionState = script().eval(RScript.Mode.READ_WRITE, TOUCH_SESSION_SCRIPT, RScript.ReturnType.INTEGER,
-                List.of(sessionRedisKey), String.valueOf(ttlMs), CLOSED_MARKER);
+                List.of(sessionRedisKey), String.valueOf(ttlMs), CLOSED_MARKER, account);
         if (sessionState != null && sessionState == -1L) {
             // 并发 close 在两次单键调用间落下墓碑：立即从账号名单撤销，避免残留。
             revoke(account, sessionKey);

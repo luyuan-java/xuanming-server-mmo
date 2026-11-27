@@ -31,4 +31,57 @@ public final class PlayerSessionAuthority {
             }
         }
     }
+
+    /** 只读归属校验回调（供 game-match / game-trade / game-guild 等在线服务的只读私有接口复用）。 */
+    @FunctionalInterface
+    public interface ReadOnlyOwnerCheck {
+        /** 返回 true 表示角色存在且此刻归属账号与 owner_revision 与会话一致（冻结期间 trade_listing_id != 0 仍返回 true）。 */
+        boolean isCurrentOwner(long playerId, String originalAccount, long originalRevision) throws SQLException;
+    }
+
+    /** 构造基于权威 player 表的只读归属核对器（不加锁，冻结角色仍可读，过户或删除一律拒绝）。 */
+    public static ReadOnlyOwnerCheck readOnlyChecker(javax.sql.DataSource dataSource, int queryTimeoutSeconds) {
+        java.util.Objects.requireNonNull(dataSource, "dataSource");
+        return (playerId, originalAccount, originalRevision) ->
+                verifyReadOnly(dataSource, playerId, originalAccount, originalRevision, queryTimeoutSeconds);
+    }
+
+    public static boolean verifyReadOnly(javax.sql.DataSource dataSource, long playerId, String originalAccount,
+                                         long originalRevision, int queryTimeoutSeconds) throws SQLException {
+        if (playerId == 0 || originalAccount == null || originalAccount.isEmpty()
+                || originalRevision <= 0 || queryTimeoutSeconds <= 0) {
+            return false;
+        }
+        try (Connection c = dataSource.getConnection()) {
+            return verifyReadOnly(c, playerId, originalAccount, originalRevision, queryTimeoutSeconds);
+        }
+    }
+
+    /**
+     * 只读路径的角色归属核对（不拿 FOR UPDATE 锁，也不因角色交易冻结 trade_listing_id != 0 而拒读）：
+     * 角色过户（account 或 owner_revision 变化）或删除后返回 false；角色冻结期间仍返回 true。
+     */
+    public static boolean verifyReadOnly(Connection connection, long playerId, String originalAccount,
+                                         long originalRevision, int queryTimeoutSeconds) throws SQLException {
+        if (playerId == 0 || originalAccount == null || originalAccount.isEmpty()
+                || originalRevision <= 0 || queryTimeoutSeconds <= 0) {
+            return false;
+        }
+        try (var statement = connection.prepareStatement("SELECT account,owner_revision FROM player WHERE player_id=?")) {
+            statement.setQueryTimeout(queryTimeoutSeconds);
+            statement.setObject(1, playerId < 0 ? new BigInteger(Long.toUnsignedString(playerId)) : playerId);
+            try (var row = statement.executeQuery()) {
+                if (!row.next()) {
+                    return false;
+                }
+                long revision;
+                try {
+                    revision = Long.parseUnsignedLong(row.getString(2));
+                } catch (NumberFormatException invalid) {
+                    return false;
+                }
+                return revision > 0 && originalAccount.equals(row.getString(1)) && originalRevision == revision;
+            }
+        }
+    }
 }

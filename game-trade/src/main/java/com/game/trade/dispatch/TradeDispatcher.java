@@ -106,6 +106,32 @@ public final class TradeDispatcher {
      */
     private final long callerLeadMillis;
     private final com.game.trade.commerce.CommerceClientService commerce;
+    private volatile com.game.common.player.PlayerSessionAuthority.ReadOnlyOwnerCheck ownerCheck;
+
+    /** 必须核对调用者角色归属的私有读方法（公开浏览/盘口深度不核）。 */
+    private static final Set<String> PRIVATE_OWNER_METHODS = Set.of(
+            TradeMethods.GET_MY_SHELF,
+            TradeMethods.SET_FAVORITE,
+            "GetCommerceOrder",
+            "ListCommerceOrders",
+            "ListMarketOrders"
+    );
+
+    /** 挂载只读角色归属核对器：我的货架、收藏浏览、我的订单与盘口挂单核归属，冻结期间仍允许读。 */
+    public TradeDispatcher withReadOnlyOwnerCheck(
+            com.game.common.player.PlayerSessionAuthority.ReadOnlyOwnerCheck ownerCheck) {
+        this.ownerCheck = ownerCheck;
+        return this;
+    }
+
+    private static boolean requiresPrivateOwnerCheck(String method, Message request) {
+        if (PRIVATE_OWNER_METHODS.contains(method)) {
+            return true;
+        }
+        return TradeMethods.BROWSE_LISTINGS.equals(method)
+                && request instanceof BrowseListingsRequest browse
+                && browse.getFavoritesOnly();
+    }
 
     /**
      * @param executor     {@code trade-worker} 工作池（测试可传同步执行器）
@@ -260,6 +286,20 @@ public final class TradeDispatcher {
             log.warn("[trade] 请求在工作队列里等过了预算 method={} {}", route.method(), describe(session));
             metrics.requestCompleted(sample, route.method(), RequestResult.OVERLOADED);
             return route.inBand(request, TradeTip.OVERLOADED);
+        }
+        var check = this.ownerCheck;
+        if (check != null && requiresPrivateOwnerCheck(route.method(), request)) {
+            try {
+                if (session == null || !check.isCurrentOwner(me, session.getAccount(), session.getOwnerRevision())) {
+                    log.warn("[trade] 私有只读接口角色归属已失效 method={} {}", route.method(), describe(session));
+                    metrics.requestCompleted(sample, route.method(), RequestResult.UNAUTHENTICATED);
+                    return envelope(TradeTips.SERVICE_UNAVAILABLE);
+                }
+            } catch (java.sql.SQLException e) {
+                log.error("[trade] 私有只读接口归属查询失败 method={} {}", route.method(), describe(session), e);
+                metrics.requestCompleted(sample, route.method(), RequestResult.INTERNAL_ERROR);
+                return route.inBand(request, TradeTip.INTERNAL_ERROR);
+            }
         }
         Message response;
         try {

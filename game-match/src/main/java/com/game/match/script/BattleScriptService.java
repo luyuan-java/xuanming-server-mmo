@@ -63,6 +63,7 @@ public final class BattleScriptService {
     private static final int ERR_LOADOUT_FULL = MatchErrorTip.match_error.kMatchBattleScriptLoadoutFull_VALUE;
 
     private final BattleScriptStore store;
+    private volatile com.game.common.player.PlayerSessionAuthority.ReadOnlyOwnerCheck ownerCheck;
     private final BattleScriptCatalog catalog;
     private final BattleScriptValidator.Tables tables;
     private final LongSupplier idGenerator;
@@ -317,12 +318,38 @@ public final class BattleScriptService {
         }
     }
 
+    /** 挂载只读角色归属核对器：角色过户/删除后拒绝对作战脚本列表与配置的访问，冻结期间仍允许读。 */
+    public BattleScriptService withReadOnlyOwnerCheck(
+            com.game.common.player.PlayerSessionAuthority.ReadOnlyOwnerCheck ownerCheck) {
+        this.ownerCheck = ownerCheck;
+        return this;
+    }
+
+    private boolean isOwnerAllowed(SessionContext s) {
+        var check = this.ownerCheck;
+        if (check == null) {
+            return true;
+        }
+        if (s == null || s.getPlayerId() == 0L) {
+            return false;
+        }
+        try {
+            return check.isCurrentOwner(s.getPlayerId(), s.getAccount(), s.getOwnerRevision());
+        } catch (SQLException e) {
+            log.error("[battle_script] owner check failed player={}", Long.toUnsignedString(s.getPlayerId()), e);
+            return false;
+        }
+    }
+
     public List<MatchMethodHandler> clientHandlers() {
         return List.of(
                 new MatchMethodHandler() {
                     @Override public String method() { return MatchMethods.LIST_BATTLE_SCRIPTS; }
                     @Override public Reply handle(SessionContext s, ByteString b, Deadline d) throws InvalidProtocolBufferException {
                         ListBattleScriptsRequest.parseFrom(b);
+                        if (!isOwnerAllowed(s)) {
+                            return Reply.body(ListBattleScriptsResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build());
+                        }
                         return Reply.body(list(s == null ? 0L : s.getPlayerId()));
                     }
                     @Override public Reply onOverload() {
@@ -332,7 +359,11 @@ public final class BattleScriptService {
                 new MatchMethodHandler() {
                     @Override public String method() { return MatchMethods.SUBMIT_BATTLE_SCRIPT; }
                     @Override public Reply handle(SessionContext s, ByteString b, Deadline d) throws InvalidProtocolBufferException {
-                        return Reply.body(submit(s == null ? 0L : s.getPlayerId(), SubmitBattleScriptRequest.parseFrom(b)));
+                        SubmitBattleScriptRequest req = SubmitBattleScriptRequest.parseFrom(b);
+                        if (!isOwnerAllowed(s)) {
+                            return Reply.body(SubmitBattleScriptResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build());
+                        }
+                        return Reply.body(submit(s == null ? 0L : s.getPlayerId(), req));
                     }
                     @Override public Reply onOverload() {
                         return Reply.body(SubmitBattleScriptResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build());
@@ -341,7 +372,11 @@ public final class BattleScriptService {
                 new MatchMethodHandler() {
                     @Override public String method() { return MatchMethods.DELETE_BATTLE_SCRIPT; }
                     @Override public Reply handle(SessionContext s, ByteString b, Deadline d) throws InvalidProtocolBufferException {
-                        return Reply.body(delete(s == null ? 0L : s.getPlayerId(), DeleteBattleScriptRequest.parseFrom(b)));
+                        DeleteBattleScriptRequest req = DeleteBattleScriptRequest.parseFrom(b);
+                        if (!isOwnerAllowed(s)) {
+                            return Reply.body(DeleteBattleScriptResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build());
+                        }
+                        return Reply.body(delete(s == null ? 0L : s.getPlayerId(), req));
                     }
                     @Override public Reply onOverload() {
                         return Reply.body(DeleteBattleScriptResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build());
@@ -350,7 +385,11 @@ public final class BattleScriptService {
                 new MatchMethodHandler() {
                     @Override public String method() { return MatchMethods.SET_BATTLE_SCRIPT_LOADOUT; }
                     @Override public Reply handle(SessionContext s, ByteString b, Deadline d) throws InvalidProtocolBufferException {
-                        return Reply.body(setLoadout(s == null ? 0L : s.getPlayerId(), SetBattleScriptLoadoutRequest.parseFrom(b)));
+                        SetBattleScriptLoadoutRequest req = SetBattleScriptLoadoutRequest.parseFrom(b);
+                        if (!isOwnerAllowed(s)) {
+                            return Reply.body(SetBattleScriptLoadoutResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build());
+                        }
+                        return Reply.body(setLoadout(s == null ? 0L : s.getPlayerId(), req));
                     }
                     @Override public Reply onOverload() {
                         return Reply.body(SetBattleScriptLoadoutResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build());

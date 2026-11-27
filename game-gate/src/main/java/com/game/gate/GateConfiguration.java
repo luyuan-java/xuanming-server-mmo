@@ -98,6 +98,20 @@ public class GateConfiguration {
     }
 
     /**
+     * gate Ed25519 会话身份密钥启动自检：配置了私钥或开启强制校验时，校验私钥合法且与公钥列表配对，不配对立即拒启。
+     */
+    @Bean
+    public Object gateSessionIdentityKeyCheck(Environment environment) {
+        String priv = environment.getProperty(com.game.common.token.GateSessionIdentityAuth.PRIVATE_KEY_ENV);
+        String pubs = environment.getProperty(com.game.common.token.GateSessionIdentityAuth.PUBLIC_KEYS_ENV);
+        boolean required = "true".equalsIgnoreCase(environment.getProperty(com.game.common.token.GateSessionIdentityAuth.REQUIRED_ENV));
+        if ((priv == null || priv.isBlank()) && !required) {
+            return new Object();
+        }
+        return com.game.common.token.GateSessionIdentityAuth.forSigner(priv, pubs);
+    }
+
+    /**
      * login 后端（Dubbo group = proto 域 login）。local profile 直连 {@code game.dubbo.login-url}，nacos profile 该值置空走注册中心。
      * {@code handle} 不重试：客户端消息不幂等（建角、加好友……），Dubbo 缺省的 failover 会在超时后重发同一次调用；
      * 断线通知（sessionClosed）幂等，保留缺省重试。
