@@ -35,7 +35,7 @@ public interface PlayerSnapshotMapper {
     @Insert("""
             <script>
             INSERT INTO player_snapshot (snapshot_id, player_id, time_ms, cause, zone_id, owner_epoch, level,
-                scene_config_id, pos_x, pos_y, pos_z, player_state, ingested_at)
+                scene_config_id, pos_x, pos_y, pos_z, player_state, ingested_at, shard)
             VALUES
             <foreach collection="rows" item="r" separator=",">
                 (#{r.snapshotId,""" + U64 + """
@@ -45,7 +45,7 @@ public interface PlayerSnapshotMapper {
             }, #{r.level,""" + U32 + """
             },
                  #{r.sceneConfigId,""" + U32 + """
-            }, #{r.posX}, #{r.posY}, #{r.posZ}, #{r.playerState}, #{ingestedAt})
+            }, #{r.posX}, #{r.posY}, #{r.posZ}, #{r.playerState}, #{ingestedAt}, #{r.shard})
             </foreach>
             ON DUPLICATE KEY UPDATE snapshot_id = snapshot_id
             </script>""")
@@ -59,7 +59,7 @@ public interface PlayerSnapshotMapper {
      */
     @Insert("""
             INSERT INTO player_snapshot (snapshot_id, player_id, time_ms, cause, zone_id, owner_epoch, level,
-                scene_config_id, pos_x, pos_y, pos_z, player_state, ingested_at, operator, note)
+                scene_config_id, pos_x, pos_y, pos_z, player_state, ingested_at, operator, note, shard)
             VALUES (#{r.snapshotId,""" + U64 + """
             }, #{r.playerId,""" + U64 + """
             }, #{r.timeMs}, #{r.cause}, #{r.zoneId,""" + U32 + """
@@ -67,7 +67,7 @@ public interface PlayerSnapshotMapper {
             }, #{r.level,""" + U32 + """
             },
                 #{r.sceneConfigId,""" + U32 + """
-            }, #{r.posX}, #{r.posY}, #{r.posZ}, #{r.playerState}, #{ingestedAt}, #{operator}, #{note})""")
+            }, #{r.posX}, #{r.posY}, #{r.posZ}, #{r.playerState}, #{ingestedAt}, #{operator}, #{note}, #{r.shard})""")
     int insertDirect(@Param("r") PlayerSnapshotRow row, @Param("ingestedAt") long ingestedAt,
                      @Param("operator") String operator, @Param("note") String note);
 
@@ -136,4 +136,15 @@ public interface PlayerSnapshotMapper {
             </script>""")
     int deleteOlderThan(@Param("before") long before, @Param("causes") Collection<Integer> causes,
                         @Param("limit") int limit);
+
+    /** 按分桶删一批过期快照（走 idx_snapshot_time(shard, time_ms)，多副本分桶互斥清理）。 */
+    @Delete("""
+            <script>
+            DELETE FROM player_snapshot
+             WHERE shard = #{shard} AND time_ms &lt; #{before} AND ingested_at &lt; #{before} AND cause IN
+             <foreach collection="causes" item="c" open="(" separator="," close=")">#{c}</foreach>
+             LIMIT #{limit}
+            </script>""")
+    int deleteOlderThanInShard(@Param("shard") int shard, @Param("before") long before,
+                               @Param("causes") Collection<Integer> causes, @Param("limit") int limit);
 }

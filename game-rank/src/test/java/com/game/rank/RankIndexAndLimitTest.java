@@ -178,7 +178,9 @@ class RankIndexAndLimitTest {
         achievedMethod.setAccessible(true);
 
         List<Object[]> rows = new ArrayList<>();
-        if (sql.contains("FROM rank_board")) {
+        if (sql.contains("FROM rank_board_shard")) {
+            rows.add(new Object[] {null});
+        } else if (sql.contains("FROM rank_board")) {
             rows.add(new Object[] {1L, 3, 1, 0L, "all", 1L, "match", 1L, 1L, false, 1, 0L, "h", 0L, (long) board.size()});
         } else if (sql.contains("ORDER BY order_key,achieved_ms,entity_id LIMIT ? OFFSET ?")) {
             int limit = ((Number) params.get(3)).intValue();

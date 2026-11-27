@@ -113,8 +113,47 @@ public final class RankStore {
             return OpenRankGenerationResponse.newBuilder().setBoardId(b.id).setDuplicated(b.id != id).build();
         });
     }
+    private static final int MAX_NEW_ENTITY_RACE_RETRIES = 3;
+
+    private static Board ownedReadOnly(AuthorityJdbc.Session s, long id, String caller, long generation, long epoch) throws SQLException {
+        var b = s.one("SELECT " + BC + " FROM rank_board WHERE board_id=?", RankStore::board, U(id));
+        require(b != null, NOT_FOUND);
+        require(b.producer.equals(caller) && b.generation == generation && (epoch == 0 || b.epoch == epoch), CONFLICT);
+        return b;
+    }
+
+    private static boolean isDuplicateKey(SQLException e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof SQLException sqlEx) {
+                if (sqlEx.getErrorCode() == 1062 || "23505".equals(sqlEx.getSQLState())
+                        || "23000".equals(sqlEx.getSQLState())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static long sumShardEntries(AuthorityJdbc.Session s, long boardId, long generation, long fallbackBoardEntries) throws SQLException {
+        Long sum = s.one("SELECT SUM(entries) FROM rank_board_shard WHERE board_id=? AND generation=?",
+                r -> r.getObject(1) == null ? null : u64(r, 1), U(boardId), U(generation));
+        return sum != null ? sum : fallbackBoardEntries;
+    }
+
     public SubmitRankScoresResponse submit(String caller, SubmitRankScoresRequest in, Deadline d) throws SQLException {
-        require(in.getBoardId() != 0 && in.getGeneration() != 0 && in.getSourceEpoch() != 0 && in.getSourceCursor() != 0
+        return submitShard(caller, in, 0, d);
+    }
+
+    /**
+     * 同榜写入按来源片并行（主仓缺口清单第 17 条）：
+     * <ul>
+     *   <li>只读校验 {@code rank_board} 元数据，不再锁榜行；</li>
+     *   <li>仅锁本片 {@code rank_board_shard (board_id, generation, source_shard)} 推进片内游标与条目计数；</li>
+     *   <li>同实体跨片写入靠 {@code rank_score ... FOR UPDATE} 行锁串行，新实体并发撞唯一键整笔重试。</li>
+     * </ul>
+     */
+    public SubmitRankScoresResponse submitShard(String caller, SubmitRankScoresRequest in, int sourceShard, Deadline d) throws SQLException {
+        require(sourceShard >= 0 && in.getBoardId() != 0 && in.getGeneration() != 0 && in.getSourceEpoch() != 0 && in.getSourceCursor() != 0
                         && in.getRequestId() != 0 && in.getEntriesCount() > 0 && in.getEntriesCount() <= 128 && in.getModeValue() >= 1
                         && in.getModeValue() <= 3,
                 INVALID);
@@ -126,18 +165,39 @@ public final class RankStore {
             prior = e.getEntityId();
         }
         String hash = ServiceCallSignatures.digest(in);
+        for (int attempt = 0; ; attempt++) {
+            try {
+                return submitShardOnce(caller, in, sourceShard, sorted, hash, d);
+            } catch (SQLException e) {
+                if (attempt + 1 < MAX_NEW_ENTITY_RACE_RETRIES && isDuplicateKey(e)) {
+                    continue;
+                }
+                throw e;
+            }
+        }
+    }
+
+    private SubmitRankScoresResponse submitShardOnce(String caller, SubmitRankScoresRequest in, int sourceShard,
+                                                     List<RankScoreInput> sorted, String hash, Deadline d) throws SQLException {
         return sql.tx(d, s -> {
-            var b = owned(s, in.getBoardId(), caller, in.getGeneration(), in.getSourceEpoch());
+            // 读榜行元信息，不加 FOR UPDATE，避免跨来源片争抢同一榜行
+            var b = ownedReadOnly(s, in.getBoardId(), caller, in.getGeneration(), in.getSourceEpoch());
             require(b.deleted == 0, CONFLICT);
-            if (Long.compareUnsigned(in.getSourceCursor(), b.cursor) <= 0) {
-                var old = s.one("SELECT request_hash FROM rank_input_receipt WHERE board_id=? AND generation=? AND source_cursor=?",
-                        r -> r.getString(1), U(b.id), U(b.generation), U(in.getSourceCursor()));
+            // 确保并仅锁本来源片行
+            s.update("INSERT INTO rank_board_shard (board_id,generation,source_shard,committed_cursor,entries) VALUES (?,?,?,0,0) "
+                     + "ON DUPLICATE KEY UPDATE board_id=board_id",
+                    U(b.id), U(b.generation), sourceShard);
+            long shardCursor = s.one("SELECT committed_cursor FROM rank_board_shard WHERE board_id=? AND generation=? AND source_shard=? FOR UPDATE",
+                    r -> u64(r, 1), U(b.id), U(b.generation), sourceShard);
+            if (Long.compareUnsigned(in.getSourceCursor(), shardCursor) <= 0) {
+                var old = s.one("SELECT request_hash FROM rank_input_receipt WHERE board_id=? AND generation=? AND source_shard=? AND source_cursor=?",
+                        r -> r.getString(1), U(b.id), U(b.generation), sourceShard, U(in.getSourceCursor()));
                 require(hash.equals(old), CONFLICT);
-                return SubmitRankScoresResponse.newBuilder().setCommittedCursor(b.cursor).setDuplicated(true).build();
+                return SubmitRankScoresResponse.newBuilder().setCommittedCursor(shardCursor).setDuplicated(true).build();
             }
             require(b.state == 1, CLOSED);
-            require(b.cursor != -1L && in.getSourceCursor() == b.cursor + 1, CURSOR);
-            // 整批一次读、一次多行写；新增实体同步累加榜行 entries，避免读路径全表 COUNT(*)
+            require(shardCursor != -1L && in.getSourceCursor() == shardCursor + 1, CURSOR);
+            // 整批一次锁读（按 entity_id 升序防死锁）、一次多行写；新增实体同步累加本片 entries
             var readArgs = new ArrayList<Object>(sorted.size() + 2);
             readArgs.add(U(b.id));
             readArgs.add(U(b.generation));
@@ -151,7 +211,7 @@ public final class RankStore {
             }
             Map<Long, long[]> existing = new HashMap<>(sorted.size() * 2);
             for (var row : s.list("SELECT entity_id,score,achieved_ms FROM rank_score WHERE board_id=? AND generation=? AND entity_id IN ("
-                            + inMarks + ")",
+                            + inMarks + ") ORDER BY entity_id FOR UPDATE",
                     r -> new long[] {u64(r, 1), r.getLong(2), u64(r, 3)}, readArgs.toArray())) {
                 existing.put(row[0], new long[] {row[1], row[2]});
             }
@@ -191,11 +251,11 @@ public final class RankStore {
                          + "achieved_ms=VALUES(achieved_ms),source_cursor=VALUES(source_cursor)",
                         writeArgs.toArray());
             }
-            s.update("INSERT INTO rank_input_receipt (board_id,generation,source_cursor,request_id,request_hash,committed_ms) VALUES "
-                     + "(?,?,?,?,?,?)",
-                    U(b.id), U(b.generation), U(in.getSourceCursor()), U(in.getRequestId()), hash, clock.getAsLong());
-            s.update("UPDATE rank_board SET committed_cursor=?,entries=entries+? WHERE board_id=?",
-                    U(in.getSourceCursor()), U(added), U(b.id));
+            s.update("INSERT INTO rank_input_receipt (board_id,generation,source_shard,source_cursor,request_id,request_hash,committed_ms) VALUES "
+                     + "(?,?,?,?,?,?,?)",
+                    U(b.id), U(b.generation), sourceShard, U(in.getSourceCursor()), U(in.getRequestId()), hash, clock.getAsLong());
+            s.update("UPDATE rank_board_shard SET committed_cursor=?,entries=entries+? WHERE board_id=? AND generation=? AND source_shard=?",
+                    U(in.getSourceCursor()), U(added), U(b.id), U(b.generation), sourceShard);
             return SubmitRankScoresResponse.newBuilder().setCommittedCursor(in.getSourceCursor()).build();
         });
     }
@@ -236,7 +296,22 @@ public final class RankStore {
                         .build();
             }
             require(b.state == 1, CLOSED);
-            require(b.cursor == in.getExpectedSourceCursor(), CURSOR);
+            // 封榜先锁榜行（上文 owned），再按片号升序锁全部来源片行，汇总最终游标与总条目数
+            var shards = s.list("SELECT source_shard,committed_cursor,entries FROM rank_board_shard WHERE board_id=? AND generation=? ORDER BY source_shard FOR UPDATE",
+                    r -> new long[] {r.getInt(1), u64(r, 2), u64(r, 3)}, U(b.id), U(b.generation));
+            long finalCursor = b.cursor;
+            long totalEntries = b.entries;
+            if (!shards.isEmpty()) {
+                long shard0Cursor = 0L;
+                long sumEntries = 0L;
+                for (var sh : shards) {
+                    if (sh[0] == 0) shard0Cursor = sh[1];
+                    sumEntries += sh[2];
+                }
+                finalCursor = shards.size() == 1 ? shards.getFirst()[1] : Math.max(shard0Cursor, b.cursor);
+                totalEntries = sumEntries;
+            }
+            require(shards.size() > 1 || finalCursor == in.getExpectedSourceCursor(), CURSOR);
             var winners = s.list("SELECT entity_id,score,achieved_ms FROM rank_score WHERE board_id=? AND generation=? ORDER BY "
                             + RANK_INDEX_ORDER + " LIMIT ?",
                     r -> new long[] {u64(r, 1), r.getLong(2), u64(r, 3)}, U(b.id), U(b.generation), top);
@@ -244,7 +319,7 @@ public final class RankStore {
             s.update("INSERT INTO rank_settlement "
                      + "(settlement_id,board_id,generation,source_epoch,final_cursor,request_id,request_hash,winner_count,sealed_ms) "
                      + "VALUES (?,?,?,?,?,?,?,?,?)",
-                    U(settlement), U(b.id), U(b.generation), U(b.epoch), U(b.cursor), U(in.getRequestId()), hash, winners.size(), now);
+                    U(settlement), U(b.id), U(b.generation), U(b.epoch), U(finalCursor), U(in.getRequestId()), hash, winners.size(), now);
             for (int i = 0; i < winners.size(); i++) {
                 var w = winners.get(i);
                 int place = i + 1;
@@ -257,7 +332,8 @@ public final class RankStore {
                                  + "lease_token,attempts,created_ms,updated_ms) VALUES (?,?,?,?,?,1,0,?,0,0,0,?,?)",
                                 U(rewardIds[i]), U(settlement), U(w[0]), place, tier.getAttachments().toByteArray(), now, now, now);
             }
-            s.update("UPDATE rank_board SET state=2,settlement_id=?,sealed_ms=? WHERE board_id=?", U(settlement), now, U(b.id));
+            s.update("UPDATE rank_board SET state=2,committed_cursor=?,entries=?,settlement_id=?,sealed_ms=? WHERE board_id=?",
+                    U(finalCursor), U(totalEntries), U(settlement), now, U(b.id));
             return FreezeRankGenerationResponse.newBuilder().setSettlementId(settlement).setWinnerCount(winners.size()).build();
         });
     }
@@ -282,14 +358,29 @@ public final class RankStore {
                 s.update("UPDATE rank_board SET deleted_ms=? WHERE board_id=?", clock.getAsLong(), U(b.id));
             else {
                 require(b.state == 1 && b.deleted == 0, CLOSED);
+                // 移除同样先锁榜行、再按片号升序锁全部来源片行，防并发写片复活或计数漂移
+                var shards = s.list("SELECT source_shard,entries FROM rank_board_shard WHERE board_id=? AND generation=? ORDER BY source_shard FOR UPDATE",
+                        r -> new long[] {r.getInt(1), u64(r, 2)}, U(b.id), U(b.generation));
                 // 墓碑与删分同事务写入，防止迟到或后续分数批次将已摘除作弊实体重新带回榜上。
                 s.update("INSERT INTO rank_removed_entry (board_id,generation,entity_id,removed_ms) VALUES (?,?,?,?) "
                          + "ON DUPLICATE KEY UPDATE removed_ms=VALUES(removed_ms)",
                         U(b.id), U(b.generation), U(in.getEntityId()), clock.getAsLong());
                 int deleted = s.update("DELETE FROM rank_score WHERE board_id=? AND generation=? AND entity_id=?", U(b.id), U(b.generation),
                         U(in.getEntityId()));
-                if (deleted > 0)
-                    s.update("UPDATE rank_board SET entries=entries-1 WHERE board_id=? AND entries>0", U(b.id));
+                if (deleted > 0) {
+                    boolean decrementedShard = false;
+                    for (var sh : shards) {
+                        if (sh[1] > 0) {
+                            s.update("UPDATE rank_board_shard SET entries=entries-1 WHERE board_id=? AND generation=? AND source_shard=? AND entries>0",
+                                    U(b.id), U(b.generation), (int) sh[0]);
+                            decrementedShard = true;
+                            break;
+                        }
+                    }
+                    if (!decrementedShard) {
+                        s.update("UPDATE rank_board SET entries=entries-1 WHERE board_id=? AND entries>0", U(b.id));
+                    }
+                }
             }
             s.update("INSERT INTO rank_mutation (request_hash,board_id,generation,request_id,created_ms) VALUES (?,?,?,?,?)", hash, U(b.id),
                     U(b.generation), U(in.getRequestId()), clock.getAsLong());
@@ -360,7 +451,7 @@ public final class RankStore {
         require(size > 0, INVALID);
         return sql.snapshot(d, s -> {
             var b = lookup(s, in.getBoard());
-            long total = b.entries;
+            long total = sumShardEntries(s, b.id, b.generation, b.entries);
             PageWindow win = pageWindowFor(total, requested, size, rankLimit);
             var out = GetRankPageResponse.newBuilder()
                               .setBoard(b.key())

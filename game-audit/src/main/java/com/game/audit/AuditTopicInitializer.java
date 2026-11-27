@@ -60,6 +60,12 @@ public final class AuditTopicInitializer {
     /** 同包的规格类用：{@code what} 是日志与报错里对这组 topic 的称呼（如「对局结果 topic」）。 */
     static void ensureLabeled(TopicAdmin admin, List<TopicSpec> specs, Mode mode, short replicationFactor,
                               Duration timeout, String what, String generationEnv) {
+        ensureLabeled(admin, specs, mode, replicationFactor, timeout, what, generationEnv, false);
+    }
+
+    /** {@code allowInPlacePartitionGrowth = true} 时允许审计 topic 原地增加分区（actual >= spec），减分区仍须换代。 */
+    static void ensureLabeled(TopicAdmin admin, List<TopicSpec> specs, Mode mode, short replicationFactor,
+                              Duration timeout, String what, String generationEnv, boolean allowInPlacePartitionGrowth) {
         if (generationEnv == null || generationEnv.isBlank()) {
             throw new IllegalArgumentException("代次环境变量名不能为空");
         }
@@ -80,7 +86,8 @@ public final class AuditTopicInitializer {
         }
         for (TopicSpec spec : specs) {
             int actual = existing.get(spec.name());
-            if (actual != spec.partitions()) {
+            boolean invalid = allowInPlacePartitionGrowth ? actual < spec.partitions() : actual != spec.partitions();
+            if (invalid) {
                 throw new AuditTopicContractException(what + " " + spec.name() + " 分区数是 " + actual + "，契约是 "
                         + spec.partitions() + "；不能原地改分区数，请升 topic 代次（" + generationEnv + "）");
             }

@@ -3516,6 +3516,7 @@ public final class SceneWorld {
      */
     public int refreshDueLocations() {
         purgeExpiredTombstones();
+        flushDueCoalescedAssetSaves();
         long slot = locationSecond++ % LOCATION_REFRESH_SLOTS;
         List<ScenePlayer> due = new ArrayList<>();
         for (ScenePlayer player : playersById.values()) {
@@ -3534,6 +3535,45 @@ public final class SceneWorld {
             locations.refresh(due);
         }
         return due.size();
+    }
+
+    /** 资产变动合并存盘窗口（1 秒内同一玩家多次货币/物品变动合并成一笔在线存盘）。 */
+    public static final long ASSET_SAVE_COALESCE_MS = 1_000L;
+    private final java.util.Map<Long, Long> coalescedAssetSaves = new java.util.HashMap<>();
+
+    /**
+     * 资产变动统一收口请求的 1 秒合并存盘（逻辑线程）。
+     * 同一玩家在 1 秒窗口内多次变动只保留最早到期时刻，到期时经 {@link #requestKeyProgressSave} 落盘。
+     */
+    public void requestCoalescedAssetSave(long playerId) {
+        if (periodicSaveStopped || playerId == 0L || !playersById.containsKey(playerId)) {
+            return;
+        }
+        long dueMs = clock.epochMillis() + ASSET_SAVE_COALESCE_MS;
+        coalescedAssetSaves.putIfAbsent(playerId, dueMs);
+    }
+
+    /** 冲刷所有到期（>= 1 秒）的资产变动合并存盘请求，返回本次触发存盘的玩家数。 */
+    public int flushDueCoalescedAssetSaves() {
+        if (periodicSaveStopped || coalescedAssetSaves.isEmpty()) {
+            return 0;
+        }
+        long nowMs = clock.epochMillis();
+        int triggered = 0;
+        var it = coalescedAssetSaves.entrySet().iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            if (nowMs < entry.getValue()) {
+                continue;
+            }
+            it.remove();
+            ScenePlayer player = playersById.get(entry.getKey());
+            if (player != null) {
+                requestKeyProgressSave(player);
+                triggered++;
+            }
+        }
+        return triggered;
     }
 
     /** 一次立即存盘请求的结局（{@link #requestSave}）。 */

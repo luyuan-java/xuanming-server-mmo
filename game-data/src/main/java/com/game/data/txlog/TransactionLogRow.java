@@ -11,6 +11,10 @@ public record TransactionLogRow(long txId, long timeMs, int reason, int kind, lo
                                 long itemUuid, int itemConfigId, int itemQuantity, long correlationId, String extra,
                                 int zoneId) {
 
+    public int shard() {
+        return com.game.data.consume.AuditTopicScalingPolicy.shardOf(txId);
+    }
+
     static TransactionLogRow of(TransactionLogRecord r) {
         return new TransactionLogRow(r.getTxId(), r.getTimeMs(), r.getReasonValue(), r.getKindValue(), r.getFromPlayer(),
                 r.getToPlayer(), r.getCurrencyType(), r.getCurrencyDelta(), r.getBalanceBefore(), r.getBalanceAfter(),

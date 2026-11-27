@@ -138,7 +138,7 @@ message MailAssetOpRow {
   option (proto2mysql.table_name) = "mail_asset_op";
   option (proto2mysql.primary_key) = "op_id";
   option (proto2mysql.unique_key) = "player_id,stream,stream_epoch,seq";
-  option (proto2mysql.index) = "status,next_attempt_ms;player_id,stream,stream_epoch,status,seq;player_id,mail_id,claim_version";
+  option (proto2mysql.index) = "status,next_attempt_ms,op_id,player_id;player_id,stream,stream_epoch,status,seq;player_id,mail_id,claim_version;mail_id,status";
   option (proto2mysql.tidb_nonclustered_pk) = true;
   option (proto2mysql.tidb_shard_row_id_bits) = 4;
   option (proto2mysql.tidb_pre_split_regions) = 4;

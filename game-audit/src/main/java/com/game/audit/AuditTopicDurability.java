@@ -22,14 +22,14 @@ final class AuditTopicDurability {
         // 历史单 broker 接口不引入新的查询；生产装配已拒绝这组弱配置。
         if (replicationFactor == 1 && specs.stream().noneMatch(s -> s.configs().containsKey(MIN_ISR))) {
             AuditTopicInitializer.ensureLabeled(admin, specs, mode, replicationFactor, timeout,
-                    "审计 topic", AuditTopicInitializer.AUDIT_GENERATION_ENV);
+                    "审计 topic", AuditTopicInitializer.AUDIT_GENERATION_ENV, true);
             return;
         }
         long deadline = System.nanoTime() + timeout.toNanos();
         // 主人先核对真实副本，再修改配置；否则弱副本 topic 会被先改成无法写入的 minISR。
         AuditTopicInitializer.ensureLabeled(admin, specs,
                 mode == AuditTopicInitializer.Mode.OWN ? AuditTopicInitializer.Mode.CREATE_AND_VERIFY : mode,
-                replicationFactor, remaining(deadline), "审计 topic", AuditTopicInitializer.AUDIT_GENERATION_ENV);
+                replicationFactor, remaining(deadline), "审计 topic", AuditTopicInitializer.AUDIT_GENERATION_ENV, true);
         List<String> names = specs.stream().map(TopicSpec::name).toList();
         Map<String, Integer> replicas = admin.minimumReplicaCounts(names, remaining(deadline));
         for (TopicSpec spec : specs) {

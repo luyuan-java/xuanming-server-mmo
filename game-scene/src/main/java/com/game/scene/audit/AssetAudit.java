@@ -158,6 +158,43 @@ public interface AssetAudit {
     void itemDestroyed(long playerId, long itemUuid, int configId, long quantity, Reason reason, long correlationId,
                        String extra);
 
+    /**
+     * 在资产变动记流水的统一收口处触发合并存盘（主仓 11-12「资产变动约 1 秒内提交」）：
+     * 认出玩家后<b>先</b>请求合并存盘，再委托记录流水——即使流水因号段耗尽、超限或队列满被拒收，资产已变仍保证约 1 秒内落盘。
+     */
+    static AssetAudit withAssetSaveTrigger(AssetAudit delegate, java.util.function.LongConsumer onPlayerAssetMutated) {
+        java.util.Objects.requireNonNull(delegate, "delegate");
+        java.util.Objects.requireNonNull(onPlayerAssetMutated, "onPlayerAssetMutated");
+        return new AssetAudit() {
+            @Override
+            public void currencyChanged(long playerId, int currencyType, long delta, long before, long after,
+                                        Reason reason, long correlationId, String extra) {
+                if (playerId != 0L) {
+                    onPlayerAssetMutated.accept(playerId);
+                }
+                delegate.currencyChanged(playerId, currencyType, delta, before, after, reason, correlationId, extra);
+            }
+
+            @Override
+            public void itemGained(long playerId, long itemUuid, int configId, long quantity, Reason reason,
+                                   long correlationId, String extra) {
+                if (playerId != 0L) {
+                    onPlayerAssetMutated.accept(playerId);
+                }
+                delegate.itemGained(playerId, itemUuid, configId, quantity, reason, correlationId, extra);
+            }
+
+            @Override
+            public void itemDestroyed(long playerId, long itemUuid, int configId, long quantity, Reason reason,
+                                      long correlationId, String extra) {
+                if (playerId != 0L) {
+                    onPlayerAssetMutated.accept(playerId);
+                }
+                delegate.itemDestroyed(playerId, itemUuid, configId, quantity, reason, correlationId, extra);
+            }
+        };
+    }
+
     /** 写专用日志的实现（关闭审计管线时用）。 */
     static AssetAudit log() {
         Logger log = LoggerFactory.getLogger(LOGGER);

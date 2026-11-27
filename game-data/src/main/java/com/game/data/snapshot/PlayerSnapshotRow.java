@@ -11,6 +11,10 @@ public record PlayerSnapshotRow(long snapshotId, long playerId, long timeMs, int
                                 int level, int sceneConfigId, double posX, double posY, double posZ,
                                 byte[] playerState) {
 
+    public int shard() {
+        return com.game.data.consume.AuditTopicScalingPolicy.shardOf(snapshotId);
+    }
+
     static PlayerSnapshotRow of(PlayerSnapshotRecord r) {
         return new PlayerSnapshotRow(r.getSnapshotId(), r.getPlayerId(), r.getTimeMs(), r.getCauseValue(), r.getZoneId(),
                 r.getOwnerEpoch(), r.getLevel(), r.getSceneConfigId(), r.getPosX(), r.getPosY(), r.getPosZ(),

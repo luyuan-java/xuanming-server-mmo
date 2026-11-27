@@ -30,14 +30,14 @@ public interface TransactionLogMapper {
             <script>
             INSERT INTO transaction_log (tx_id, time_ms, reason, kind, from_player, to_player, currency_type, currency_delta,
                 balance_before, balance_after, item_uuid, item_config_id, item_quantity, correlation_id, extra, zone_id,
-                ingested_at)
+                ingested_at, shard)
             VALUES
             <foreach collection="rows" item="r" separator=",">
                 (#{r.txId,""" + U64 + "}, #{r.timeMs}, #{r.reason," + U32 + "}, #{r.kind," + U32 + "}, #{r.fromPlayer," + U64
             + "}, #{r.toPlayer," + U64 + "}, #{r.currencyType," + U32 + "}, #{r.currencyDelta}, #{r.balanceBefore," + U64
             + "}, #{r.balanceAfter," + U64 + "}, #{r.itemUuid," + U64 + "}, #{r.itemConfigId," + U32 + "}, #{r.itemQuantity,"
             + U32 + "}, #{r.correlationId," + U64 + "}, #{r.extra}, #{r.zoneId," + U32 + """
-            }, #{ingestedAt})
+            }, #{ingestedAt}, #{r.shard})
             </foreach>
             ON DUPLICATE KEY UPDATE tx_id = tx_id
             </script>""")
@@ -53,14 +53,14 @@ public interface TransactionLogMapper {
             <script>
             INSERT INTO transaction_log (tx_id, time_ms, reason, kind, from_player, to_player, currency_type, currency_delta,
                 balance_before, balance_after, item_uuid, item_config_id, item_quantity, correlation_id, extra, zone_id,
-                ingested_at)
+                ingested_at, shard)
             VALUES
             <foreach collection="rows" item="r" separator=",">
                 (#{r.txId,""" + U64 + "}, #{r.timeMs}, #{r.reason," + U32 + "}, #{r.kind," + U32 + "}, #{r.fromPlayer," + U64
             + "}, #{r.toPlayer," + U64 + "}, #{r.currencyType," + U32 + "}, #{r.currencyDelta}, #{r.balanceBefore," + U64
             + "}, #{r.balanceAfter," + U64 + "}, #{r.itemUuid," + U64 + "}, #{r.itemConfigId," + U32 + "}, #{r.itemQuantity,"
             + U32 + "}, #{r.correlationId," + U64 + "}, #{r.extra}, #{r.zoneId," + U32 + """
-            }, #{ingestedAt})
+            }, #{ingestedAt}, #{r.shard})
             </foreach>
             </script>""")
     int insertDirectAll(@Param("rows") List<TransactionLogRow> rows, @Param("ingestedAt") long ingestedAt);
@@ -122,4 +122,8 @@ public interface TransactionLogMapper {
     /** 删一批早于 {@code before} 的流水（保留期清理）。 */
     @Delete("DELETE FROM transaction_log WHERE time_ms < #{before} LIMIT #{limit}")
     int deleteOlderThan(@Param("before") long before, @Param("limit") int limit);
+
+    /** 按分桶删一批早于 {@code before} 的流水（走 idx_txlog_time(shard, time_ms)，多副本分桶互斥清理）。 */
+    @Delete("DELETE FROM transaction_log WHERE shard = #{shard} AND time_ms < #{before} LIMIT #{limit}")
+    int deleteOlderThanInShard(@Param("shard") int shard, @Param("before") long before, @Param("limit") int limit);
 }

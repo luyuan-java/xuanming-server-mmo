@@ -112,6 +112,10 @@ class AuditTopicInitializerTest {
 
         assertThatThrownBy(() -> AuditTopicInitializer.ensure(admin, List.of(TXLOG), Mode.CREATE_AND_VERIFY, (short) 1,
                 Duration.ofSeconds(1))).isInstanceOf(AuditTopicContractException.class).hasMessageContaining("代次");
+
+        // 审计 topic 原地增加分区（actual > spec）放行不停服
+        admin.partitions.put(TXLOG.name(), 12);
+        AuditTopicInitializer.ensure(admin, List.of(TXLOG), Mode.CREATE_AND_VERIFY, (short) 1, Duration.ofSeconds(1));
     }
 
     @Test

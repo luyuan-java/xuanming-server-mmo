@@ -102,7 +102,7 @@ message TradeAssetOpRow {
   option (proto2mysql.table_name) = "trade_asset_op";
   option (proto2mysql.primary_key) = "op_id";
   option (proto2mysql.unique_key) = "player_id,stream,stream_epoch,seq";
-  option (proto2mysql.index) = "status,next_attempt_ms;player_id,stream,stream_epoch,status,seq;ref_kind,ref_id";
+  option (proto2mysql.index) = "status,next_attempt_ms,op_id,player_id;player_id,stream,stream_epoch,status,seq;ref_kind,ref_id";
   uint64 op_id=1; uint64 player_id=2; uint32 stream=3; uint64 stream_epoch=4; uint64 seq=5;
   uint32 kind=6; uint32 status=7; bool durable=8; uint32 attempts=9; uint64 next_attempt_ms=10;
   uint64 deadline_ms=11; uint64 lease_until_ms=12; uint64 lease_token=13; uint32 tx_type=14;

@@ -51,16 +51,27 @@ message RankScoreRow {
   uint64 source_cursor = 6;
   int64 order_key = 7;
 }
+// 同榜写入按来源片并行（主仓缺口清单第 17 条）：每片独占游标与条目计数行，写入只锁本片不锁 rank_board。
+message RankBoardShardRow {
+  option (proto2mysql.table_name) = "rank_board_shard";
+  option (proto2mysql.primary_key) = "board_id,generation,source_shard";
+  uint64 board_id = 1;
+  uint64 generation = 2;
+  uint32 source_shard = 3;
+  uint64 committed_cursor = 4;
+  uint64 entries = 5;
+}
 // 每一游标的完整请求摘要保留至本代保留窗结束，晚重试不能冒充新一批。
 message RankInputReceiptRow {
   option (proto2mysql.table_name) = "rank_input_receipt";
-  option (proto2mysql.primary_key) = "board_id,generation,source_cursor";
+  option (proto2mysql.primary_key) = "board_id,generation,source_shard,source_cursor";
   uint64 board_id = 1;
   uint64 generation = 2;
   uint64 source_cursor = 3;
   uint64 request_id = 4;
   string request_hash = 5;
   uint64 committed_ms = 6;
+  uint32 source_shard = 7;
 }
 message RankSettlementRow {
   option (proto2mysql.table_name) = "rank_settlement";

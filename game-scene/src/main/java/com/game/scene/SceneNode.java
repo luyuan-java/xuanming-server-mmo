@@ -492,7 +492,14 @@ public class SceneNode implements SmartLifecycle {
         GainAnomalyDetector anomalies = new GainAnomalyDetector(settings.anomaly().defaults(),
                 settings.anomaly().currencyThresholds(), settings.anomaly().itemThresholds(), SceneClock.SYSTEM, metrics);
         LeaseGatedSnowflake guids = acquireSceneGuids();
-        AssetAudit assetAudit = startAudit(zoneId, nodeId, settings, guids);
+        AssetAudit assetAudit = AssetAudit.withAssetSaveTrigger(
+                startAudit(zoneId, nodeId, settings, guids),
+                playerId -> {
+                    SceneWorld w = this.sceneWorld;
+                    if (w != null) {
+                        w.requestCoalescedAssetSave(playerId);
+                    }
+                });
         CurrencyService currency = new CurrencyService(assetAudit, anomalies, metrics, SceneClock.SYSTEM);
         // 关闭消费也装配真实服务：目录公布的是生效开关，PENDING 留在独立收件箱；运输失败不产生 SQL 持久确认。
         DubboInboxTransport inboxClient = DubboInboxTransport.direct(settings.inbox().url(), logic);

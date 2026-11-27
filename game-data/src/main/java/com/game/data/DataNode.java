@@ -72,6 +72,15 @@ public final class DataNode implements SmartLifecycle {
     private final List<Worker> workers = new ArrayList<>();
     private Thread initThread;
     private ScheduledExecutorService retention;
+    private volatile com.game.data.store.BucketedRetentionPurger bucketedPurger;
+    private volatile int consumerDbConcurrency = 1;
+
+    /** 装配按 (表, 桶 0..15) GET_LOCK 分桶过期清理器与并行落库并发上限（= 连接池大小 - 1）。 */
+    public DataNode withHorizontalScaling(com.game.data.store.BucketedRetentionPurger purger, int dbPoolSize) {
+        this.bucketedPurger = purger;
+        this.consumerDbConcurrency = com.game.data.consume.AuditTopicScalingPolicy.maxDbConcurrency(dbPoolSize);
+        return this;
+    }
 
     /** 一条消费线程与它当前的消费循环（监督重启时换新循环）。 */
     private static final class Worker {
@@ -189,7 +198,7 @@ public final class DataNode implements SmartLifecycle {
                 ConsumerLoop<R> loop;
                 try {
                     loop = new ConsumerLoop<>(name, newConsumer(group, settings), topic, decoder, sink, metrics, POLL_TIMEOUT,
-                            props.dbRetry().initial(), props.dbRetry().max());
+                            props.dbRetry().initial(), props.dbRetry().max(), consumerDbConcurrency);
                 } catch (RuntimeException e) {
                     log.error("创建 {} 的 KafkaConsumer 失败，{} 毫秒后重试", name, RESTART_DELAY_MILLIS, e);
                     sleepQuietly(RESTART_DELAY_MILLIS);
@@ -259,11 +268,38 @@ public final class DataNode implements SmartLifecycle {
      */
     void purgeExpired() {
         DataProperties.Retention r = props.retention();
+        var purger = this.bucketedPurger;
+        if (purger != null) {
+            purgeBucketed(purger, TRANSACTION_LOG, r.transactionLog(), transactionLog::deleteOlderThanInShard);
+            purgeBucketed(purger, PLAYER_SNAPSHOT, r.playerSnapshot(),
+                    (shard, before, limit) -> playerSnapshot.deleteOlderThanInShard(shard, before, SnapshotCauses.ROUTINE_RETENTION, limit));
+            purgeBucketed(purger, PLAYER_SNAPSHOT_GM, r.gmSnapshot(),
+                    (shard, before, limit) -> playerSnapshot.deleteOlderThanInShard(shard, before, SnapshotCauses.GM_RETENTION, limit));
+            return;
+        }
         purge(TRANSACTION_LOG, r.transactionLog(), transactionLog::deleteOlderThan);
         purge(PLAYER_SNAPSHOT, r.playerSnapshot(),
                 (before, limit) -> playerSnapshot.deleteOlderThan(before, SnapshotCauses.ROUTINE_RETENTION, limit));
         purge(PLAYER_SNAPSHOT_GM, r.gmSnapshot(),
                 (before, limit) -> playerSnapshot.deleteOlderThan(before, SnapshotCauses.GM_RETENTION, limit));
+    }
+
+    private void purgeBucketed(com.game.data.store.BucketedRetentionPurger purger, String table, Duration keep,
+                               com.game.data.store.BucketedRetentionPurger.ShardBatchDelete deleter) {
+        if (keep.isZero()) {
+            return;
+        }
+        int batch = props.retention().batch();
+        long before = clock.millis() - keep.toMillis();
+        try {
+            long total = purger.purgeAllShards(table, before, batch, () -> running, () -> sleepQuietly(100), deleter);
+            metrics.retentionDeleted(table, total);
+            if (total > 0) {
+                log.info("分桶保留期清理 {} 删除 {} 行（早于 {}）", table, total, before);
+            }
+        } catch (RuntimeException e) {
+            log.warn("分桶保留期清理 {} 失败，下个周期再试：{}", table, e.toString());
+        }
     }
 
     @FunctionalInterface

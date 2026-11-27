@@ -82,6 +82,10 @@ public final class ConsumerLoop<R> implements Runnable {
     private final Duration retryInitial;
     private final Duration retryMax;
     private final Backoff backoff;
+    /** 按分区并行落库并发上限（= 连接池连接数 - 1；1 时退化为单线程整批串行落库）。 */
+    private final int dbConcurrency;
+    private final java.util.concurrent.Semaphore dbPermits;
+    private final java.util.concurrent.ExecutorService partitionPool;
     /** 待落库批次里的分区被收走（重平衡回调里置位，只在本线程读写）。 */
     private final Set<TopicPartition> revokedDuringBatch = new HashSet<>();
     /** 正在为落库重试而暂停消费（重平衡新分到的分区也要跟着暂停）。只在本线程读写。 */
@@ -90,7 +94,13 @@ public final class ConsumerLoop<R> implements Runnable {
 
     public ConsumerLoop(String name, Consumer<String, byte[]> consumer, String topic, Decoder<R> decoder, Sink<R> sink,
                         DataMetrics metrics, Duration pollTimeout, Duration retryInitial, Duration retryMax) {
-        this(name, consumer, topic, decoder, sink, metrics, pollTimeout, retryInitial, retryMax,
+        this(name, consumer, topic, decoder, sink, metrics, pollTimeout, retryInitial, retryMax, 1);
+    }
+
+    public ConsumerLoop(String name, Consumer<String, byte[]> consumer, String topic, Decoder<R> decoder, Sink<R> sink,
+                        DataMetrics metrics, Duration pollTimeout, Duration retryInitial, Duration retryMax,
+                        int dbConcurrency) {
+        this(name, consumer, topic, decoder, sink, metrics, pollTimeout, retryInitial, retryMax, dbConcurrency,
                 (delay, pollWhilePaused) -> {
                     long until = System.nanoTime() + delay.toNanos();
                     do {
@@ -101,6 +111,12 @@ public final class ConsumerLoop<R> implements Runnable {
 
     ConsumerLoop(String name, Consumer<String, byte[]> consumer, String topic, Decoder<R> decoder, Sink<R> sink,
                  DataMetrics metrics, Duration pollTimeout, Duration retryInitial, Duration retryMax, Backoff backoff) {
+        this(name, consumer, topic, decoder, sink, metrics, pollTimeout, retryInitial, retryMax, 1, backoff);
+    }
+
+    ConsumerLoop(String name, Consumer<String, byte[]> consumer, String topic, Decoder<R> decoder, Sink<R> sink,
+                 DataMetrics metrics, Duration pollTimeout, Duration retryInitial, Duration retryMax,
+                 int dbConcurrency, Backoff backoff) {
         this.name = name;
         this.consumer = consumer;
         this.topic = topic;
@@ -110,6 +126,15 @@ public final class ConsumerLoop<R> implements Runnable {
         this.pollTimeout = pollTimeout;
         this.retryInitial = retryInitial;
         this.retryMax = retryMax;
+        this.dbConcurrency = Math.max(1, dbConcurrency);
+        this.dbPermits = new java.util.concurrent.Semaphore(this.dbConcurrency);
+        this.partitionPool = this.dbConcurrency > 1
+                ? java.util.concurrent.Executors.newFixedThreadPool(this.dbConcurrency, r -> {
+                    Thread t = new Thread(r, "audit-flush-" + name);
+                    t.setDaemon(true);
+                    return t;
+                })
+                : null;
         this.backoff = backoff;
     }
 
@@ -148,6 +173,9 @@ public final class ConsumerLoop<R> implements Runnable {
             throw e;
         } finally {
             metrics.up(name, false);
+            if (partitionPool != null) {
+                partitionPool.shutdownNow();
+            }
             consumer.close(Duration.ofSeconds(5));
         }
     }
@@ -159,6 +187,10 @@ public final class ConsumerLoop<R> implements Runnable {
     }
 
     private void process(ConsumerRecords<String, byte[]> records) {
+        if (partitionPool != null && records.partitions().size() > 1) {
+            processPartitionsInParallel(records);
+            return;
+        }
         List<R> rows = new ArrayList<>(records.count());
         List<ConsumerRecord<String, byte[]>> sources = new ArrayList<>(records.count());
         Map<TopicPartition, OffsetAndMetadata> next = new HashMap<>();
@@ -190,6 +222,111 @@ public final class ConsumerLoop<R> implements Runnable {
         } catch (RuntimeException e) {
             // 行已落库，重放只会按主键去重
             log.warn("{} 提交位点失败（已落库，重放无害）：{}", name, e.toString());
+        }
+    }
+
+    /**
+     * 每分区独立攒批并行落库（实例级落库并发受 {@code dbPermits} = {@code poolSize - 1} 约束）：
+     * 落库成功的分区各自提交位点；失败或重平衡收走的分区按旧重试/重放语义回退，绝不丢数据、绝不跨分区相互阻塞。
+     */
+    private void processPartitionsInParallel(ConsumerRecords<String, byte[]> records) {
+        record PartitionSlice<R>(TopicPartition tp, List<R> rows, List<ConsumerRecord<String, byte[]>> sources,
+                                 OffsetAndMetadata nextOffset, long startOffset, Map<Outcome, Long> skipped) {}
+        List<PartitionSlice<R>> slices = new ArrayList<>(records.partitions().size());
+        for (TopicPartition tp : records.partitions()) {
+            List<ConsumerRecord<String, byte[]>> partRecs = records.records(tp);
+            if (partRecs.isEmpty()) continue;
+            List<R> rows = new ArrayList<>(partRecs.size());
+            List<ConsumerRecord<String, byte[]>> sources = new ArrayList<>(partRecs.size());
+            Map<Outcome, Long> skipped = new HashMap<>();
+            long lastOffset = partRecs.get(0).offset();
+            for (ConsumerRecord<String, byte[]> rec : partRecs) {
+                Decoded<R> decoded = decoder.decode(rec);
+                if (decoded.row() != null) {
+                    rows.add(decoded.row());
+                    sources.add(rec);
+                } else {
+                    skipped.merge(decoded.skipped(), 1L, Long::sum);
+                    log.warn("{} 跳过记录 topic={} partition={} offset={} 原因={}", name, rec.topic(), rec.partition(),
+                            rec.offset(), decoded.skipped());
+                }
+                lastOffset = rec.offset();
+            }
+            slices.add(new PartitionSlice<>(tp, rows, sources, new OffsetAndMetadata(lastOffset + 1),
+                    partRecs.get(0).offset(), skipped));
+        }
+
+        Map<TopicPartition, java.util.concurrent.Future<Boolean>> futures = new HashMap<>(slices.size());
+        for (var slice : slices) {
+            if (slice.rows().isEmpty()) {
+                futures.put(slice.tp(), java.util.concurrent.CompletableFuture.completedFuture(Boolean.TRUE));
+                continue;
+            }
+            futures.put(slice.tp(), partitionPool.submit(() -> {
+                dbPermits.acquire();
+                try {
+                    long started = System.nanoTime();
+                    try {
+                        int inserted = sink.insert(slice.rows());
+                        metrics.insertTime(name, System.nanoTime() - started);
+                        metrics.record(name, Outcome.INSERTED, inserted);
+                        metrics.record(name, Outcome.DUPLICATE, slice.rows().size() - inserted);
+                        return Boolean.TRUE;
+                    } catch (RuntimeException e) {
+                        metrics.dbError(name);
+                        if (DbErrors.isDataError(e)) {
+                            insertOneByOne(slice.rows(), slice.sources());
+                            return Boolean.TRUE;
+                        }
+                        log.warn("{} 分区 {} 并行落库遇到可恢复故障，转交顺序重试: {}", name, slice.tp(), e.toString());
+                        return Boolean.FALSE;
+                    }
+                } finally {
+                    dbPermits.release();
+                }
+            }));
+        }
+
+        Map<TopicPartition, OffsetAndMetadata> committed = new HashMap<>();
+        List<PartitionSlice<R>> failedSlices = new ArrayList<>();
+        for (var slice : slices) {
+            boolean ok = false;
+            try {
+                ok = Boolean.TRUE.equals(futures.get(slice.tp()).get());
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } catch (java.util.concurrent.ExecutionException ee) {
+                log.warn("{} 分区 {} 并行落库异常: {}", name, slice.tp(), ee.getCause().toString());
+            }
+            if (ok && !revokedDuringBatch.contains(slice.tp())) {
+                slice.skipped().forEach((outcome, count) -> metrics.record(name, outcome, count));
+                committed.put(slice.tp(), slice.nextOffset());
+            } else if (!revokedDuringBatch.contains(slice.tp())) {
+                failedSlices.add(slice);
+            }
+        }
+        if (!committed.isEmpty()) {
+            try {
+                consumer.commitSync(committed);
+            } catch (WakeupException e) {
+                throw e;
+            } catch (RuntimeException e) {
+                log.warn("{} 并行提交成功分区位点失败（已落库，重放无害）：{}", name, e.toString());
+            }
+        }
+        // 遇到可恢复故障的分区回落原单分区暂停退避重试，保住组成员身份与不丢语义
+        for (var slice : failedSlices) {
+            if (!running || revokedDuringBatch.contains(slice.tp())) continue;
+            if (persist(slice.rows(), slice.sources(), Set.of(slice.tp()), Map.of(slice.tp(), slice.startOffset()))) {
+                slice.skipped().forEach((outcome, count) -> metrics.record(name, outcome, count));
+                try {
+                    consumer.commitSync(Map.of(slice.tp(), slice.nextOffset()));
+                } catch (WakeupException e) {
+                    throw e;
+                } catch (RuntimeException e) {
+                    log.warn("{} 分区 {} 重试提交位点失败（已落库）：{}", name, slice.tp(), e.toString());
+                }
+            }
         }
     }
 

@@ -23,10 +23,11 @@ CREATE TABLE IF NOT EXISTS transaction_log (
     extra          VARCHAR(1024)   NOT NULL DEFAULT '' COMMENT 'JSON',
     zone_id        INT UNSIGNED    NOT NULL,
     ingested_at    BIGINT          NOT NULL COMMENT 'game-data 落库的 Unix 毫秒',
+    shard          TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '时间索引分桶列（tx_id % 16），消除 TiDB 单调时间索引尾部热点',
     PRIMARY KEY (tx_id),
     KEY idx_txlog_from (from_player, time_ms),
     KEY idx_txlog_to (to_player, time_ms),
-    KEY idx_txlog_time (time_ms),
+    KEY idx_txlog_time (shard, time_ms),
     KEY idx_txlog_item (kind, item_config_id, time_ms),
     KEY idx_txlog_currency (kind, currency_type, time_ms),
     KEY idx_txlog_uuid (item_uuid, time_ms)
@@ -53,7 +54,8 @@ CREATE TABLE IF NOT EXISTS player_snapshot (
     ingested_at     BIGINT          NOT NULL COMMENT 'game-data 落库的 Unix 毫秒',
     operator        VARCHAR(64)     NOT NULL DEFAULT '' COMMENT 'game-data 直写的操作人；scene 经 Kafka 的为空',
     note            VARCHAR(256)    NOT NULL DEFAULT '' COMMENT '直写的备注（原因 / 事件 / 作业号）',
+    shard           TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '时间索引分桶列（snapshot_id % 16），消除 TiDB 单调时间索引尾部热点',
     PRIMARY KEY (snapshot_id),
     KEY idx_snapshot_player (player_id, time_ms),
-    KEY idx_snapshot_time (time_ms)
+    KEY idx_snapshot_time (shard, time_ms)
 );
