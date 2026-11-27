@@ -1,0 +1,70 @@
+# scene 节点归属对账与注册中心修订倒退告警（对齐主仓 docs/design/scene-node-ownership-reconcile.md §4.6、§9）
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: scene-ownership-alerts
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: scene-ownership.rules
+      interval: 30s
+      rules:
+        - alert: SceneOwnershipForeignScenesReleased
+          expr: increase(game_scene_ownership_foreign_released_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "scene 节点释放了不再归属本进程的场景"
+            description: "节点按控制面计划释放了不属于本进程的场景，核对是否发生租约抖动、计划重建或节点被判死。"
+        - alert: SceneOwnershipMajorityReleased
+          expr: |
+            increase(game_scene_ownership_foreign_released_total[10m])
+            > clamp_min(game_scene_channels_active, 2) * 0.5
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "scene 节点 10 分钟内释放了过半承载场景"
+            description: "短时间内过半场景被判定不归本节点，排查控制面计划异常或网络分区。"
+        - alert: SceneOwnershipNodeIdTakenOver
+          expr: increase(game_scene_ownership_node_id_taken_over_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "scene 节点号已被新进程接管"
+            description: "旧进程探测到本节点号已由不同 instance_id / 更高代次接管，已立即切换全量排空并不再创建场景。"
+        - alert: SceneOwnershipReleaseBacklog
+          expr: game_scene_channels_draining > 0 and increase(game_scene_ownership_foreign_released_total[5m]) == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "scene 节点存在持续 5 分钟未清空的排空场景积压"
+            description: "可能受每轮 200 住户排空限速、目标节点不足或战斗/换图冻结阻滞。"
+        - alert: SceneOwnershipReconcileReadFailed
+          expr: increase(game_scene_channel_plan_poll_failures_total[5m]) >= 10
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "scene 归属对账持续读不到控制面计划"
+            description: "对账器连续读取控制面失败，无法确认本地场景归属状态。"
+        - alert: SceneOwnershipOwnHolderUnknown
+          expr: game_scene_ownership_own_holder_known == 0 and game_scene_channels_active > 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "scene 节点托管着场景但持续未能确认自身节点号持有者记录"
+            description: "节点持续无法从权威目录确认本节点号持有者（绝不以本地注册应答顶替），请检查发现链路。"
+        - alert: SceneManagerEtcdRevisionRegressed
+          expr: increase(game_scene_manager_registry_revision_regressed_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "scene_manager 探测到注册中心修订号倒退并已推进纪元"
+            description: "可能发生注册中心换集群或未 bump 修订号的备份恢复，旧持有者记录已让位给新登记。"

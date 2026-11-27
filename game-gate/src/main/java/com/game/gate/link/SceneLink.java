@@ -311,6 +311,7 @@ public final class SceneLink {
             for (PlayerEnter enter : dispatched) manager.listener().onEnterDispatched(nodeId, generation, enter);
         }
         manager.metrics().linkEvent(LinkEvent.READY);
+        manager.onLinkReady(nodeId);
         manager.observeLeaseEpoch(nodeId, ack.getSceneLeaseEpoch());
         log.info("scene 链路就绪 node={} gen={} instance={} 补发={}", nodeId, generation, ack.getSceneInstanceId(), flushed);
     }
@@ -365,7 +366,7 @@ public final class SceneLink {
         }
         manager.metrics().linkEvent(wasReady ? LinkEvent.DOWN : LinkEvent.CONNECT_FAILED);
         manager.metrics().linkDropped(LinkDrop.LINK_FAILED, discarded);
-        manager.onLinkDead(this);
+        manager.onLinkDead(this, wasReady);
         if (ch != null) {
             ch.close();
         }

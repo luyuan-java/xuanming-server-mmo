@@ -30,13 +30,20 @@ final class PendingSceneEntry {
     }
 
     long retryDelay(EnterFailure failure, long now) {
+        return retryDelay(failure, now, java.util.concurrent.ThreadLocalRandom.current().nextDouble());
+    }
+
+    /** 可注入随机源 [0, 1) 的退避计算：基础 250ms×2^(n-1) 封顶 2s，施加 ±25% 抖动且不超过剩余预算。 */
+    long retryDelay(EnterFailure failure, long now, double randomUnit) {
         // 单调时钟允许负值和回绕，比较原预算长度，不能对绝对 deadline 做有符号 min。
         if (failure == EnterFailure.NODE_MISSING && deadline - started > DISCOVERY_NANOS) {
             deadline = started + DISCOVERY_NANOS;
         }
         if (!failure.retryable() || attempts >= MAX_ATTEMPTS || now - deadline >= 0) return -1;
-        long backoff = Duration.ofMillis(250L << Math.min(3, Math.max(0, attempts - 1))).toNanos();
-        return Math.min(backoff, deadline - now);
+        long base = Duration.ofMillis(250L << Math.min(3, Math.max(0, attempts - 1))).toNanos();
+        double factor = 0.75 + 0.50 * Math.max(0.0, Math.min(1.0, randomUnit));
+        long jittered = Math.max(1L, (long) (base * factor));
+        return Math.min(jittered, deadline - now);
     }
 
     void cancelTimers() {

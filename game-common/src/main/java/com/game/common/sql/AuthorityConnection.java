@@ -111,18 +111,21 @@ public final class AuthorityConnection implements InvocationHandler {
             return safeValue(call(physical,method,args),null,false);
         }
     }
+    /** COMMIT 之前连接断线或服务端明确回滚时的确定中止 SQLState：事务确定未生效，调用方可在预算内整笔重试。 */
+    public static final String PRE_COMMIT_ABORTED_SQL_STATE = "40001";
+
     private void healthy()throws SQLException {
         if(closed||physical.isClosed())throw new SQLNonTransientConnectionException("连接已关闭","08003");
         if(unknown.get())throw new SQLNonTransientConnectionException("原事务结局未知，禁止继续或重放","08007");
     }
     private void begin()throws SQLException {
         healthy();if(serverAborted)throw new SQLException("服务器已中止原事务，仅允许完整rollback","25000");
-        if(!begun){try{authority.begin(physical);begun=true;}catch(SQLException failure){if(uncertain(failure)){poison();throw unknown(failure);}throw failure;}}
+        if(!begun){try{authority.begin(physical);begun=true;}catch(SQLException failure){if(uncertain(failure)){poison();serverAborted=true;throw preCommitAborted(failure);}throw failure;}}
     }
     /** 事务外纯读只过读闸门：核一次 route_meta（冻结照旧挡回），不开事务、不锁不改 writer_slot。 */
     private void readGate()throws SQLException {
         healthy();
-        try{authority.verifyReadGate(physical);}catch(SQLException failure){if(uncertain(failure)){poison();throw unknown(failure);}throw failure;}
+        try{authority.verifyReadGate(physical);}catch(SQLException failure){if(uncertain(failure)){poison();throw preCommitAborted(failure);}throw failure;}
     }
     private void finish(boolean commit)throws SQLException {
         healthy();if(!begun)return;
@@ -133,7 +136,10 @@ public final class AuthorityConnection implements InvocationHandler {
             if(!commit)for(ValueStream stream:List.copyOf(valueStreams))stream.discardForRollback();
             if(commit)physical.commit();else physical.rollback();
             physical.setAutoCommit(true);begun=false;serverAborted=false;activeAuto=null;transactionId++;
-        }catch(SQLException|RuntimeException|Error failure){poison();throw unknown(failure);}
+        }catch(SQLException failure){
+            if(commit&&aborted(failure)){serverAborted=true;poison();throw preCommitAborted(failure);}
+            poison();throw unknown(failure);
+        }catch(RuntimeException|Error failure){poison();throw unknown(failure);}
         finally{ending=false;}
     }
     private void close()throws SQLException {
@@ -155,6 +161,9 @@ public final class AuthorityConnection implements InvocationHandler {
     private static SQLNonTransientConnectionException unknown(Throwable cause){
         return new SQLNonTransientConnectionException("事务或取消结局未知，物理连接已隔离，保留原业务key","08007");
     }
+    private static SQLTransientConnectionException preCommitAborted(SQLException cause){
+        return new SQLTransientConnectionException("COMMIT 之前连接中断或事务明确回滚，物理连接已隔离，可在预算内整笔重试",PRE_COMMIT_ABORTED_SQL_STATE,cause.getErrorCode());
+    }
     private static boolean uncertain(SQLException error){
         String state=error.getSQLState();
         return error instanceof SQLRecoverableException||error instanceof SQLNonTransientConnectionException
@@ -166,7 +175,14 @@ public final class AuthorityConnection implements InvocationHandler {
     private <T>T delegate(Work<T> work)throws SQLException {
         healthy();
         try{return work.run();}
-        catch(SQLException failure){if(uncertain(failure)){poison();throw unknown(failure);}else if(aborted(failure))serverAborted=true;throw failure;}
+        catch(SQLException failure){
+            if(uncertain(failure)){
+                poison();
+                if(!auto){serverAborted=true;throw preCommitAborted(failure);}
+                throw unknown(failure);
+            }else if(aborted(failure))serverAborted=true;
+            throw failure;
+        }
         catch(RuntimeException|Error fatal){poison();throw fatal;}
     }
     private Point point(Object supplied)throws SQLException {
@@ -308,7 +324,11 @@ public final class AuthorityConnection implements InvocationHandler {
             try {
                 Object result=call(raw,method,args);healthy();return result;
             }catch(SQLException failure){
-                if(uncertain(failure)){poison();throw unknown(failure);}else if(aborted(failure))serverAborted=true;
+                if(uncertain(failure)){
+                    poison();
+                    if(!auto){serverAborted=true;throw preCommitAborted(failure);}
+                    throw unknown(failure);
+                }else if(aborted(failure))serverAborted=true;
                 throw failure;
             }finally{executing.set(false);}
         }

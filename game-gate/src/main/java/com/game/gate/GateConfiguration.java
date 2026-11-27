@@ -123,6 +123,8 @@ public class GateConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.LOGIN, check = false, url = "${game.dubbo.login-url:}",
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS},
             methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> loginClientMessageService() {
         return new ReferenceBean<>();
@@ -134,6 +136,8 @@ public class GateConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.FRIEND, check = false, url = "${game.dubbo.friend-url:}",
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS},
             methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> friendClientMessageService() {
         return new ReferenceBean<>();
@@ -142,6 +146,8 @@ public class GateConfiguration {
     /** 聊天后端（Dubbo group = proto 域 chat，game-chat 提供）；直连 {@code game.dubbo.chat-url}，nacos profile 置空走注册中心。 */
     @Bean
     @DubboReference(group = DubboGroups.CHAT, check = false, url = "${game.dubbo.chat-url:}",
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS},
             methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> chatClientMessageService() {
         return new ReferenceBean<>();
@@ -153,6 +159,8 @@ public class GateConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.TEAM, check = false, url = "${game.dubbo.team-url:}",
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS},
             methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> teamClientMessageService() {
         return new ReferenceBean<>();
@@ -164,6 +172,8 @@ public class GateConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.GUILD, check = false, url = "${game.dubbo.guild-url:}",
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS},
             methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> guildClientMessageService() {
         return new ReferenceBean<>();
@@ -176,16 +186,22 @@ public class GateConfiguration {
      */
     @Bean
     @DubboReference(group = DubboGroups.TRADE, check = false, url = "${game.dubbo.trade-url:}",
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS},
             methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> tradeClientMessageService() {
         return new ReferenceBean<>();
     }
     @Bean
     @DubboReference(group = DubboGroups.MAIL, check = false, url = "${game.dubbo.mail-url:}",
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS},
             methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> mailClientMessageService() { return new ReferenceBean<>(); }
     @Bean
     @DubboReference(group = DubboGroups.RANK, check = false, url = "${game.dubbo.rank-url:}",
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS},
             methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> rankClientMessageService() { return new ReferenceBean<>(); }
 
@@ -196,15 +212,13 @@ public class GateConfiguration {
      * game-match 的 4.5 s 请求预算（它排在 gate 的 5 s 调用超时之内，{@code dubbo.consumer.timeout}）。game-match 不在或调用失败时客户端收到带
      * 请求 id 的信封 1003（§8.1）。
      *
-     * <p><b>后端要先于 gate 启动</b>（本类全部引用同理；{@code BackendReconnectTest} 用真 Triple 钉住）：引用是 {@code check = false} 的直连，
-     * gate 启动时后端不在只记日志、照常起来，之后的调用立刻失败（信封 1003）；但 Dubbo 3.3.6 的 Triple 客户端首次建连没连上时，下一次重连
-     * 排在 60 s 之后（断线后 1 s 重连一次，那一次落空也是再等 60 s；机制见 game-api {@code SceneAssetOpClients#RECONNECT_INTERVAL}），晚起来的
-     * 后端要等到那一刻才通。所以 {@code tools/local/start-slice.sh} 把 game-match 排在 game-team 与 gate 之前（没有照规格草案放在 game-battle 之后）。
-     * 运行中重启某个后端不用重启 gate——同一个引用到点自己连上，只是后端回来之后最长还要等约一个重连周期。这里的引用没有像
-     * {@code NodeRpcClients} 那样把重连间隔压到 1 s：那是全部后端一起的运维取舍，不随接入 game-match 单独改。
+     * <p>统一配置 5 s 心跳与 5 s 最小重连间隔（{@link com.game.api.rpc.DubboReconnectParameters}），后端晚启动或重启后数秒内自动重连恢复，
+     * 同时将半开连接检测缩短至约 15 s。
      */
     @Bean
     @DubboReference(group = DubboGroups.MATCH, check = false, url = "${game.dubbo.match-url:}",
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS},
             methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> matchClientMessageService() {
         return new ReferenceBean<>();
@@ -213,6 +227,8 @@ public class GateConfiguration {
     /** 充值支付后端（Dubbo group = proto 域 payment，game-payment 提供）；直连 {@code game.dubbo.payment-url}，nacos profile 置空走注册中心。 */
     @Bean
     @DubboReference(group = DubboGroups.PAYMENT, check = false, url = "${game.dubbo.payment-url:}",
+            parameters = {org.apache.dubbo.remoting.Constants.HEARTBEAT_KEY, com.game.api.rpc.DubboReconnectParameters.HEARTBEAT_MS,
+                    org.apache.dubbo.remoting.Constants.LEAST_RECONNECT_DURATION_KEY, com.game.api.rpc.DubboReconnectParameters.LEAST_RECONNECT_MS},
             methods = @Method(name = "handle", retries = 0, parameters = {CommonConstants.ENABLE_TIMEOUT_COUNTDOWN_KEY, "true"}))
     public ReferenceBean<ClientMessageService> paymentClientMessageService() {
         return new ReferenceBean<>();

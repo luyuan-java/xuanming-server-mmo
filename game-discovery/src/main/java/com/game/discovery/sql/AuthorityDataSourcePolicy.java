@@ -107,6 +107,11 @@ public class AuthorityDataSourcePolicy {
             }
             bean.getClass().getMethod("setDriver",Driver.class).invoke(bean,new DruidAuthorityDriver(actual,authority,required,init));
             bean.getClass().getMethod("setConnectionInitSqls",Collection.class).invoke(bean,List.of());
+            // J2：把 Druid 空闲驱逐与探活周期收紧到秒级，TiDB 重启后无需等待缺省 60s 才摘掉陈旧物理连接
+            bean.getClass().getMethod("setTimeBetweenEvictionRunsMillis",long.class).invoke(bean,5_000L);
+            bean.getClass().getMethod("setMinEvictableIdleTimeMillis",long.class).invoke(bean,30_000L);
+            bean.getClass().getMethod("setTestWhileIdle",boolean.class).invoke(bean,true);
+            bean.getClass().getMethod("setValidationQuery",String.class).invoke(bean,"SELECT 1");
         }
         private void hikari(Object bean,boolean required)throws ReflectiveOperationException,SQLException{
             if(get(bean,"getHikariPoolMXBean")!=null)throw new IllegalStateException("Hikari已启动，必须以lazy构造后安装physical adapter");
