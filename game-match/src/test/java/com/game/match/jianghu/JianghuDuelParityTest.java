@@ -133,15 +133,91 @@ class JianghuDuelParityTest {
                 n.getTemplateId() == SystemWorldNoticeTemplate.SYSTEM_WORLD_NOTICE_JIANGHU_DUEL_STREAK_BROKEN
                         && n.getStreakCount() == 3);
 
-        // 4. VOID 异常局严格单次幂等退 500 银两（CURRENCY_TYPE_GOLD = 0）
+        // 4. VOID 异常局严格禁止 match 侧再发退款邮件（单通道防双退银两：仅由 scene JianghuService 退还）
         BattleResultEvent voidEv = makeResult(99L, eBattleOutcome.BATTLE_OUTCOME_VOID, 0);
-        svc.applyBattleResult(voidEv, revs);
-        svc.applyBattleResult(voidEv, revs);
-        assertThat(refundMails).hasSize(1);
-        assertThat(refundMails.get(0).getExpireMs()).isZero();
-        assertThat(refundMails.get(0).getAttachments().getCurrencies(0).getCurrencyType())
-                .isEqualTo(CurrencyType.CURRENCY_TYPE_GOLD_VALUE);
-        assertThat(refundMails.get(0).getAttachments().getCurrencies(0).getAmount()).isEqualTo(500L);
+        assertThat(svc.applyBattleResult(voidEv, revs)).isFalse();
+        assertThat(refundMails).isEmpty();
+
+        // 5. 未知 writ_tier 不得抛 NPE
+        BattleResultEvent unknownTier = makeResult(100L, eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 4).toBuilder()
+                .setJianghuDuelContext(makeResult(100L, eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 4)
+                        .getJianghuDuelContext().toBuilder().setWritTier(999).build())
+                .build();
+        assertThat(svc.applyBattleResult(unknownTier, revs)).isTrue();
+    }
+
+    @Test
+    void hardening_NonLeader_ZeroId_LaunchFailureAndTargetBusyOnConfirm() {
+        AtomicLong clock = new AtomicLong(1_730_000_000_000L);
+        AtomicLong nextId = new AtomicLong(0L);
+        long[] nextBattleId = {0L};
+        Map<Long, List<Long>> teams = Map.of(
+                1001L, List.of(1001L, 1002L),
+                1002L, List.of(1001L, 1002L),
+                3001L, List.of(3001L, 3002L),
+                2001L, List.of(2001L, 2002L));
+
+        JianghuDuelService svc = new JianghuDuelService(
+                () -> null,
+                new JianghuDuelService.Ports() {
+                    @Override
+                    public Optional<List<Long>> authoritativeTeamOf(long captainPlayerId) {
+                        return Optional.ofNullable(teams.get(captainPlayerId));
+                    }
+
+                    @Override
+                    public long launchBattle(JianghuDuelInviteView invite, JianghuDuelBattleContext duelContext) {
+                        return nextBattleId[0];
+                    }
+                },
+                clock::get,
+                nextId::get);
+
+        // 1. 非队长 1002 发起组队约战被拒
+        var nonLeader = svc.createInvite(session(1002L), CreateJianghuDuelInviteRequest.newBuilder()
+                .setTargetPlayerId(2001L).setWritTier(JianghuWritTier.JIANGHU_WRIT_TIER_SILVER).build());
+        assertThat(nonLeader.getErrorMessage().getId())
+                .isEqualTo(JianghuErrorTip.jianghu_error.kJianghuTeamSizeMismatch_VALUE);
+
+        // 2. 发号器返回 0 拒绝落入 invites[0]
+        var zeroId = svc.createInvite(session(1001L), CreateJianghuDuelInviteRequest.newBuilder()
+                .setTargetPlayerId(2001L).setWritTier(JianghuWritTier.JIANGHU_WRIT_TIER_SILVER).build());
+        assertThat(zeroId.getErrorMessage().getId())
+                .isEqualTo(JianghuErrorTip.jianghu_error.kJianghuServiceBusy_VALUE);
+
+        // 3. 两个挑战队先后对同一目标队建单：A 队先全员确认进入 PENDING_TARGET 后，B 队再全员确认必须被 targetBusy 拦阻
+        nextId.set(501L);
+        var invA = svc.createInvite(session(1001L), CreateJianghuDuelInviteRequest.newBuilder()
+                .setTargetPlayerId(2001L).setWritTier(JianghuWritTier.JIANGHU_WRIT_TIER_SILVER).build());
+        nextId.set(502L);
+        var invB = svc.createInvite(session(3001L), CreateJianghuDuelInviteRequest.newBuilder()
+                .setTargetPlayerId(2001L).setWritTier(JianghuWritTier.JIANGHU_WRIT_TIER_SILVER).build());
+        assertThat(invA.getErrorMessage().getId()).isZero();
+        assertThat(invB.getErrorMessage().getId()).isZero();
+
+        var aReady = svc.confirmMember(session(1002L),
+                ConfirmJianghuDuelMemberRequest.newBuilder().setDuelInviteId(501L).setAgree(true).build());
+        assertThat(aReady.getInvite().getState())
+                .isEqualTo(JianghuDuelInviteState.JIANGHU_DUEL_INVITE_STATE_PENDING_TARGET);
+
+        var bBlocked = svc.confirmMember(session(3002L),
+                ConfirmJianghuDuelMemberRequest.newBuilder().setDuelInviteId(502L).setAgree(true).build());
+        assertThat(bBlocked.getErrorMessage().getId())
+                .isEqualTo(JianghuErrorTip.jianghu_error.kJianghuInvitePendingOrExpired_VALUE);
+        assertThat(bBlocked.getInvite().getState())
+                .isEqualTo(JianghuDuelInviteState.JIANGHU_DUEL_INVITE_STATE_ABORTED);
+
+        // 4. launchBattle 返回 0：不得标 MATCHED，必须置 ABORTED 并回繁忙错误码
+        svc.respondInvite(session(2001L),
+                RespondJianghuDuelInviteRequest.newBuilder().setDuelInviteId(501L).setAccept(true).build());
+        nextBattleId[0] = 0L;
+        var failedLaunch = svc.confirmMember(session(2002L),
+                ConfirmJianghuDuelMemberRequest.newBuilder().setDuelInviteId(501L).setAgree(true).build());
+        assertThat(failedLaunch.getErrorMessage().getId())
+                .isEqualTo(JianghuErrorTip.jianghu_error.kJianghuServiceBusy_VALUE);
+        assertThat(failedLaunch.getInvite().getState())
+                .isEqualTo(JianghuDuelInviteState.JIANGHU_DUEL_INVITE_STATE_ABORTED);
+        assertThat(failedLaunch.getInvite().getBattleId()).isZero();
     }
 
     private static BattleResultEvent makeResult(long battleId, eBattleOutcome outcome, int rounds) {

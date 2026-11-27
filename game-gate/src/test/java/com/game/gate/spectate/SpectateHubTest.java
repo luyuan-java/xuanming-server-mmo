@@ -462,6 +462,25 @@ class SpectateHubTest {
     }
 
     @Test
+    void 活跃条目切换新实例时若新实例已写状态键_立即读键下发161不必干等下一回合() throws Exception {
+        source.state.put(BATTLE, stateFrame(3));
+        hub.subscribe(session(), ticket());
+        frames(channelOf(0));
+
+        // 新实例已经把第 1 回合 STATE 写入共享状态键，但尚未发新回合广播
+        MessageContent newContent = MessageContent.newBuilder().setMessageId(STATE_ID)
+                .setSerializedMessage(SpectateStateS2C.newBuilder().setState(state(1)).build().toByteString()).build();
+        source.state.put(BATTLE, event(eSpectateFrameKind.SPECTATE_FRAME_STATE, 1, newContent, "new-instance"));
+        int readsBefore = source.stateReads;
+
+        hub.subscribe(session(), ticket(BATTLE, "new-instance"));
+
+        assertThat(source.stateReads).isEqualTo(readsBefore + 1);
+        assertThat(ids(frames(channelOf(0)))).containsExactly(STATE_ID);
+        assertThat(ids(frames(channelOf(1)))).containsExactly(STATE_ID);
+    }
+
+    @Test
     void END只扇一次_退频道_墓碑期内新订阅直接收166_不进订阅表_到期后删除() throws Exception {
         source.state.put(BATTLE, stateFrame(1));
         hub.subscribe(session(), ticket());

@@ -2517,6 +2517,49 @@ class ClientDispatcherTest {
         assertThat(ch.isOpen()).isFalse();
     }
 
+    @Test
+    void 绑定账号含未成年人截止时间时首次RenewSession延迟不晚于截止时刻() {
+        MessageRoute loginRoute = new MessageRoute(LOGIN_MSG, "login", true, "ClientPlayerLogin.Login");
+        MessageRoute renewRoute = new MessageRoute(394, "login", true, "ClientPlayerLogin.RenewSession",
+                false, "/ClientPlayerLogin/RenewSession", false, true);
+        MessageRoutes withRenew = new MessageRoutes() {
+            @Override public MessageRoute clientRoute(int messageId) {
+                return messageId == LOGIN_MSG ? loginRoute : messageId == 394 ? renewRoute : null;
+            }
+            @Override public List<MessageRoute> all() {
+                return List.of(loginRoute, renewRoute);
+            }
+        };
+        FakeLogin renewLogin = new FakeLogin();
+        SessionRegistry reg = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
+        GateMetrics m = new GateMetrics(new SimpleMeterRegistry());
+        ClientDispatcher d = new ClientDispatcher(
+                new GateIdentity(GATE_NODE, "gate-inst-minor-renew", ZONE),
+                tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)), withRenew, TIP_MSG,
+                renewLogin, new FakeLinks(), reg, new GateLimits(4, 3, Duration.ZERO), m, PresenceRecorder.NONE)
+                .withSessionRenewIntervalsMs(600_000L, 60_000L);
+        EmbeddedChannel ch = new EmbeddedChannel(new ClientChannelHandler(reg, d));
+        ch.writeInbound(verifyRequest(GATE_NODE, NOW + 60));
+        ch.readOutbound();
+
+        // 距离截止仅剩 10s（远小于 600s 首次续租间隔），验证首次 RenewSession 延迟被截断至 <= 10s
+        ch.writeInbound(ClientRequest.newBuilder().setMessageId(LOGIN_MSG).setId(1).build());
+        renewLogin.complete(ClientReply.newBuilder()
+                .addDirectives(SessionDirective.newBuilder()
+                        .setBindAccount(BindAccount.newBuilder()
+                                .setAccount("acc_minor_cap")
+                                .setPlayDeadlineMs(NOW * 1000L + 10_000L)))
+                .build());
+        ch.runPendingTasks();
+        assertThat((Object) ch.readOutbound()).isNotNull();
+        // 取消本地 playDeadline 定时器模拟本地定时器失灵，验证 10s（而非 600s）时 login 侧 RenewSession 兜底触发
+        reg.all().forEach(ClientSession::cancelPlayDeadline);
+        ch.advanceTimeBy(10_001L, TimeUnit.MILLISECONDS);
+        ch.runScheduledPendingTasks();
+        assertThat(renewLogin.calls).hasSize(2);
+        assertThat(renewLogin.calls.get(1).getMessageId()).isEqualTo(394);
+    }
+
     private static ByteString payload(int gateNodeId, long expire) {
         return GateTokenPayload.newBuilder().setGateNodeId(gateNodeId).setZoneId(ZONE).setExpireTimestamp(expire).build().toByteString();
     }

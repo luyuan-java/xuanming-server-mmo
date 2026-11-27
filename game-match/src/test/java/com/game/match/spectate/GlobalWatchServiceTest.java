@@ -496,6 +496,7 @@ class GlobalWatchServiceTest {
     @Test
     void 大厅档_重放LOBBY结案的意图_重新准入并签新凭证_不改持久回执_不写占用行() {
         relayOn();
+        players.online(PLAYER, 1, 7);
         GlobalWatchRequestRow history = GlobalWatchRequestRow.newBuilder().setPlayerId(PLAYER).setRequestId(requestId).setBattleId(X)
                 .setResponsePayload(storedLobby().toByteString()).build();
         when(authority.begin(any(), any(), any())).thenReturn(new GlobalWatchAuthority.Request(history, true));
@@ -514,6 +515,7 @@ class GlobalWatchServiceTest {
     @Test
     void 大厅档_重放LOBBY结案_Redis已是中继档时直接签票不发battleRPC() {
         relayOn();
+        players.online(PLAYER, 1, 7);
         tiers.raise(X, com.game.proto.eSpectateTier.SPECTATE_TIER_RELAY, budget());
         GlobalWatchRequestRow history = GlobalWatchRequestRow.newBuilder().setPlayerId(PLAYER).setRequestId(requestId).setBattleId(X)
                 .setResponsePayload(storedLobby().toByteString()).build();
@@ -631,5 +633,27 @@ class GlobalWatchServiceTest {
         verify(authority, never()).reserve(any(), anyLong(), anyString(), any());
         verify(authority, never()).prepare(any(), anyLong(), anyString(), any(), any(), any());
         assertThat(observers.calls).isEmpty();
+    }
+
+    @Test
+    void 大厅档_重放LOBBY回执时玩家已离线或会话已被替代_拒签新票回离线() {
+        admissible();
+        relayOn();
+        GlobalWatchRequestRow concluded = GlobalWatchRequestRow.newBuilder().setPlayerId(PLAYER).setRequestId(requestId).setBattleId(X)
+                .setResponsePayload(storedLobby().toByteString()).build();
+        when(authority.begin(any(), any(), any())).thenReturn(new GlobalWatchAuthority.Request(concluded, true));
+
+        // 1. 离线 -> WATCH_OFFLINE，不签票
+        players.disconnected(PLAYER);
+        GlobalWatchService.Verdict offline = service.watch(session(PLAYER), request(), budget());
+        assertThat(offline.response()).isEqualTo(MatchTips.watchRejected(MatchTip.WATCH_OFFLINE));
+        assertThat(offline.response().getSpectateTicket()).isEmpty();
+
+        // 2. 会话被新连接替代 -> WATCH_OFFLINE，不签票
+        players.presence(PLAYER, com.game.discovery.proto.PlayerPresence.newBuilder()
+                .setPlayerId(PLAYER).setSessionId(999_999).setGateInstanceId("other-gate").build());
+        GlobalWatchService.Verdict staleSession = service.watch(session(PLAYER), request(), budget());
+        assertThat(staleSession.response()).isEqualTo(MatchTips.watchRejected(MatchTip.WATCH_OFFLINE));
+        assertThat(staleSession.response().getSpectateTicket()).isEmpty();
     }
 }

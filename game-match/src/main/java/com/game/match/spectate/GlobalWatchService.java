@@ -162,6 +162,11 @@ public final class GlobalWatchService {
         if(players.inBattle(actor.getPlayerId(),deadline))return verdict(MatchTips.watchRejected(MatchTip.WATCH_IN_BATTLE));
         var snapshot=store.read(stored.getBattleId(),deadline);
         if(!watchable(snapshot))return verdict(MatchTips.watchRejected(MatchTip.WATCH_NOT_FOUND));
+        var presence=players.presence(actor.getPlayerId(),deadline);
+        if(presence.isEmpty()||actor.getSessionId()==0||actor.getGateInstanceId().isEmpty()
+                ||presence.get().getSessionId()!=actor.getSessionId()
+                ||!presence.get().getGateInstanceId().equals(actor.getGateInstanceId()))
+            return verdict(MatchTips.watchRejected(MatchTip.WATCH_OFFLINE));
         var placement=((SpectateStore.Record.Found)snapshot.record()).placement();
         // Redis 已是中继/广播档时直接本地核目录签新票（零 battle RPC），避免 gate 重启重连风暴把 battle 打满；档位键缺失时回落 escalate 打开开关。
         if(relay.relayed(stored.getBattleId(),deadline))return verdictOf(relay.lobby(placement,actor.getPlayerId(),snapshot.redisNowMs(),deadline));

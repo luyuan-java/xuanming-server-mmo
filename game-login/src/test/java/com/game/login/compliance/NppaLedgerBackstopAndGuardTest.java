@@ -70,6 +70,17 @@ class NppaLedgerBackstopAndGuardTest {
         LoginAdminRpcService service = new LoginAdminRpcService(store, null, null, Runnable::run);
 
         try {
+            // 缺失与空字符串 remote.application 必须 fail-closed 拒绝
+            RpcContext.removeServerAttachment();
+            assertThatThrownBy(() -> service.realNamePiOfPlayer(77L).join())
+                    .isInstanceOf(CompletionException.class)
+                    .hasCauseInstanceOf(RpcException.class);
+
+            RpcContext.getServerAttachment().setAttachment(CommonConstants.REMOTE_APPLICATION_KEY, "");
+            assertThatThrownBy(() -> service.realNamePiOfPlayer(77L).join())
+                    .isInstanceOf(CompletionException.class)
+                    .hasCauseInstanceOf(RpcException.class);
+
             RpcContext.getServerAttachment().setAttachment(CommonConstants.REMOTE_APPLICATION_KEY, "game-trade");
             assertThatThrownBy(() -> service.realNamePiOfPlayer(77L).join())
                     .isInstanceOf(CompletionException.class)

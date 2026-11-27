@@ -353,8 +353,13 @@ public final class JianghuDuelService {
                 }
             }
 
+            long inviteId = idGenerator.getAsLong();
+            if (inviteId == 0L) {
+                return CreateJianghuDuelInviteResponse.newBuilder()
+                        .setErrorMessage(tip(JianghuErrorTip.jianghu_error.kJianghuServiceBusy_VALUE)).build();
+            }
             InviteRecord rec = new InviteRecord();
-            rec.duelInviteId = idGenerator.getAsLong();
+            rec.duelInviteId = inviteId;
             rec.writTier = tier;
             rec.teamSize = sideA.size();
             rec.challengerCaptainId = callerId;
@@ -437,6 +442,17 @@ public final class JianghuDuelService {
                 return ConfirmJianghuDuelMemberResponse.newBuilder().setInvite(rec.toView(nowMs)).build();
             }
             if (rec.state == JianghuDuelInviteState.JIANGHU_DUEL_INVITE_STATE_AWAITING_CHALLENGER_TEAM) {
+                for (InviteRecord existing : invites.values()) {
+                    if (existing != rec && existing.targetCaptainId == rec.targetCaptainId
+                            && (existing.state == JianghuDuelInviteState.JIANGHU_DUEL_INVITE_STATE_PENDING_TARGET
+                                    || existing.state == JianghuDuelInviteState.JIANGHU_DUEL_INVITE_STATE_AWAITING_TARGET_TEAM)
+                            && existing.expiresAtMs > nowMs) {
+                        rec.state = JianghuDuelInviteState.JIANGHU_DUEL_INVITE_STATE_ABORTED;
+                        return ConfirmJianghuDuelMemberResponse.newBuilder()
+                                .setErrorMessage(tip(JianghuErrorTip.jianghu_error.kJianghuInvitePendingOrExpired_VALUE))
+                                .setInvite(rec.toView(nowMs)).build();
+                    }
+                }
                 rec.state = JianghuDuelInviteState.JIANGHU_DUEL_INVITE_STATE_PENDING_TARGET;
                 rec.confirmDeadlineMs = 0L;
                 rec.expiresAtMs = nowMs + rule.inviteTtlMs();
@@ -560,9 +576,7 @@ public final class JianghuDuelService {
         JianghuDuelBattleContext ctx = event.getJianghuDuelContext();
         RuleSnapshot rule = RuleSnapshot.from(ruleSupplier.get());
         if (event.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_VOID || event.getTotalRounds() == 0) {
-            if (ctx.getWritTier() == JianghuWritTier.JIANGHU_WRIT_TIER_SILVER_VALUE) {
-                refundSilverOnce(ctx.getDuelInviteId(), ctx.getChallengerCaptainId(), rule.silverWritCost());
-            }
+            // 单通道防刷银两（批 X / jianghu_duel_logic.go）：银两退还唯一由 scene JianghuService.applyDuelSettlement 执行，match 侧严禁再发退款邮件
             return false;
         }
         if (!appliedBattleIds.add(event.getBattleId())) {
@@ -704,6 +718,13 @@ public final class JianghuDuelService {
                 .setTeamSize(rec.teamSize)
                 .build();
         long battleId = ports.launchBattle(preView, duelCtx);
+        if (battleId == 0L) {
+            rec.state = JianghuDuelInviteState.JIANGHU_DUEL_INVITE_STATE_ABORTED;
+            rec.confirmDeadlineMs = 0L;
+            return ConfirmJianghuDuelMemberResponse.newBuilder()
+                    .setErrorMessage(tip(JianghuErrorTip.jianghu_error.kJianghuServiceBusy_VALUE))
+                    .setInvite(rec.toView(nowMs)).build();
+        }
         rec.battleId = battleId;
         rec.state = JianghuDuelInviteState.JIANGHU_DUEL_INVITE_STATE_MATCHED;
         rec.confirmDeadlineMs = 0L;
@@ -736,11 +757,12 @@ public final class JianghuDuelService {
             case 3 -> state.draws++;
             default -> { }
         }
+        JianghuWritTier tierEnum = JianghuWritTier.forNumber(ctx.getWritTier());
         state.logs.add(0, JianghuGrudgeBattleLogEntry.newBuilder()
                 .setBattleId(event.getBattleId())
                 .setOutcomeForSelf(outcomeSelf)
                 .setTotalRounds(event.getTotalRounds())
-                .setWritTier(JianghuWritTier.forNumber(ctx.getWritTier()))
+                .setWritTier(tierEnum != null ? tierEnum : JianghuWritTier.JIANGHU_WRIT_TIER_UNSPECIFIED)
                 .setTeamSize(ctx.getTeamSize())
                 .setFinishedAtMs(finishedMs)
                 .build());
@@ -804,9 +826,13 @@ public final class JianghuDuelService {
             }
             return List.of(captainId);
         }
+        List<Long> members = authTeam.get();
+        if (members.isEmpty() || members.get(0) != captainId) {
+            return null;
+        }
         LinkedHashSet<Long> normalized = new LinkedHashSet<>();
         normalized.add(captainId);
-        normalized.addAll(authTeam.get());
+        normalized.addAll(members);
         if (!requested.isEmpty()) {
             Set<Long> reqSet = new HashSet<>(requested);
             reqSet.add(captainId);

@@ -252,9 +252,11 @@ public final class SpectateHub implements SpectateSubscriptions, AutoCloseable {
         }
         Entry entry = entries.get(battleId);
         boolean needChannel = false;
+        boolean switchedActiveInstance = false;
         if (entry != null && !instance.equals(entry.instanceId)) {
             // 凭证是 match 按落点签的权威：实例不同就以凭证为准（旧条目的缓存与墓碑属于旧实例）
             needChannel = entry.end != null; // 墓碑已经退了频道
+            switchedActiveInstance = !needChannel;
             entry.reset(instance);
             entry.lastFrameNanos = nanoClock.getAsLong();
         }
@@ -278,6 +280,21 @@ public final class SpectateHub implements SpectateSubscriptions, AutoCloseable {
         deliverFirst(entry, session);
         if (needChannel) {
             attachChannel(entry); // 排在进订阅表之后：订阅失败要给这名观众收尾
+        } else if (switchedActiveInstance) {
+            // 活跃条目切换 battle 实例时频道仍在订阅，主动读一次状态键：若已属新实例立即下发 161，仍属旧实例则静默等新实例下一帧。
+            Entry currentEntry = entry;
+            source.readState(battleId).whenComplete((state, readError) -> post(() -> {
+                if (readError != null || entries.get(battleId) != currentEntry || state.isEmpty()) {
+                    return;
+                }
+                try {
+                    if (currentEntry.instanceId.equals(SpectateFrameEvent.parseFrom(state.get()).getBattleInstanceId())) {
+                        accept(currentEntry, state.get(), false);
+                    }
+                } catch (InvalidProtocolBufferException ignored) {
+                    // 状态键尚未切换到新实例，静默等待频道帧
+                }
+            }));
         }
     }
 

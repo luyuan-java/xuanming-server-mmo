@@ -274,7 +274,13 @@ class LoginComplianceTest {
         p.setPlayerId(501); p.setAccount("dev_d1"); p.setZoneId(1); p.setName("道友注销"); p.setClassId(1); p.setGender(1);
         store.createPlayer(p);
         store.setAccountRealName("dev_d1", PI_ADULT);
-        assertThat(admin.realNamePiOfPlayer(501).join()).isEqualTo(PI_ADULT);
+        org.apache.dubbo.rpc.RpcContext.getServerAttachment()
+                .setAttachment(org.apache.dubbo.common.constants.CommonConstants.REMOTE_APPLICATION_KEY, "game-payment");
+        try {
+            assertThat(admin.realNamePiOfPlayer(501).join()).isEqualTo(PI_ADULT);
+        } finally {
+            org.apache.dubbo.rpc.RpcContext.removeServerAttachment();
+        }
 
         // 1. 拒绝用 access_token 申请注销
         AccountDeletionResponse rejectTok = rpc.requestAccountDeletion(AccountDeletionRequest.newBuilder()

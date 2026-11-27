@@ -947,12 +947,16 @@ public final class ClientDispatcher {
             return;
         }
         s.account = bind.getAccount();
+        long deadlineMs = bind.getPlayDeadlineMs();
         if (s.account.isEmpty()) {
             s.cancelSessionRenew();
         } else if (renewSessionMessageId > 0) {
-            scheduleSessionRenew(s, s.account, sessionRenewInitialMs);
+            long initialRenewMs = sessionRenewInitialMs;
+            if (deadlineMs > 0) {
+                initialRenewMs = Math.min(initialRenewMs, Math.max(0L, deadlineMs - clock.millis()));
+            }
+            scheduleSessionRenew(s, s.account, initialRenewMs);
         }
-        long deadlineMs = bind.getPlayDeadlineMs();
         if (deadlineMs <= 0) {
             s.cancelPlayDeadline();
             return;

@@ -628,15 +628,25 @@ public final class TacticalPuzzleStore {
             if (!won || playerId != row.authorPlayerId() || pctx.getSpecRevision() != row.specRevision()) {
                 return;
             }
+            long oldVerified = row.verifiedBattleId();
+            // 按 battle_id 无符号升序先锁齐新旧录像正文行，杜绝新->旧逆序 AB-BA 死锁。
+            java.util.TreeSet<Long> lockIds = new java.util.TreeSet<>(Long::compareUnsigned);
+            lockIds.add(create.getBattleId());
+            if (oldVerified != 0L) {
+                lockIds.add(oldVerified);
+            }
             boolean hasReport = false;
-            try (PreparedStatement ps = c.prepareStatement(
-                    "SELECT 1 FROM match_battle_report WHERE battle_id=? FOR UPDATE")) {
-                ps.setObject(1, PbMysql.uint64(create.getBattleId()));
-                try (ResultSet rs = ps.executeQuery()) {
-                    hasReport = rs.next();
+            for (long lockId : lockIds) {
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT 1 FROM match_battle_report WHERE battle_id=? FOR UPDATE")) {
+                    ps.setObject(1, PbMysql.uint64(lockId));
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (lockId == create.getBattleId()) {
+                            hasReport = rs.next();
+                        }
+                    }
                 }
             }
-            long oldVerified = row.verifiedBattleId();
             long newVerified = hasReport ? create.getBattleId() : oldVerified;
             if (hasReport && newVerified != oldVerified) {
                 try (PreparedStatement ps = c.prepareStatement(
@@ -666,7 +676,8 @@ public final class TacticalPuzzleStore {
             return;
         }
 
-        if (row.state() != TacticalPuzzleSpecValidator.STATE_PUBLISHED) {
+        if (row.state() != TacticalPuzzleSpecValidator.STATE_PUBLISHED
+                || pctx.getSpecRevision() != row.specRevision()) {
             return;
         }
         boolean rowExists = false;

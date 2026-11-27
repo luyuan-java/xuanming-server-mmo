@@ -185,21 +185,37 @@ public final class TrialChallengeCardStore {
 
         String ownerName = resolveOwnerName(c, battleId, ownerPlayerId, summaryBytes);
 
-        // 4. 锁定录像正文行确认存在，确保 ref_count 与卡片绑定一致。
-        boolean hasReplay = false;
-        try (PreparedStatement ps = c.prepareStatement(
-                "SELECT 1 FROM match_battle_report WHERE battle_id=? FOR UPDATE")) {
-            ps.setObject(1, PbMysql.uint64(battleId));
-            try (ResultSet rs = ps.executeQuery()) {
-                hasReplay = rs.next();
-            }
-        }
-
-        // 5. 超出上限按最旧 FIFO 淘汰，并同步回收已钉住的录像引用。
+        // 4. 先收集全部待淘汰卡片，与本次 battleId 合并按无符号升序一次性锁 match_battle_report，杜绝新->旧逆序 AB-BA 死锁。
         while (liveCards.size() >= MAX_CARDS_PER_PLAYER) {
             evictCards.add(liveCards.removeFirst());
         }
         Map<Long, Integer> released = new TreeMap<>(Long::compareUnsigned);
+        java.util.TreeSet<Long> reportLockOrder = new java.util.TreeSet<>(Long::compareUnsigned);
+        reportLockOrder.add(battleId);
+        for (ExistingCard victim : evictCards) {
+            try {
+                TrialChallengeCardView v = TrialChallengeCardView.parseFrom(victim.viewBytes());
+                if (v.getHasReplay()) {
+                    reportLockOrder.add(victim.battleId());
+                }
+            } catch (InvalidProtocolBufferException ignored) {
+                // 坏行在下方删除，不阻断新卡签发
+            }
+        }
+        boolean hasReplay = false;
+        for (long lockBattleId : reportLockOrder) {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT 1 FROM match_battle_report WHERE battle_id=? FOR UPDATE")) {
+                ps.setObject(1, PbMysql.uint64(lockBattleId));
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (lockBattleId == battleId) {
+                        hasReplay = rs.next();
+                    }
+                }
+            }
+        }
+
+        // 5. 执行淘汰删除并精确累加已删除卡片对应的录像引用回收数。
         for (ExistingCard victim : evictCards) {
             try (PreparedStatement del = c.prepareStatement(
                     "DELETE FROM match_trial_challenge_card WHERE card_id=? AND owner_player_id=?")) {

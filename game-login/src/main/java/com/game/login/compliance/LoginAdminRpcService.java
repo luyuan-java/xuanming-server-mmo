@@ -69,7 +69,8 @@ public class LoginAdminRpcService implements LoginAdminService {
     @Override
     public CompletableFuture<String> realNamePiOfPlayer(long playerId) {
         String remoteApp = RpcContext.getServerAttachment().getAttachment(CommonConstants.REMOTE_APPLICATION_KEY);
-        if (remoteApp != null && !remoteApp.isEmpty() && !ALLOWED_REAL_NAME_READER_APP.equals(remoteApp)) {
+        // fail-closed：空/缺失或非 game-payment 调用方一律拒绝读取玩家实名 pi
+        if (!ALLOWED_REAL_NAME_READER_APP.equals(remoteApp)) {
             log.warn("[real-name] rejected realNamePiOfPlayer from unauthorized caller={}", remoteApp);
             return CompletableFuture.failedFuture(new RpcException(RpcException.AUTHORIZATION_EXCEPTION,
                     "realNamePiOfPlayer caller not allowed"));
