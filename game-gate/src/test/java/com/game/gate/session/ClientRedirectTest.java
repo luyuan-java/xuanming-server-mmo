@@ -758,10 +758,17 @@ class ClientRedirectTest {
         return c;
     }
 
+    private static final java.util.concurrent.atomic.AtomicLong NORMAL_TOKEN_SEQ = new java.util.concurrent.atomic.AtomicLong();
+
     /** Java 普通登录令牌（gateway 签）：不带持票者，target_zone_id 钉在签发 zone。 */
     private static GateTokenPayload normalToken() {
+        byte[] key = new byte[32];
+        long seq = NORMAL_TOKEN_SEQ.incrementAndGet();
+        for (int i = 0; i < 8; i++) {
+            key[i] = (byte) (seq >>> (i * 8));
+        }
         return GateTokenPayload.newBuilder().setGateNodeId(GATE_NODE).setZoneId(ZONE).setExpireTimestamp(NOW + 600)
-                .setHmacSessionKey(ByteString.copyFrom(new byte[32])).setTargetZoneId(ZONE).build();
+                .setHmacSessionKey(ByteString.copyFrom(key)).setTargetZoneId(ZONE).build();
     }
 
     /** 来到本 zone 的重定向票据（scene-manager 签）：带持票者、不带会话密钥。 */

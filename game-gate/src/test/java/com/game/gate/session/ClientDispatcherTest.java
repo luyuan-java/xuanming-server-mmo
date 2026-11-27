@@ -157,14 +157,12 @@ class ClientDispatcherTest {
     @Test
     void 握手被拒后同一批到达的业务包不再处理() {
         EmbeddedChannel ch = connect();
-        // P2-4：验签前不建会话
+        // P2-4：验签前不建会话；同一批里握手失败后紧跟的业务帧被丢弃不转发
         assertThat(registry.size()).isZero();
-        ch.writeInbound(verifyRequest(GATE_NODE + 1, NOW + 600));
+        ch.writeInbound(verifyRequest(GATE_NODE + 1, NOW + 600), request(1, LOGIN_MSG, "x"));
         ClientTokenVerifyResponse rejected = ch.readOutbound();
         assertThat(rejected.getSuccess()).isFalse();
         assertThat(registry.size()).isZero();
-        // 关闭中的连接即使有后续业务帧到达也不分发、不转发
-        ch.writeInbound(request(1, LOGIN_MSG, "x"));
         assertThat(login.calls).isEmpty();
         assertThat((Object) ch.readOutbound()).isNull();
     }

@@ -3201,6 +3201,8 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 2. 做悬赏求书玩法时直接按 trade 托管实现,不在 scene 同帧改两名玩家:`game-trade` 加 kind 7 合同——发榜托管悬赏银两(只扣流通银两)→ 挂榜(全服)→ 揭榜托管一枚封卷道籍 3414 → 按扣出快照核对条款 → 先书后款(税后 95% 给揭榜人、5% 销毁);不符原样退书回挂榜;发榜人收书被拒整单退回且退全额;每人至多 3 张,计数与插入在同一把角色锁下;撤单只在托管与挂榜阶段;揭榜结果按同一请求号重放查。判据、状态机与角色名照主仓 `go/trade/internal/commerce/wanted_skill_book.go`。
 3. 验证:移植主仓 `wanted_skill_book_test.go`、`wanted_skill_book_tidb_test.go` 与 `delivery_order_test.go` 的 `TestWantedBuyerRejectedRefundsTheFullReward` 的场景。
 
+**2026-11-27 补:客户端已切、scene 560~563 已退役**(主仓批 B,未编译):客户端 `SkillCraftClient` 的发榜、揭榜、撤单改调 trade 的 582~584 与 `CancelCommerceOrder`,书架书先 `SealSkillBook` 再揭榜,发榜 / 揭榜按同一请求号重发查结论;主仓 scene 删掉 `PostSkillBookWantedOrder` / `CancelSkillBookWantedOrder` / `ListSkillBookWantedOrders` / `FulfillSkillBookWantedOrder`(560~563 转墓碑)与 `SkillCraftingStateSnapshot.my_wanted_orders`(`reserved 23`)。Java 的 `ContractSync` 同步时这四条随之删掉、号保留不复用;Java 本来没有这四条的实现,其余待做照上。
+
 
 ### 2026-11-26 观战分级扩容四端 P0/P1/P2 复查与 Java 侧 5 项修复
 

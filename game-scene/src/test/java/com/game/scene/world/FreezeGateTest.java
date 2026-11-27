@@ -424,7 +424,7 @@ class FreezeGateTest {
         assertThat(player.toSave()).as("冻结中没有任何入口改动可持久化状态").isEqualTo(handOff.frozen());
         assertThat(audit.items).hasSize(itemAudits);
         assertThat(audit.currencies).hasSize(currencyAudits);
-        assertThat(frozenRejections("request")).as("173 / 94 / 95 / 381").isEqualTo(4);
+        assertThat(frozenRejections("request")).as("173 / 94 / 95 / 381 / 590").isEqualTo(5);
         assertThat(frozenRejections("move")).isEqualTo(3);
         assertThat(frozenRejections("asset_op")).isEqualTo(1);
         assertThat(meters.get("game.scene.moves").tag("result", "frozen").counter().count()).isEqualTo(3);
@@ -618,7 +618,7 @@ class FreezeGateTest {
         probes.add(new Probe("SceneSceneClientPlayer", "SetSpectateChatSetting",
                 com.game.proto.SetSpectateChatSettingRequest.newBuilder()
                         .setPreference(com.game.proto.eSpectateChatPreference.SPECTATE_CHAT_PREF_FORBID).build(),
-                CHANGING_SCENE));
+                1005));
         // 批次 5.4：226 自己判在途，交出冻结中回 13000（zone-travel-spec §5.10），不改任何状态
         probes.add(new Probe("SceneSceneClientPlayer", "TravelToZone", TravelToZoneRequest.newBuilder().setTargetZoneId(2).build(),
                 TRANSFER_IN_PROGRESS));

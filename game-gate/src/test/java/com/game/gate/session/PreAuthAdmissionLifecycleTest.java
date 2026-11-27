@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.ClientMessageService;
 import com.game.api.proto.AbandonedEnter;
+import com.game.api.proto.Ack;
 import com.game.api.proto.ClientCall;
 import com.game.api.proto.ClientReply;
 import com.game.api.proto.SessionClosed;
@@ -71,14 +72,14 @@ class PreAuthAdmissionLifecycleTest {
         }
 
         @Override
-        public CompletableFuture<Void> sessionClosed(SessionClosed closed) {
+        public CompletableFuture<Ack> sessionClosed(SessionClosed closed) {
             closedCount.incrementAndGet();
-            return CompletableFuture.completedFuture(null);
+            return CompletableFuture.completedFuture(Ack.getDefaultInstance());
         }
 
         @Override
-        public CompletableFuture<Void> abandonEnter(AbandonedEnter abandoned) {
-            return CompletableFuture.completedFuture(null);
+        public CompletableFuture<Ack> abandonEnter(AbandonedEnter abandoned) {
+            return CompletableFuture.completedFuture(Ack.getDefaultInstance());
         }
     }
 
@@ -89,12 +90,13 @@ class PreAuthAdmissionLifecycleTest {
         }
 
         @Override
-        public void ensureConnected(int sceneNodeId) {
+        public long send(int sceneNodeId, long generation, com.game.api.proto.NodeLinkFrame frame) {
+            return 0;
         }
     }
 
     private static final MessageRoutes ROUTES = id -> id == LOGIN_MSG
-            ? new MessageRoute(LOGIN_MSG, ClientDispatcher.DOMAIN_LOGIN, "ClientPlayerLogin.Login", true, false, false, false)
+            ? new MessageRoute(LOGIN_MSG, ClientDispatcher.DOMAIN_LOGIN, true, "ClientPlayerLogin.Login", false)
             : null;
 
     @Test
@@ -273,5 +275,64 @@ class PreAuthAdmissionLifecycleTest {
             worker.shutdownGracefully(0, 1, TimeUnit.SECONDS).syncUninterruptibly();
             boss.shutdownGracefully(0, 1, TimeUnit.SECONDS).syncUninterruptibly();
         }
+    }
+
+    @Test
+    void 握手期限从表头扫_到点关且删记录_只关到期表头_期限内验签建会话_事件循环卡过只推迟() {
+        AtomicLong nanos = new AtomicLong(TimeUnit.SECONDS.toNanos(100));
+        GateTokens tokens = GateTokens.ofUtf8("sweep-secret");
+        SessionRegistry registry = new SessionRegistry(new SessionIdAllocator(GATE_NODE));
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        GateMetrics metrics = new GateMetrics(meters);
+        ClientDispatcher dispatcher = new ClientDispatcher(new GateIdentity(GATE_NODE, "gate-sw", ZONE),
+                tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)), ROUTES,
+                new PushMessageIds(23, 124, 34), new RecordingLogin(), Map.of(), new NoopLinks(), registry,
+                new GateLimits(8, 5, Duration.ofSeconds(10)), metrics, PresenceRecorder.NONE, nanos::get);
+
+        LoopStallDetector stall = new LoopStallDetector();
+        stall.recordBeat(nanos.get());
+        var policy = ConnectionAdmissionPolicy.defaults(100, 10_000L);
+        var admission = new ConnectionAdmissionController<Channel>(policy, registry::size, nanos::get, () -> 0.5, stall);
+        metrics.bindAdmission(admission);
+
+        // t=100s 建连 ch1（到期=110s），t=105s 建连 ch2（到期=115s），t=106s 建连 ch3（期限内验签）
+        EmbeddedChannel ch1 = new EmbeddedChannel(new ClientChannelHandler(registry, dispatcher, admission, false, true));
+        nanos.addAndGet(TimeUnit.SECONDS.toNanos(5));
+        stall.recordBeat(nanos.get());
+        EmbeddedChannel ch2 = new EmbeddedChannel(new ClientChannelHandler(registry, dispatcher, admission, false, true));
+        nanos.addAndGet(TimeUnit.SECONDS.toNanos(1));
+        stall.recordBeat(nanos.get());
+        EmbeddedChannel ch3 = new EmbeddedChannel(new ClientChannelHandler(registry, dispatcher, admission, false, true));
+        assertThat(admission.preAuthCount()).isEqualTo(3);
+
+        // ch3 在期限内验签成功，移出未验签池并建会话
+        ByteString payload = GateTokenPayload.newBuilder()
+                .setGateNodeId(GATE_NODE).setZoneId(ZONE).setExpireTimestamp(NOW + 600).build().toByteString();
+        ch3.writeInbound(ClientTokenVerifyRequest.newBuilder().setPayload(payload).setSignature(tokens.sign(payload)).build());
+        assertThat(((ClientTokenVerifyResponse) ch3.readOutbound()).getSuccess()).isTrue();
+        assertThat(registry.size()).isEqualTo(1);
+        assertThat(admission.preAuthCount()).isEqualTo(2);
+
+        // 模拟事件循环卡过（距上一拍超过 2s 未打拍直接跳到 t=111s）：sweepExpired 只推迟、不杀 ch1
+        nanos.set(TimeUnit.SECONDS.toNanos(111));
+        int reapedWhileStalled = admission.sweepExpired(e -> dispatcher.onPreAuthHandshakeTimeout(e.attachment(), "127.0.0.1"));
+        assertThat(reapedWhileStalled).isZero();
+        assertThat(ch1.isOpen()).isTrue();
+        assertThat(admission.preAuthCount()).isEqualTo(2);
+
+        // 恢复连续两拍健康打拍后扫表头（t=112s）：只关到期的表头 ch1，未到期的 ch2 保留
+        stall.recordBeat(nanos.get());
+        nanos.addAndGet(TimeUnit.SECONDS.toNanos(1));
+        stall.recordBeat(nanos.get());
+        int reaped = admission.sweepExpired(e -> dispatcher.onPreAuthHandshakeTimeout(e.attachment(), "127.0.0.1"));
+        ch1.runPendingTasks();
+        assertThat(reaped).isEqualTo(1);
+        assertThat(ch1.isOpen()).isFalse();
+        assertThat(ch2.isOpen()).isTrue();
+        assertThat(ch3.isOpen()).isTrue();
+        assertThat(admission.preAuthCount()).isEqualTo(1);
+        assertThat(meters.get("gate.preauth.reaped").functionCounter().count()).isEqualTo(1.0);
+        ch2.close();
+        ch3.close();
     }
 }
