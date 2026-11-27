@@ -89,7 +89,15 @@ public class InMemoryAssetStore implements GuildAssetStore {
                     || Long.compareUnsigned(r.getLeaseUntilMs(), nowMs) >= 0) {
                 return Lost.INSTANCE;
             }
-            rows.put(opId, r.toBuilder().setLeaseUntilMs(leaseUntilMs).setLeaseToken(token).setUpdatedMs(nowMs).build());
+            long prevLastSend = r.getLastSendMs();
+            if (prevLastSend == 0L) {
+                prevLastSend = Long.compareUnsigned(r.getCreatedMs(), r.getUpdatedMs()) >= 0
+                        ? r.getCreatedMs() : r.getUpdatedMs();
+            }
+            long foldedLastSend = Long.compareUnsigned(prevLastSend, r.getLeaseUntilMs()) >= 0
+                    ? prevLastSend : r.getLeaseUntilMs();
+            rows.put(opId, r.toBuilder().setLastSendMs(foldedLastSend).setLeaseUntilMs(leaseUntilMs)
+                    .setLeaseToken(token).setUpdatedMs(nowMs).build());
         }
         Consumer<Long> hook = afterClaimCas;
         if (hook != null) {
@@ -127,9 +135,12 @@ public class InMemoryAssetStore implements GuildAssetStore {
         if (r == null || r.getStatus() != GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING || r.getLeaseToken() != op.leaseToken()) {
             return RescheduleResult.LEASE_LOST;
         }
+        long nextLastSend = answer.local()
+                ? r.getLastSendMs()
+                : (Long.compareUnsigned(r.getLastSendMs(), nowMs) >= 0 ? r.getLastSendMs() : nowMs);
         rows.put(op.opId(), r.toBuilder().setAttempts(r.getAttempts() + 1).setNextAttemptMs(nextAttemptMs).setLeaseUntilMs(0)
                 .setDurable(answer.durable() ? 1 : 0).setLastOutcome(answer.outcomeNumber()).setLastReason(answer.reason())
-                .setUpdatedMs(nowMs).build());
+                .setLastSendMs(nextLastSend).setUpdatedMs(nowMs).build());
         return RescheduleResult.RESCHEDULED;
     }
 
@@ -144,8 +155,9 @@ public class InMemoryAssetStore implements GuildAssetStore {
         if (r == null || r.getStatus() != GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING || r.getLeaseToken() != op.leaseToken()) {
             return RescheduleResult.LEASE_LOST;
         }
+        long nextLastSend = Long.compareUnsigned(r.getLastSendMs(), nowMs) >= 0 ? r.getLastSendMs() : nowMs;
         rows.put(op.opId(), r.toBuilder().setAttempts(r.getAttempts() + 1).setNextAttemptMs(nextAttemptMs).setLeaseUntilMs(0)
-                .setUpdatedMs(nowMs).build());
+                .setLastSendMs(nextLastSend).setUpdatedMs(nowMs).build());
         return RescheduleResult.RESCHEDULED;
     }
 
@@ -176,6 +188,17 @@ public class InMemoryAssetStore implements GuildAssetStore {
 
     @Override
     public FinalizeResult resolveManually(ManualResolution resolution, long nowMs, Deadline deadline) {
+        return doResolveManually(resolution, null, nowMs);
+    }
+
+    @Override
+    public FinalizeResult resolveManuallyIfQuiet(ManualResolution resolution, QuietWitness witness, long nowMs,
+                                                 Deadline deadline) {
+        java.util.Objects.requireNonNull(witness, "witness");
+        return doResolveManually(resolution, witness, nowMs);
+    }
+
+    private FinalizeResult doResolveManually(ManualResolution resolution, QuietWitness witness, long nowMs) {
         String invalid = resolution.validate();
         if (invalid != null) {
             throw new IllegalArgumentException(invalid);
@@ -185,6 +208,9 @@ public class InMemoryAssetStore implements GuildAssetStore {
         synchronized (this) {
             r = rows.get(resolution.opId());
             if (r == null || r.getStatus() != GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING) {
+                return FinalizeResult.NOT_FINALIZED;
+            }
+            if (witness != null && !witness.matches(r)) {
                 return FinalizeResult.NOT_FINALIZED;
             }
             rows.put(resolution.opId(), r.toBuilder().setStatus(AssetOpStatus.toRecord(resolution.status()))

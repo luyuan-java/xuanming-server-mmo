@@ -6,6 +6,7 @@ import com.game.guild.asset.AssetOpStatus;
 import com.game.guild.asset.GuildAssetStore;
 import com.game.guild.asset.GuildAssetStore.FinalizeResult;
 import com.game.guild.asset.ManualResolution;
+import com.game.guild.asset.QuietWitness;
 import com.game.guild.store.pb.GuildAssetOpKind;
 import com.game.guild.store.pb.GuildAssetOpRow;
 import com.game.guild.store.pb.GuildAssetOpStatus;
@@ -113,8 +114,34 @@ public final class AssetOpFixMain {
         }
     }
 
-    /** 打开的 Store 与要在退出前关掉的资源。 */
-    record OpenedStore(GuildAssetStore store, AutoCloseable resources) {
+    /** 缺省租约时长（与 GuildProperties.AssetOp 缺省 10 s 一致）。 */
+    static final long DEFAULT_LEASE_MS = 10_000L;
+
+    /** 判「从未应用」前的本机单调时钟观察等待器（测试可注入无阻塞替身验证窗口时长与重读）。 */
+    @FunctionalInterface
+    interface ObserveWaiter {
+        void awaitMillis(long millis) throws InterruptedException;
+
+        /** 生产等待器：基于本机单调时钟 {@link System#nanoTime()}，不受墙钟回拨影响。 */
+        ObserveWaiter MONOTONIC = millis -> {
+            long remainingNs = Math.max(0L, millis) * 1_000_000L;
+            long deadlineNs = System.nanoTime() + remainingNs;
+            while (remainingNs > 0L) {
+                long ms = remainingNs / 1_000_000L;
+                int ns = (int) (remainingNs % 1_000_000L);
+                Thread.sleep(ms, ns);
+                remainingNs = deadlineNs - System.nanoTime();
+            }
+        };
+
+        ObserveWaiter NOOP = millis -> { };
+    }
+
+    /** 打开的 Store、要在退出前关掉的资源，以及配置的循环行租约时长（用于算观察窗口）。 */
+    record OpenedStore(GuildAssetStore store, AutoCloseable resources, long leaseMs) {
+        OpenedStore(GuildAssetStore store, AutoCloseable resources) {
+            this(store, resources, DEFAULT_LEASE_MS);
+        }
     }
 
     private AssetOpFixMain() {
@@ -122,7 +149,8 @@ public final class AssetOpFixMain {
 
     public static void main(String[] args) {
         logToStderr();
-        System.exit(run(args, System.out, System.err, AssetOpFixEnvironment.OPENER, System::currentTimeMillis));
+        System.exit(run(args, System.out, System.err, AssetOpFixEnvironment.OPENER, System::currentTimeMillis,
+                ObserveWaiter.MONOTONIC));
     }
 
     /**
@@ -152,8 +180,14 @@ public final class AssetOpFixMain {
         context.getLogger("io.netty").setLevel(ch.qos.logback.classic.Level.WARN);
     }
 
-    /** 可测的入口：不调 {@code System.exit}，返回退出码。 */
+    /** 可测的入口：不调 {@code System.exit}，返回退出码（默认跳过真实睡眠，供既有单元测试快速执行）。 */
     static int run(String[] args, PrintStream out, PrintStream err, StoreOpener opener, LongSupplier clockMs) {
+        return run(args, out, err, opener, clockMs, ObserveWaiter.NOOP);
+    }
+
+    /** 完整可测入口：支持注入本机单调时钟观察等待器。 */
+    static int run(String[] args, PrintStream out, PrintStream err, StoreOpener opener, LongSupplier clockMs,
+                   ObserveWaiter waiter) {
         Flags global = new Flags(Map.of("f", false, "expect-database", false, "h", true, "help", true));
         String error = global.parse(args, 0);
         if (error != null) {
@@ -182,12 +216,14 @@ public final class AssetOpFixMain {
             case "list" -> {
                 ListOptions o = parseList(sub, err);
                 yield o == null ? EXIT_REJECTED
-                        : withStore(opener, configPath, expectDatabase, err, store -> runList(store, o, out, err, clockMs));
+                        : withStore(opener, configPath, expectDatabase, err,
+                                opened -> runList(opened.store(), o, out, err, clockMs));
             }
             case "resolve" -> {
                 ResolveOptions o = parseResolve(sub, err);
                 yield o == null ? EXIT_REJECTED
-                        : withStore(opener, configPath, expectDatabase, err, store -> runResolve(store, o, out, err, clockMs));
+                        : withStore(opener, configPath, expectDatabase, err,
+                                opened -> runResolve(opened.store(), opened.leaseMs(), o, out, err, clockMs, waiter));
             }
             default -> {
                 err.println("未知子命令 \"" + rest.getFirst() + "\"");
@@ -199,7 +235,7 @@ public final class AssetOpFixMain {
     }
 
     private interface StoreCommand {
-        int run(GuildAssetStore store);
+        int run(OpenedStore opened);
     }
 
     private static int withStore(StoreOpener opener, String configPath, String expectDatabase, PrintStream err, StoreCommand command) {
@@ -214,7 +250,7 @@ public final class AssetOpFixMain {
             return EXIT_ERROR;
         }
         try {
-            return command.run(opened.store());
+            return command.run(opened);
         } finally {
             try {
                 opened.resources().close();
@@ -370,6 +406,11 @@ public final class AssetOpFixMain {
     }
 
     static int runResolve(GuildAssetStore store, ResolveOptions o, PrintStream out, PrintStream err, LongSupplier clockMs) {
+        return runResolve(store, DEFAULT_LEASE_MS, o, out, err, clockMs, ObserveWaiter.NOOP);
+    }
+
+    static int runResolve(GuildAssetStore store, long leaseMs, ResolveOptions o, PrintStream out, PrintStream err,
+                          LongSupplier clockMs, ObserveWaiter waiter) {
         Optional<GuildAssetOpRow> found;
         try {
             found = store.getOp(o.opId(), Deadline.after(OP_TIMEOUT_MS));
@@ -392,13 +433,38 @@ public final class AssetOpFixMain {
             return EXIT_REJECTED;
         }
 
-        // 前置检查与下面的 CAS 之间，循环可能已经把这一行终结了：CAS（WHERE status = PENDING）会落空、不会重复入账。前置检查只为挡住误操作
+        // 前置检查与下面的安静 CAS（WHERE status=PENDING AND lease_until_ms=? AND last_send_ms=? AND attempts=?）之间，
+        // 若行被领过、发过或终结，CAS 必落空。判「从未应用」（aborted）前，在本机单调时钟上等满 max(1 分钟, 2×租约)
+        // 观察窗口后复读行，跨窗口只比租约与发送时刻（允许不发 RPC 的本地重排推进 attempts），条件写采用第二次读到的三列见证。
         ManualResolution resolution = new ManualResolution(o.opId(), o.status(), o.operator(), o.reason());
+        QuietWitness witness = QuietWitness.of(row);
         boolean finalized = false;
+        String refusal = null;
         String failure = resolution.validate();
-        if (failure == null) {
+        if (failure == null && o.status() == AssetOpStatus.ABORTED) {
+            long windowMs = QuietWitness.observeWindowMs(leaseMs);
+            err.println("判为 aborted（从未应用），正在本机单调时钟上等待观察窗口 " + windowMs + " ms 后复核...");
             try {
-                FinalizeResult result = store.resolveManually(resolution, clockMs.getAsLong(), Deadline.after(OP_TIMEOUT_MS));
+                waiter.awaitMillis(windowMs);
+                Optional<GuildAssetOpRow> againOpt = store.getOp(o.opId(), Deadline.after(OP_TIMEOUT_MS));
+                if (againOpt.isEmpty()
+                        || againOpt.get().getStatus() != GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING
+                        || !witness.leaseAndSendUnchanged(againOpt.get())) {
+                    refusal = "观察窗口期间该行已被领取、发送或终结";
+                } else {
+                    witness = QuietWitness.of(againOpt.get());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                failure = "观察窗口等待被打断，未做任何改动: " + e;
+            } catch (RuntimeException e) {
+                failure = "观察窗口后重读 op_id=" + u(o.opId()) + " 失败，未做任何改动: " + e;
+            }
+        }
+        if (failure == null && refusal == null) {
+            try {
+                FinalizeResult result = store.resolveManuallyIfQuiet(resolution, witness, clockMs.getAsLong(),
+                        Deadline.after(OP_TIMEOUT_MS));
                 finalized = result.finalized();
             } catch (RuntimeException e) {
                 failure = e.toString();
@@ -417,8 +483,13 @@ public final class AssetOpFixMain {
             err.println("人工终结失败 op_id=" + u(o.opId()) + ": " + failure);
             return EXIT_ERROR;
         }
+        if (refusal != null) {
+            log.error("[AssetOpManual] op_id={} 观察窗口后未终结: {}", u(o.opId()), refusal);
+            out.println("op_id=" + u(o.opId()) + " 未终结：" + refusal + "，本次未做任何改动（请重新核对证据，不要手工补账）");
+            return EXIT_NOT_PENDING;
+        }
         if (!finalized) {
-            out.println("op_id=" + u(o.opId()) + " 已被自动终结 / 已非 PENDING，本次未做任何改动（不要再手工补账）");
+            out.println("op_id=" + u(o.opId()) + " 已被自动终结 / 已非 PENDING / 读证据后已被领取重排，本次未做任何改动（不要再手工补账）");
             return EXIT_NOT_PENDING;
         }
         out.println("op_id=" + u(o.opId()) + " 已人工终结为 " + o.as() + "。请把上面的 [AssetOpManual] 审计行贴到运维工单。");

@@ -268,6 +268,15 @@ public interface GuildAssetStore {
      */
     FinalizeResult resolveManually(ManualResolution resolution, long nowMs, Deadline deadline);
 
+    /**
+     * 带三列安静见证（{@code lease_until_ms / last_send_ms / attempts}）的人工终结 CAS（对齐主仓 {@code ResolveManuallyIfQuiet}）：
+     * 读证据之后只要行被领过、发过或重排过就落空，避免与在途投递抢结局。
+     */
+    default FinalizeResult resolveManuallyIfQuiet(ManualResolution resolution, QuietWitness witness, long nowMs,
+                                                  Deadline deadline) {
+        return resolveManually(resolution, nowMs, deadline);
+    }
+
     /** 某条流最老未决行的 created_ms（O18；喂 {@code pending_oldest_age_seconds{stream}}）；空 = 没有未决行。 */
     OptionalLong oldestPendingCreatedMs(int stream, Deadline deadline);
 

@@ -9,10 +9,34 @@ public final class CatalogAdminController {
     private final CatalogAdminStore store;
     private final MallOrderStore orders;
     private final RmbConsignmentStore consignments;
-    public CatalogAdminController(CatalogAdminStore store, MallOrderStore orders, RmbConsignmentStore consignments) {
+    private final ManualAdminStore manual;
+    public CatalogAdminController(CatalogAdminStore store, MallOrderStore orders, RmbConsignmentStore consignments,
+                                  ManualAdminStore manual) {
         this.store = store;
         this.orders = orders;
         this.consignments = consignments;
+        this.manual = manual;
+    }
+
+    @PostMapping("/internal/admin/manual/list")
+    public ManualAdminApi.Summary listManual(HttpServletRequest request, @RequestBody ManualAdminApi.ListQuery input) {
+        actor(request);
+        return manual.list(input);
+    }
+
+    @PostMapping("/internal/admin/manual/orders/resolve")
+    public ManualAdminApi.Resolution resolveOrder(HttpServletRequest request, @RequestBody ManualAdminApi.ResolveOrder input) {
+        return manual.resolveOrder(actor(request), input);
+    }
+
+    @PostMapping("/internal/admin/manual/refunds/resolve")
+    public ManualAdminApi.Resolution resolveRefund(HttpServletRequest request, @RequestBody ManualAdminApi.ResolveRefund input) {
+        return manual.resolveRefund(actor(request), input);
+    }
+
+    @PostMapping("/internal/admin/manual/consignments/resolve")
+    public ManualAdminApi.Resolution resolveConsignment(HttpServletRequest request, @RequestBody ManualAdminApi.ResolveConsignment input) {
+        return manual.resolveConsignment(actor(request), input);
     }
 
     @PostMapping("/internal/admin/manual/incomes/dispute")

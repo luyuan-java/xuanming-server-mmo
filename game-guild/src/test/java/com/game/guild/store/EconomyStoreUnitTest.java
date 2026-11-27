@@ -54,7 +54,7 @@ class EconomyStoreUnitTest {
             got.add(part.trim().replace("`", ""));
         }
         assertThat(got).isEqualTo(want);
-        assertThat(AssetOpColumns.COUNT).isEqualTo(got.size()).isEqualTo(28);
+        assertThat(AssetOpColumns.COUNT).isEqualTo(got.size()).isEqualTo(29);
         assertThat(AssetOpColumns.insertArgs(GuildAssetOpRow.getDefaultInstance())).hasSize(want.size());
         assertThat(AssetOpColumns.INSERT.chars().filter(c -> c == '?').count()).isEqualTo(want.size());
         assertThat(AssetOpColumns.INSERT).startsWith("INSERT INTO guild_asset_op (");

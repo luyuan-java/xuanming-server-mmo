@@ -157,7 +157,7 @@ message GuildPlayerOpSeqRow {
   // 基线 guild_db.proto:135 那句「事务外 INSERT IGNORE」已陈旧，guild-economy-spec §9.1 第 16 条）。
 }
 
-// O：资产指令账本（锁序位置 6，guild_db.proto:138-180）。列序 = 字段序 = SQL 列清单序（AssetOpColumns，28 列）。
+// O：资产指令账本（锁序位置 6，guild_db.proto:138-180）。列序 = 字段序 = SQL 列清单序（AssetOpColumns，29 列）。
 message GuildAssetOpRow {
   option (proto2mysql.table_name) = "guild_asset_op";
   option (proto2mysql.primary_key) = "op_id";
@@ -198,7 +198,8 @@ message GuildAssetOpRow {
   uint64 stream_epoch = 26;      // = 分配 seq 时 guild_player_op_seq.epoch
   string resolved_by = 27;       // 人工终结（assetopfix）写：操作人，≤ 64 字
   string resolve_reason = 28;    // 人工终结依据，≤ 191 字
-  // 追加区：从 29 起。
+  uint64 last_send_ms = 29;      // 最近一次可能向 scene 发过请求的时刻（插行写 created_ms，Claim 折入旧租约，Reschedule 非本地推进）
+  // 追加区：从 30 起。
 }
 
 // C：每日 / 每周计数（锁序位置 7，guild_db.proto:182-197）。

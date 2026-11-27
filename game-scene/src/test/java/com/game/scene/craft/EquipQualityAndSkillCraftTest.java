@@ -1453,4 +1453,51 @@ class EquipQualityAndSkillCraftTest {
         assertThat(st.getState().hasUnreadProxyDigest()).isTrue();
         assertThat(st.getState().getUnreadProxyDigest().getNetGoldEarned()).isEqualTo(95L);
     }
+
+    @Test
+    void 技能书架满100本拒制书返回kSkillBookshelfFull且零扣费扣材() throws Exception {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer player = f.enter(12, 5202L);
+        assertThat(f.attributes.gmSetLevel(player, 60)).isZero();
+        assertThat(f.currency.add(player, Wallet.GOLD, 50_000L, Reason.GM_GRANT).ok()).isTrue();
+
+        SkillScrollCraftTable regularScroll = f.skillCraftTables.enabledScrolls().stream()
+                .filter(s -> s.getRarityTier() == 0).findFirst().orElseThrow();
+        int skillId = f.skillCraftTables.scrollSkillIds(regularScroll.getId()).getFirst();
+        assertThat(f.bags.addItems(player, BagType.INVENTORY,
+                Map.of(regularScroll.getFragmentItemId(), 200L), false, Reason.GM_GRANT, 0, "").tip()).isZero();
+
+        // 预置 99 本书：第 100 本可正常制出，第 101 本被拒并返回 kSkillBookshelfFull(7036)，银两与材料零扣减
+        var builder = player.craft().state().toBuilder().setNextBookSeq(100L);
+        for (int i = 1; i <= SkillCraftService.MAX_SKILL_BOOKSHELF_SIZE - 1; i++) {
+            builder.addSkillBooks(com.game.player.store.state.CraftedSkillBookEntryState.newBuilder()
+                    .setBookId(i).setScrollId(regularScroll.getId()).setSkillTableId(skillId).build());
+        }
+        player.craft().replace(builder.build());
+
+        CraftSkillBookResponse hundredth = call(f, player, SKILL_SERVICE, "CraftSkillBook",
+                CraftSkillBookRequest.newBuilder()
+                        .setMode(CraftSkillBookRequest.CraftMode.RANDOM_REGULAR)
+                        .setScrollId(regularScroll.getId())
+                        .setExpectedRevision(0L)
+                        .setClientRequestId(9201L)
+                        .build(), CraftSkillBookResponse.parser());
+        assertThat(hundredth.getErrorMessage().getId()).isZero();
+        assertThat(player.craft().state().getSkillBooksCount()).isEqualTo(SkillCraftService.MAX_SKILL_BOOKSHELF_SIZE);
+
+        long goldBefore = player.wallet().balance(Wallet.GOLD);
+        long fragBefore = player.bags().bag(BagType.INVENTORY).total(regularScroll.getFragmentItemId());
+        CraftSkillBookResponse overflow = call(f, player, SKILL_SERVICE, "CraftSkillBook",
+                CraftSkillBookRequest.newBuilder()
+                        .setMode(CraftSkillBookRequest.CraftMode.RANDOM_REGULAR)
+                        .setScrollId(regularScroll.getId())
+                        .setExpectedRevision(1L)
+                        .setClientRequestId(9202L)
+                        .build(), CraftSkillBookResponse.parser());
+        assertThat(overflow.getErrorMessage().getId())
+                .isEqualTo(com.game.table.SkillErrorTip.skill_error.kSkillBookshelfFull_VALUE);
+        assertThat(player.craft().state().getSkillBooksCount()).isEqualTo(SkillCraftService.MAX_SKILL_BOOKSHELF_SIZE);
+        assertThat(player.wallet().balance(Wallet.GOLD)).isEqualTo(goldBefore);
+        assertThat(player.bags().bag(BagType.INVENTORY).total(regularScroll.getFragmentItemId())).isEqualTo(fragBefore);
+    }
 }

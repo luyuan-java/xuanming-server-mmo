@@ -70,8 +70,10 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
     static final String LIST_DUE_AGED = "SELECT `op_id` FROM guild_asset_op"
             + " WHERE `status` = ? AND `next_attempt_ms` <= ? AND `lease_until_ms` < ? AND `attempts` >= ?"
             + " ORDER BY `next_attempt_ms` ASC, `op_id` ASC LIMIT ?";
-    /** O11：领取的主键 CAS（<b>自动提交</b>）。 */
-    static final String CLAIM = "UPDATE guild_asset_op SET `lease_until_ms` = ?, `lease_token` = ?, `updated_ms` = ?"
+    /** O11：领取的主键 CAS（<b>自动提交</b>）；首项先将旧租约折入 last_send_ms（LastSendMs 契约第 2、5 条）。 */
+    static final String CLAIM = "UPDATE guild_asset_op"
+            + " SET `last_send_ms` = GREATEST(IF(`last_send_ms` = 0, GREATEST(`created_ms`, `updated_ms`), `last_send_ms`), `lease_until_ms`),"
+            + " `lease_until_ms` = ?, `lease_token` = ?, `updated_ms` = ?"
             + " WHERE `op_id` = ? AND `status` = ? AND `lease_until_ms` < ?";
     /** O12：按主键读整行（领取回读、GetOp）。 */
     static final String SELECT_BY_ID = "SELECT " + AssetOpColumns.COLUMNS + " FROM guild_asset_op WHERE `op_id` = ?";
@@ -82,14 +84,16 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
     static final String POISON = "UPDATE guild_asset_op"
             + " SET `last_outcome` = ?, `next_attempt_ms` = ?, `lease_until_ms` = 0, `updated_ms` = ?"
             + " WHERE `op_id` = ? AND `lease_token` = ? AND `status` = ?";
-    /** O14：重排（带 scene 答复）。0 行 → 租约已丢。 */
+    /** O14：重排（带 scene 答复；非本地答复推进 last_send_ms，本地 NOT_HERE 不推进）。0 行 → 租约已丢。 */
     static final String RESCHEDULE = "UPDATE guild_asset_op"
             + " SET `attempts` = `attempts` + 1, `next_attempt_ms` = ?, `lease_until_ms` = 0,"
-            + " `durable` = ?, `last_outcome` = ?, `last_reason` = ?, `updated_ms` = ?"
+            + " `durable` = ?, `last_outcome` = ?, `last_reason` = ?, `updated_ms` = ?,"
+            + " `last_send_ms` = IF(?, GREATEST(`last_send_ms`, ?), `last_send_ms`)"
             + " WHERE `op_id` = ? AND `status` = ? AND `lease_token` = ?";
-    /** O14'（E12，Java 增项）：重排（没有 scene 答复：传输失败 / 坏流号），不覆盖 durable / last_outcome / last_reason。 */
+    /** O14'（E12，Java 增项）：重排（没有 scene 答复：传输失败 / 坏流号），不覆盖 durable / last_outcome / last_reason，推进 last_send_ms。 */
     static final String RESCHEDULE_WITHOUT_ANSWER = "UPDATE guild_asset_op"
-            + " SET `attempts` = `attempts` + 1, `next_attempt_ms` = ?, `lease_until_ms` = 0, `updated_ms` = ?"
+            + " SET `attempts` = `attempts` + 1, `next_attempt_ms` = ?, `lease_until_ms` = 0, `updated_ms` = ?,"
+            + " `last_send_ms` = GREATEST(`last_send_ms`, ?)"
             + " WHERE `op_id` = ? AND `status` = ? AND `lease_token` = ?";
     /** O15：终结前在事务外读的<b>不可变列</b>（插入之后没有任何路径改它们）。stream 给 Q 守卫用，不按 kind 反推。 */
     static final String SELECT_IMMUTABLE = "SELECT `player_id`, `guild_id`, `stream`, `kind`, `ref_id`, `ref_count`, `period_key`,"
@@ -104,6 +108,9 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
             + " SET `status` = ?, `resolved_by` = ?, `resolve_reason` = ?, `lease_until_ms` = 0,"
             + " `next_attempt_ms` = ?, `updated_ms` = ?"
             + " WHERE `op_id` = ? AND `status` = ?";
+    /** O17'：带三列安静见证的人工终结 CAS（lease_until_ms / last_send_ms / attempts 均未变化才终结）。 */
+    static final String RESOLVE_QUIET = RESOLVE
+            + " AND `lease_until_ms` = ? AND `last_send_ms` = ? AND `attempts` = ?";
     /** O18：最老未决行（idx_0 的 status 前缀）。 */
     static final String OLDEST_PENDING = "SELECT MIN(`created_ms`) FROM guild_asset_op WHERE `status` = ? AND `stream` = ?";
     /** O19：assetopfix list。 */
@@ -306,13 +313,15 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
     @Override
     public RescheduleResult reschedule(AssetOp op, long nextAttemptMs, AssetOpResult answer, long nowMs, Deadline settle) {
         Objects.requireNonNull(answer, "answer（没有 scene 答复时用 rescheduleWithoutAnswer）");
+        int mayHaveSent = answer.local() ? 0 : 1;
         return doReschedule(op, settle, RESCHEDULE, nextAttemptMs, answer.durable() ? 1 : 0, answer.outcomeNumber(),
-                answer.reason(), nowMs, op.opId(), PENDING, op.leaseToken());
+                answer.reason(), nowMs, mayHaveSent, nowMs, op.opId(), PENDING, op.leaseToken());
     }
 
     @Override
     public RescheduleResult rescheduleWithoutAnswer(AssetOp op, long nextAttemptMs, long nowMs, Deadline settle) {
-        return doReschedule(op, settle, RESCHEDULE_WITHOUT_ANSWER, nextAttemptMs, nowMs, op.opId(), PENDING, op.leaseToken());
+        return doReschedule(op, settle, RESCHEDULE_WITHOUT_ANSWER, nextAttemptMs, nowMs, nowMs,
+                op.opId(), PENDING, op.leaseToken());
     }
 
     /**
@@ -355,6 +364,20 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
         return terminate(resolution.opId(), resolution.status(), nowMs, DeliveryOrigin.MANUAL, deadline,
                 BackgroundTx.Op.MANUAL_RESOLVE, RESOLVE, AssetOpStatus.toRecord(resolution.status()).getNumber(),
                 resolution.operator(), resolution.reason(), nowMs, nowMs, resolution.opId(), PENDING);
+    }
+
+    @Override
+    public FinalizeResult resolveManuallyIfQuiet(ManualResolution resolution, QuietWitness witness, long nowMs,
+                                                 Deadline deadline) {
+        Objects.requireNonNull(witness, "witness");
+        String invalid = resolution.validate();
+        if (invalid != null) {
+            throw new IllegalArgumentException("manual resolve guild_asset_op " + id(resolution.opId()) + ": " + invalid);
+        }
+        return terminate(resolution.opId(), resolution.status(), nowMs, DeliveryOrigin.MANUAL, deadline,
+                BackgroundTx.Op.MANUAL_RESOLVE, RESOLVE_QUIET, AssetOpStatus.toRecord(resolution.status()).getNumber(),
+                resolution.operator(), resolution.reason(), nowMs, nowMs, resolution.opId(), PENDING,
+                witness.leaseUntilMs(), witness.lastSendMs(), witness.attempts());
     }
 
     /**

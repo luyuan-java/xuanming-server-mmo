@@ -156,8 +156,9 @@ class AssetOpFixMainTest {
         stuck(1, 12, 0, OLD);
         InMemoryAssetStore racing = new InMemoryAssetStore() {
             @Override
-            public FinalizeResult resolveManually(com.game.guild.asset.ManualResolution resolution, long nowMs,
-                                                  com.game.common.deadline.Deadline deadline) {
+            public FinalizeResult resolveManuallyIfQuiet(com.game.guild.asset.ManualResolution resolution,
+                                                         com.game.guild.asset.QuietWitness witness, long nowMs,
+                                                         com.game.common.deadline.Deadline deadline) {
                 return FinalizeResult.NOT_FINALIZED;
             }
         };
@@ -216,5 +217,85 @@ class AssetOpFixMainTest {
         assertThat(env.getProperty("spring.datasource.username")).isNotBlank();
         assertThat(env.getProperty("spring.datasource.username")).isEqualTo("assetopfix_test_user");
         assertThat(env.getProperty("spring.datasource.password")).isEqualTo("not-a-real-password");
+    }
+
+    @Test
+    void 人工终结三列见证与aborted观察窗口_跨窗口只比租约与发送时刻_条件写用二次读见证() {
+        assertThat(com.game.guild.asset.QuietWitness.observeWindowMs(10_000L)).isEqualTo(60_000L);
+        assertThat(com.game.guild.asset.QuietWitness.observeWindowMs(45_000L)).isEqualTo(90_000L);
+
+        // 1. applied 不等观察窗口，直接带初读三列见证调 resolveManuallyIfQuiet
+        store.insert(InMemoryAssetStore.pending(10, 1001L, 1, GOLD)
+                .setAttempts(12).setLastOutcome(0).setCreatedMs(OLD).setLastSendMs(OLD + 5_000L).build());
+        java.util.List<Long> waited = new java.util.ArrayList<>();
+        java.util.List<com.game.guild.asset.QuietWitness> seenWitness = new java.util.ArrayList<>();
+        InMemoryAssetStore spy = new InMemoryAssetStore() {
+            @Override
+            public FinalizeResult resolveManuallyIfQuiet(com.game.guild.asset.ManualResolution resolution,
+                                                         com.game.guild.asset.QuietWitness witness, long nowMs,
+                                                         com.game.common.deadline.Deadline deadline) {
+                seenWitness.add(witness);
+                return super.resolveManuallyIfQuiet(resolution, witness, nowMs, deadline);
+            }
+        };
+        spy.insert(store.row(10));
+        int codeApplied = AssetOpFixMain.run(resolve(10, "applied", "-txlog-checked"),
+                new PrintStream(out, true, StandardCharsets.UTF_8),
+                new PrintStream(err, true, StandardCharsets.UTF_8),
+                path -> new AssetOpFixMain.OpenedStore(spy, () -> { }, 45_000L),
+                () -> NOW, waited::add);
+        assertThat(codeApplied).isZero();
+        assertThat(waited).isEmpty();
+        assertThat(seenWitness).containsExactly(new com.game.guild.asset.QuietWitness(0L, OLD + 5_000L, 12));
+
+        // 2. aborted 等 max(60s, 2*lease=90s)；窗口期间仅 attempts 自增（本地 NOT_HERE 重排）放行并用第二次读的见证落库
+        spy.insert(InMemoryAssetStore.pending(11, 1001L, 2, GOLD)
+                .setAttempts(12).setLastOutcome(0).setCreatedMs(OLD).setLastSendMs(OLD + 6_000L).build());
+        waited.clear();
+        seenWitness.clear();
+        int codeAborted = AssetOpFixMain.run(resolve(11, "aborted", "-txlog-checked"),
+                new PrintStream(out, true, StandardCharsets.UTF_8),
+                new PrintStream(err, true, StandardCharsets.UTF_8),
+                path -> new AssetOpFixMain.OpenedStore(spy, () -> { }, 45_000L),
+                () -> NOW, ms -> {
+                    waited.add(ms);
+                    // 模拟窗口内只推进 attempts，lease_until_ms 与 last_send_ms 不动
+                    GuildAssetOpRow cur = spy.row(11);
+                    spy.insert(cur.toBuilder().setAttempts(cur.getAttempts() + 1).build());
+                });
+        assertThat(codeAborted).isZero();
+        assertThat(waited).containsExactly(90_000L);
+        assertThat(seenWitness).containsExactly(new com.game.guild.asset.QuietWitness(0L, OLD + 6_000L, 13));
+        assertThat(spy.row(11).getStatus()).isEqualTo(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_ABORTED);
+
+        // 3. aborted 窗口期间 last_send_ms 或 lease_until_ms 变化 -> 拒绝终结（退出码 3）且不调 CAS
+        spy.insert(InMemoryAssetStore.pending(12, 1001L, 3, GOLD)
+                .setAttempts(12).setLastOutcome(0).setCreatedMs(OLD).setLastSendMs(OLD + 7_000L).build());
+        waited.clear();
+        seenWitness.clear();
+        int codeMoved = AssetOpFixMain.run(resolve(12, "aborted", "-txlog-checked"),
+                new PrintStream(out, true, StandardCharsets.UTF_8),
+                new PrintStream(err, true, StandardCharsets.UTF_8),
+                path -> new AssetOpFixMain.OpenedStore(spy, () -> { }, 10_000L),
+                () -> NOW, ms -> {
+                    waited.add(ms);
+                    GuildAssetOpRow cur = spy.row(12);
+                    spy.insert(cur.toBuilder().setLastSendMs(NOW - 1_000L).build());
+                });
+        assertThat(codeMoved).isEqualTo(3);
+        assertThat(waited).containsExactly(60_000L);
+        assertThat(seenWitness).isEmpty();
+        assertThat(spy.row(12).getStatus()).isEqualTo(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING);
+
+        // 4. 仅 attempts 在读证据后变化（绕过窗口或窗口之后）-> 3 列 CAS 落空不改状态
+        spy.insert(InMemoryAssetStore.pending(13, 1001L, 4, GOLD)
+                .setAttempts(12).setLastOutcome(0).setCreatedMs(OLD).setLastSendMs(OLD + 8_000L).build());
+        com.game.guild.asset.QuietWitness staleWitness = com.game.guild.asset.QuietWitness.of(spy.row(13));
+        spy.insert(spy.row(13).toBuilder().setAttempts(13).build());
+        var res = spy.resolveManuallyIfQuiet(
+                new com.game.guild.asset.ManualResolution(13, com.game.guild.asset.AssetOpStatus.ABORTED, "ops", "test"),
+                staleWitness, NOW, com.game.common.deadline.Deadline.after(5_000L));
+        assertThat(res.finalized()).isFalse();
+        assertThat(spy.row(13).getStatus()).isEqualTo(GuildAssetOpStatus.GUILD_ASSET_OP_STATUS_PENDING);
     }
 }

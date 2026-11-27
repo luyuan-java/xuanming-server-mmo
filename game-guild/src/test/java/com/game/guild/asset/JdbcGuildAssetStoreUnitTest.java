@@ -265,9 +265,13 @@ class JdbcGuildAssetStoreUnitTest {
         // 点改 / 点删的定位是完整主键等值（复核条件另带）
         for (String sql : new String[] {JdbcGuildAssetStore.CLAIM, JdbcGuildAssetStore.POISON, JdbcGuildAssetStore.RESCHEDULE,
                 JdbcGuildAssetStore.RESCHEDULE_WITHOUT_ANSWER, JdbcGuildAssetStore.FINALIZE, JdbcGuildAssetStore.RESOLVE,
-                JdbcGuildAssetStore.CLEANUP_TERMINAL_OP}) {
+                JdbcGuildAssetStore.RESOLVE_QUIET, JdbcGuildAssetStore.CLEANUP_TERMINAL_OP}) {
             assertThat(sql).contains("WHERE `op_id` = ? AND");
         }
+        assertThat(JdbcGuildAssetStore.RESOLVE_QUIET)
+                .endsWith("AND `lease_until_ms` = ? AND `last_send_ms` = ? AND `attempts` = ?");
+        assertThat(JdbcGuildAssetStore.CLAIM).contains("`last_send_ms` = GREATEST(");
+        assertThat(JdbcGuildAssetStore.RESCHEDULE).contains("`last_send_ms` = IF(?, GREATEST(`last_send_ms`, ?), `last_send_ms`)");
         assertThat(JdbcGuildAssetStore.CLEANUP_COUNTER)
                 .contains("player_id = ? AND counter_kind = ? AND ref_id = ? AND period_key = ? AND");
         for (String sql : new String[] {JdbcGuildAssetStore.CREDIT_CONTRIBUTION, JdbcGuildAssetStore.REFUND_CONTRIBUTION}) {

@@ -172,7 +172,7 @@ final class AssetOpFixEnvironment {
             background.shutdownNow();
             redis.shutdown();
             dataSource.close();
-        });
+        }, props.assetOp().lease().toMillis());
     }
 
     /**

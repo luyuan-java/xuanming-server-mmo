@@ -64,6 +64,10 @@ public final class MallAuthentication extends OncePerRequestFilter {
             Map.entry("/internal/admin/skus/update", "admin"),
             Map.entry("/internal/admin/skus/stock", "admin"),
             Map.entry("/internal/admin/order-view", "admin"),
+            Map.entry("/internal/admin/manual/list", "admin"),
+            Map.entry("/internal/admin/manual/orders/resolve", "admin"),
+            Map.entry("/internal/admin/manual/refunds/resolve", "admin"),
+            Map.entry("/internal/admin/manual/consignments/resolve", "admin"),
             Map.entry("/internal/admin/manual/incomes/dispute", "admin"));
     private static final ObjectMapper ERROR_JSON = new ObjectMapper();
     private final MallProperties properties;

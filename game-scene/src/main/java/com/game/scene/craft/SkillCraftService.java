@@ -65,6 +65,8 @@ import java.util.function.IntUnaryOperator;
 public final class SkillCraftService {
 
     private static final int OK = 0;
+    /** 技能书架上限（数据覆写审计 r2-craft#2，对齐主仓 100 本）。 */
+    public static final int MAX_SKILL_BOOKSHELF_SIZE = 100;
 
     public record CraftOutcome(CraftSkillBookResponse response, boolean mutated, ScenePlayer creditedProxyMaster) {
     }
@@ -394,6 +396,9 @@ public final class SkillCraftService {
             baseGoldCost = scroll.getRareGoldCost();
         } else {
             return failCraft(player, reqId, kInvalidParameter_VALUE);
+        }
+        if (craft.getSkillBooksCount() >= MAX_SKILL_BOOKSHELF_SIZE) {
+            return failCraft(player, reqId, kSkillBookshelfFull_VALUE);
         }
 
         // 解析可选主城宗师原子代制摊位（支持跨节点/离线 24 小时营业，只读共享目录宗师档位，95% 净银两走邮件出箱异步入账）。

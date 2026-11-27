@@ -21,16 +21,23 @@ public final class AssetOpColumns {
             + "`attempts`, `next_attempt_ms`, `deadline_ms`, `payload`, `ref_id`, `ref_count`, `period_key`, "
             + "`contribution_delta`, `funds_delta`, `reason_tip_id`, `created_ms`, `updated_ms`, "
             + "`lease_until_ms`, `lease_token`, `tx_type`, `last_outcome`, `last_reason`, `stream_epoch`, "
-            + "`resolved_by`, `resolve_reason`";
+            + "`resolved_by`, `resolve_reason`, `last_send_ms`";
 
     /** 列数（与 {@link #COLUMNS} 一致，由单测守住）。 */
-    public static final int COUNT = 28;
+    public static final int COUNT = 29;
 
-    /** O5：插一行指令（28 列全写）。 */
+    /** O5：插一行指令（29 列全写）。 */
     public static final String INSERT = "INSERT INTO " + GuildTables.ASSET_OP + " (" + COLUMNS + ") VALUES ("
             + JdbcGuildStore.placeholders(COUNT) + ")";
 
     private AssetOpColumns() {
+    }
+
+    /** 插行时的 last_send_ms（契约第 1 条）：不小于 created_ms。 */
+    public static long lastSendMsOnInsert(GuildAssetOpRow r) {
+        long lastSend = r.getLastSendMs();
+        long created = r.getCreatedMs();
+        return Long.compareUnsigned(lastSend, created) >= 0 ? lastSend : created;
     }
 
     /**
@@ -45,7 +52,7 @@ public final class AssetOpColumns {
                 r.getPeriodKey(), r.getContributionDelta(), r.getFundsDelta(), r.getReasonTipId(),
                 r.getCreatedMs(), r.getUpdatedMs(), r.getLeaseUntilMs(), r.getLeaseToken(), r.getTxType(),
                 r.getLastOutcome(), r.getLastReason(), r.getStreamEpoch(),
-                r.getResolvedBy(), r.getResolveReason()};
+                r.getResolvedBy(), r.getResolveReason(), lastSendMsOnInsert(r)};
     }
 
     /**
@@ -83,9 +90,11 @@ public final class AssetOpColumns {
                 .setLastReason(GuildJdbc.u32(rs, c++))
                 .setStreamEpoch(GuildJdbc.u64(rs, c++));
         String resolvedBy = rs.getString(c++);
-        String resolveReason = rs.getString(c);
+        String resolveReason = rs.getString(c++);
+        long lastSendMs = GuildJdbc.u64(rs, c);
         return b.setResolvedBy(resolvedBy == null ? "" : resolvedBy)
                 .setResolveReason(resolveReason == null ? "" : resolveReason)
+                .setLastSendMs(lastSendMs)
                 .build();
     }
 
