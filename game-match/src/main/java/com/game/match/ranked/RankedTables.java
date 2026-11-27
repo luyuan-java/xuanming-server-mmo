@@ -186,8 +186,34 @@ public final class RankedTables {
             case 5 -> new TrialVariantKey(2, difficulty, "rescue");
             case 6 -> new TrialVariantKey(3, difficulty, "polarity_5v5");
             case 8 -> new TrialVariantKey(1, difficulty, "dual_guard");
+            case 12 -> new TrialVariantKey(1, difficulty, "wild_wind");
+            case 13 -> new TrialVariantKey(1, difficulty, "wild_bell");
+            case 14 -> new TrialVariantKey(1, difficulty, "wild_tide");
             default -> null;
         };
+    }
+
+    /** 五行试炼志 V3 全部四项自选誓约合法位掩码（bit0 禁控 / bit1 单宝 / bit2 无宠 / bit3 紧缩回合）。 */
+    public static final int TRIAL_VOW_MASK_ALL = 0x0F;
+
+    public static boolean isValidTrialVowMask(int mask) {
+        return (mask & ~TRIAL_VOW_MASK_ALL) == 0;
+    }
+
+    public static boolean isPermanentBossTrialKind(int bossTrialKind) {
+        return (bossTrialKind >= 1 && bossTrialKind <= 4)
+                || bossTrialKind == 8
+                || (bossTrialKind >= 12 && bossTrialKind <= 14);
+    }
+
+    /** 报告该副本模板是否支持挂载试炼誓约（仅常驻卷一/卷二/卷四首领试炼，对齐 Go {@code Catalog.SupportsTrialVows}）。 */
+    public boolean supportsTrialVows(int battleConfigId) {
+        int kind = bossTrialKindByDungeon.getOrDefault(battleConfigId, 0);
+        if (!isPermanentBossTrialKind(kind)) {
+            return false;
+        }
+        TrialBattleContext ctx = trialContextsByDungeon.get(battleConfigId);
+        return ctx != null && ctx.getJournalEntryId() != 0 && ctx.getSeasonId() == 0;
     }
 
     /**

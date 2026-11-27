@@ -274,6 +274,7 @@ public final class BattleReportStore {
                 }
             }
         }
+        TrialChallengeCardStore.purgePlayerCards(c, playerId, released);
         releaseBodies(c, released);
         return deleted;
     }
@@ -307,7 +308,7 @@ public final class BattleReportStore {
         return evicted;
     }
 
-    private static void releaseBodies(Connection c, Map<Long, Integer> released) throws SQLException {
+    static void releaseBodies(Connection c, Map<Long, Integer> released) throws SQLException {
         for (Map.Entry<Long, Integer> e : released.entrySet()) {
             long id = e.getKey();
             int n = e.getValue();

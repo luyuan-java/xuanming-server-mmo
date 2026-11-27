@@ -139,6 +139,9 @@ final class ActionChecks {
         if (!actor.state().getSkillTableIdsList().contains(action.getSkillTableId())) {
             return INVALID_PARAMETER;
         }
+        if (ctx.isControlBannedForActor(actor) && ctx.isControlSkill(row)) {
+            return SKILL_CANNOT_CAST_IN_STATE;
+        }
         if (ctx.isSkillBanned(action.getSkillTableId())) {
             return SKILL_BANNED_IN_BATTLE;
         }

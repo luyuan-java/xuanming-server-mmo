@@ -35,7 +35,8 @@ public final class TrialJournalTables {
                 1011, 1012, 1013, 1021, 1022, 1023, 1031, 1032, 1033, 1041, 1042, 1043,
                 2011, 2012, 2013, 2021, 2022, 2023, 2031, 2032, 2033, 2041, 2042, 2043,
                 3011, 3012, 3021, 3022, 3031, 3032,
-                1051, 1052, 1053
+                1051, 1052, 1053,
+                4011, 4012, 4013, 4021, 4022, 4023, 4031, 4032, 4033
         };
         for (int i = 0; i < ids.length; i++) {
             m.put(ids[i], i);
@@ -45,7 +46,7 @@ public final class TrialJournalTables {
 
     private static Map<Integer, Integer> buildFixedMilestoneBitIndex() {
         Map<Integer, Integer> m = new LinkedHashMap<>();
-        int[] ids = {101, 102, 103, 104, 201, 202, 203, 901, 301, 302, 105};
+        int[] ids = {101, 102, 103, 104, 201, 202, 203, 901, 301, 302, 105, 401, 402};
         for (int i = 0; i < ids.length; i++) {
             m.put(ids[i], i);
         }

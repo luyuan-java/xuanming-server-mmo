@@ -45,6 +45,16 @@ class TeamRankedPresetTest {
         assertThat(rules.isValidSelection(201, 101, 2)).isFalse();
         assertThat(rules.isValidSelection(101, 201, 1)).isFalse();
         assertThat(rules.isValidSelection(999, 201, 2)).isFalse();
+        // 五行试炼志 V3 试炼誓约支持白名单与掩码边界
+        assertThat(rules.supportsTrialVows(101)).isTrue();
+        assertThat(rules.supportsTrialVows(112)).isTrue();
+        assertThat(rules.supportsTrialVows(113)).isTrue();
+        assertThat(rules.supportsTrialVows(114)).isTrue();
+        assertThat(rules.supportsTrialVows(115)).isTrue();
+        assertThat(rules.supportsTrialVows(109)).isFalse();
+        assertThat(rules.supportsTrialVows(202)).isFalse();
+        assertThat(TeamRankedRules.isValidTrialVowMask(TeamRankedRules.TRIAL_VOW_MASK_ALL)).isTrue();
+        assertThat(TeamRankedRules.isValidTrialVowMask(0x10)).isFalse();
     }
 
     @Test
@@ -126,5 +136,27 @@ class TeamRankedPresetTest {
                 .setExpectedTeamId(teamId).setBattleConfigId(1).setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM)
                 .setRankedRuleVersion(1).build(), TeamMatchFixture.deadline());
         assertThat(started.hasErrorMessage()).isFalse();
+    }
+
+    @Test
+    void 整队开战非法誓约掩码与随机补人带誓约均拒收() {
+        long[] team = fx.team(2);
+        long teamId = team[0];
+        long leader = team[1];
+
+        TeamResponse badMask = fx.service.startTeamMatch(leader, StartTeamMatchRequest.newBuilder()
+                .setExpectedTeamId(teamId).setBattleConfigId(101).setMatchMode(MatchMode.MATCH_MODE_PVE_TEAM)
+                .setTrialVowMask(0x10).build(), TeamMatchFixture.deadline());
+        assertThat(badMask.getErrorMessage().getId()).isEqualTo(TeamTips.DUNGEON_NOT_OPEN);
+
+        TeamResponse fillWithVow = fx.service.startTeamMatch(leader, StartTeamMatchRequest.newBuilder()
+                .setExpectedTeamId(teamId).setBattleConfigId(101).setMatchMode(MatchMode.MATCH_MODE_PVE_TEAM)
+                .setTargetTeamSize(3).setTrialVowMask(1).build(), TeamMatchFixture.deadline());
+        assertThat(fillWithVow.getErrorMessage().getId()).isEqualTo(TeamTips.DUNGEON_NOT_OPEN);
+
+        TeamResponse pvpWithVow = fx.service.startTeamMatch(leader, StartTeamMatchRequest.newBuilder()
+                .setExpectedTeamId(teamId).setBattleConfigId(5).setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM)
+                .setTrialVowMask(1).build(), TeamMatchFixture.deadline());
+        assertThat(pvpWithVow.getErrorMessage().getId()).isEqualTo(TeamTips.DUNGEON_NOT_OPEN);
     }
 }

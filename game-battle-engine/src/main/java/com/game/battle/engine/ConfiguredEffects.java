@@ -171,6 +171,10 @@ final class ConfiguredEffects {
         }
         boolean hostileActionControl = hostile && op == CONTROL && row.getStateKind() >= 1 && row.getStateKind() <= 6;
         if (hostileActionControl) {
+            if (ctx.isControlBannedForActor(source)) {
+                ctx.events().append(BATTLE_EVENT_RESIST, source.actorId(), receiver.actorId()).setBuffTableId(id);
+                return false;
+            }
             if (battle.tryConsumeControlImmunity(source, receiver, row)) {
                 battle.trigger(receiver, source, AFTER_CONTROL_ATTEMPT, 0, hit);
                 return false;

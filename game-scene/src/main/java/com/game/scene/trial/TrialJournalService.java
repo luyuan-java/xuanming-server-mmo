@@ -80,10 +80,11 @@ public final class TrialJournalService {
     public static final int VOUCHER_NOT_ENOUGH = TrialJournalErrorTip.trial_journal_error.kTrialJournalVoucherNotEnough_VALUE;
     public static final int ARTIFACT_INVALID = TrialJournalErrorTip.trial_journal_error.kTrialJournalArtifactInvalid_VALUE;
 
-    /** 单局战斗结算推进试炼志后的增量，供 {@code BattleResultEntryState} 字段 21–24 回填。 */
+    /** 单局战斗结算推进试炼志后的增量，供 {@code BattleResultEntryState} 字段 21–24 与 52–54 回填。 */
     public record SettlementDelta(int entryId, List<Integer> newlyLitSealIds,
-                                  boolean newSoloBest, boolean newCoopBest, boolean changed) {
-        public static final SettlementDelta NONE = new SettlementDelta(0, List.of(), false, false, false);
+                                  boolean newSoloBest, boolean newCoopBest,
+                                  int vowMask, boolean newVowBest, long battleId, boolean changed) {
+        public static final SettlementDelta NONE = new SettlementDelta(0, List.of(), false, false, 0, false, 0L, false);
     }
 
     public record ClaimOutcome(ClaimTrialJournalMilestoneResponse response, boolean changed) {
@@ -139,7 +140,7 @@ public final class TrialJournalService {
                 bumpRevision(candidate);
                 player.trialJournal().replace(candidate.build());
             }
-            return new SettlementDelta(0, List.of(), false, false, changed);
+            return new SettlementDelta(0, List.of(), false, false, 0, false, 0L, changed);
         }
 
         BattleTrialJournalFacts facts = settlement.getTrialFacts();
@@ -149,7 +150,7 @@ public final class TrialJournalService {
                 bumpRevision(candidate);
                 player.trialJournal().replace(candidate.build());
             }
-            return new SettlementDelta(0, List.of(), false, false, changed);
+            return new SettlementDelta(0, List.of(), false, false, 0, false, 0L, changed);
         }
         // 赛季卷严格按赛季号匹配，拒收过季迟到结算污染当前或历史季档。
         if (entry.getSeasonId() != 0) {
@@ -159,7 +160,7 @@ public final class TrialJournalService {
                     bumpRevision(candidate);
                     player.trialJournal().replace(candidate.build());
                 }
-                return new SettlementDelta(0, List.of(), false, false, changed);
+                return new SettlementDelta(0, List.of(), false, false, 0, false, 0L, changed);
             }
         }
 
@@ -179,6 +180,8 @@ public final class TrialJournalService {
 
         boolean newSoloBest = false;
         boolean newCoopBest = false;
+        boolean newVowBest = false;
+        int vowMask = facts.getChallengeVowMask();
         if ((entry.getSourceKind() == 1 || entry.getSourceKind() == 2)
                 && TrialJournalRules.isPlayerVictory(settlement.getOutcome(), settlement.getPlayerTeamIndex())) {
             long achievedAtMs = settlement.getFinishedAtMs() != 0L ? settlement.getFinishedAtMs() : nowMs;
@@ -192,10 +195,15 @@ public final class TrialJournalService {
                             .setPetTableId(facts.getUsedPetTableId())
                             .addAllArtifactEffectIds(TrialJournalRules.normalizeArtifactEffectIds(facts.getUsedArtifactEffectIdsList()))
                             .setSeasonSealId(facts.getUsedSeasonSealId());
-                    rec.setSoloBest(TrialJournalSoloRecordState.newBuilder()
+                    TrialJournalSoloRecordState.Builder solo = TrialJournalSoloRecordState.newBuilder()
                             .setBestRounds(totalRounds)
                             .setAchievedAtMs(achievedAtMs)
-                            .setLoadout(loadout));
+                            .setLoadout(loadout)
+                            .setBattleId(settlement.getBattleId());
+                    if (existing != null && existing.hasSoloBest()) {
+                        solo.setUnknownFields(existing.getSoloBest().getUnknownFields());
+                    }
+                    rec.setSoloBest(solo);
                     newSoloBest = true;
                     changed = true;
                 }
@@ -208,7 +216,8 @@ public final class TrialJournalService {
                             .setBestRounds(totalRounds)
                             .setPartySize(facts.getInitialHumanCount())
                             .setAchievedAtMs(achievedAtMs)
-                            .setPetTableId(facts.getUsedPetTableId());
+                            .setPetTableId(facts.getUsedPetTableId())
+                            .setBattleId(settlement.getBattleId());
                     int maxNames = Math.min(facts.getTeammateNamesCount(), TrialJournalRules.MAX_COOP_TEAMMATES);
                     for (int i = 0; i < maxNames; i++) {
                         String name = facts.getTeammateNames(i);
@@ -216,8 +225,30 @@ public final class TrialJournalService {
                             coop.addTeammateNames(name);
                         }
                     }
+                    if (existing != null && existing.hasCoopBest()) {
+                        coop.setUnknownFields(existing.getCoopBest().getUnknownFields());
+                    }
                     rec.setCoopBest(coop);
                     newCoopBest = true;
+                    changed = true;
+                }
+            }
+            // 五行试炼志 V3：常驻 PVE 首领试炼带试炼誓约胜出时刷新个人最高誓约纪录（誓约条数优先，同数比更短回合）。
+            if (entry.getSeasonId() == 0 && entry.getSourceKind() == 1
+                    && vowMask != 0 && TrialJournalRules.isValidVowMask(vowMask)) {
+                int vowCount = TrialJournalRules.countVows(vowMask);
+                TrialJournalEntryRecordState existing = findEntryRecord(candidate, entry.getId(), facts.getTrialRuleVersion());
+                int oldVowCount = existing != null ? existing.getBestVowCount() : 0;
+                int oldVowRounds = existing != null ? existing.getBestVowRounds() : 0;
+                if (Integer.compareUnsigned(vowCount, oldVowCount) > 0
+                        || (vowCount == oldVowCount
+                        && (oldVowRounds == 0 || Integer.compareUnsigned(totalRounds, oldVowRounds) < 0))) {
+                    TrialJournalEntryRecordState.Builder rec = findOrAddEntryRecord(candidate, entry.getId(), facts.getTrialRuleVersion());
+                    rec.setBestVowMask(vowMask)
+                            .setBestVowCount(vowCount)
+                            .setBestVowRounds(totalRounds)
+                            .setBestVowBattleId(settlement.getBattleId());
+                    newVowBest = true;
                     changed = true;
                 }
             }
@@ -227,7 +258,8 @@ public final class TrialJournalService {
             bumpRevision(candidate);
             player.trialJournal().replace(candidate.build());
         }
-        return new SettlementDelta(entry.getId(), List.copyOf(newlyLit), newSoloBest, newCoopBest, changed);
+        return new SettlementDelta(entry.getId(), List.copyOf(newlyLit), newSoloBest, newCoopBest,
+                vowMask, newVowBest, settlement.getBattleId(), changed);
     }
 
     /** 456：查询完整五行试炼志权威快照。 */
@@ -586,6 +618,13 @@ public final class TrialJournalService {
                 }
                 ev.setHasLegacyRecordOnly(!hasSolo && !hasCoop
                         && hasAnyLegacyEntryRecord(state, entry.getId(), entry.getRuleVersion()));
+                ev.setVowSupported(entry.getSeasonId() == 0 && entry.getSourceKind() == 1);
+                if (record != null && record.getBestVowCount() > 0) {
+                    ev.setBestVowMask(record.getBestVowMask())
+                            .setBestVowCount(record.getBestVowCount())
+                            .setBestVowRounds(record.getBestVowRounds())
+                            .setBestVowBattleId(record.getBestVowBattleId());
+                }
 
                 if (writableErr == IN_BATTLE) {
                     ev.setCanEnter(false).setEnterBlockedReason("当前正在战斗中，暂不能前往试炼");
@@ -809,7 +848,9 @@ public final class TrialJournalService {
     private static boolean hasAnyLegacyEntryRecord(PlayerTrialJournalState state, int entryId, int currentRuleVersion) {
         for (TrialJournalEntryRecordState r : state.getRecordsList()) {
             if (r.getEntryId() == entryId && r.getRuleVersion() != currentRuleVersion
-                    && (r.getSoloBest().getBestRounds() > 0 || r.getCoopBest().getBestRounds() > 0)) {
+                    && (r.getSoloBest().getBestRounds() > 0
+                    || r.getCoopBest().getBestRounds() > 0
+                    || r.getBestVowCount() > 0)) {
                 return true;
             }
         }
@@ -825,6 +866,7 @@ public final class TrialJournalService {
                         .setPetTableId(lo.getPetTableId())
                         .addAllArtifactEffectIds(lo.getArtifactEffectIdsList())
                         .setSeasonSealId(lo.getSeasonSealId()))
+                .setBattleId(s.getBattleId())
                 .build();
     }
 
@@ -835,6 +877,7 @@ public final class TrialJournalService {
                 .setAchievedAtMs(c.getAchievedAtMs())
                 .setPetTableId(c.getPetTableId())
                 .addAllTeammateNames(c.getTeammateNamesList())
+                .setBattleId(c.getBattleId())
                 .build();
     }
 

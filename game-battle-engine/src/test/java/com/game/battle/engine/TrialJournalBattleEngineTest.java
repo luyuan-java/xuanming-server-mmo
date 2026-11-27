@@ -60,7 +60,7 @@ class TrialJournalBattleEngineTest {
                         .addArtifacts(EquipmentArtifactSource.newBuilder()
                                 .setItemId(9001L).setEffectId(1).setBonusBps(1500).setPerRoundLimit(1).setBattleLimit(3))
                         .setSeasonSeal(SeasonSealEffect.newBuilder()
-                                .setSeasonId(1).setSealId(101).setEffectId(8).setBonusBps(1200).setPerRoundLimit(1).setBattleLimit(3)))
+                                .setSeasonId(1).setSealId(101).setEffectId(7).setBonusBps(1200).setPerRoundLimit(1).setBattleLimit(3)))
                 .build();
     }
 
@@ -150,5 +150,184 @@ class TrialJournalBattleEngineTest {
         engine.submitAction(4001L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_ATTACK).build());
         engine.resolveCurrentRound();
         assertThat(engine.buildSettlement(4001L).hasTrialFacts()).isFalse();
+    }
+
+    @Test
+    void 卷四三境明雷风眼引风与阳钟阴鼓和涨退潮机制事实正确冻结() {
+        // 1) 113 风眼引风：R1 预告 TELEGRAPH_KIND_WILD_WIND_GUST(10)，R2 防御化解无折损，击杀后 COND_WIND_DEFEND 成立
+        CreateBattleRequest windReq = CreateBattleRequest.newBuilder()
+                .setBattleId(88101L)
+                .setBattleConfigId(113)
+                .setMatchMode(BattleConstants.MATCH_MODE_PVE_SOLO)
+                .setSeed(101L)
+                .addPlayers(strongPlayer(5001L, "风行者", 0, 1).toBuilder()
+                        .setPhysicalAttack(10_000L).setMagicAttack(10_000L).build())
+                .setTrialContext(TrialBattleContext.newBuilder()
+                        .setJournalEntryId(401)
+                        .setTrialRuleVersion(1)
+                        .setSeasonId(0))
+                .build();
+        TurnBattleEngine windEngine = ((BattleStart.Started) TurnBattleEngine.start(windReq, DATA)).engine();
+        assertThat(windEngine.buildStateSnapshot().getTelegraphsList())
+                .anyMatch(t -> t.getIntentKind() == BattleConstants.TELEGRAPH_KIND_WILD_WIND_GUST
+                        && t.getExecuteRound() == 2);
+        // R1/R2 均防御以稳定化解 R2 风袭
+        windEngine.submitAction(5001L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        windEngine.resolveCurrentRound();
+        windEngine.submitAction(5001L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        windEngine.resolveCurrentRound();
+        for (int i = 0; i < 12 && windEngine.outcome() == eBattleOutcome.BATTLE_OUTCOME_ONGOING; i++) {
+            windEngine.resolveCurrentRound();
+        }
+        assertThat(windEngine.outcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN);
+        BattleSettlementData windSettlement = windEngine.buildSettlement(5001L);
+        assertThat(windSettlement.getTrialFacts().getBossWindHitUnprotectedDeath()).isFalse();
+        assertThat(TrialJournalRules.evaluateSealCondition(TrialJournalRules.COND_WIND_DEFEND, 0, windSettlement)).isTrue();
+
+        // 2) 114 水镜钟鸣：R1 阳钟物理直伤 + R3 阴鼓法术直伤 -> COND_BELL_HARMONY 成立
+        var magicSkill = CONFIG.skill().all().stream()
+                .filter(s -> s.getBattleModel() == 1 && s.getAbilityKind() == 1 && (s.getCasterMask() & 1) != 0
+                        && s.getSeasonId() == 0 && s.getTargetTeam() == 1
+                        && s.getDamageType() == com.game.common.combat.CombatDamageRules.MAGIC_DAMAGE
+                        && s.getEffectList().stream().anyMatch(bid -> CONFIG.buff().find(bid)
+                                .map(b -> b.getBattleOp() == BattleEffect.DAMAGE).orElse(false)))
+                .findFirst().orElseThrow();
+        BattlePlayerSnapshot bellPlayer = strongPlayer(5002L, "听钟人", 0, 1).toBuilder()
+                .setPhysicalAttack(1_500L)
+                .setMagicAttack(60_000L)
+                .clearPets()
+                .addSkillTableIds(magicSkill.getId())
+                .putSkillRanks(magicSkill.getId(), 1)
+                .build();
+        CreateBattleRequest bellReq = CreateBattleRequest.newBuilder()
+                .setBattleId(88102L)
+                .setBattleConfigId(114)
+                .setMatchMode(BattleConstants.MATCH_MODE_PVE_SOLO)
+                .setSeed(102L)
+                .addPlayers(bellPlayer)
+                .setTrialContext(TrialBattleContext.newBuilder()
+                        .setJournalEntryId(402)
+                        .setTrialRuleVersion(1)
+                        .setSeasonId(0))
+                .build();
+        TurnBattleEngine bellEngine = ((BattleStart.Started) TurnBattleEngine.start(bellReq, DATA)).engine();
+        long bellBossId = bellEngine.buildStateSnapshot().getActorsList().stream()
+                .filter(a -> a.getTeamIndex() == 1 && a.getIsBoss()).findFirst().orElseThrow().getActorId();
+        // R1（阳钟）：普攻物理直伤
+        bellEngine.submitAction(5002L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_ATTACK).setTargetId(bellBossId).build());
+        bellEngine.resolveCurrentRound();
+        // R2（阳钟）：防御拖入 R3 阴鼓窗口
+        bellEngine.submitAction(5002L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        bellEngine.resolveCurrentRound();
+        // R3（阴鼓）：施放法术直伤并收尾
+        assertThat(BattleConstants.isWildBellYangRound(3)).isFalse();
+        bellEngine.submitAction(5002L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                .setSkillTableId(magicSkill.getId()).setTargetId(bellBossId).build());
+        bellEngine.resolveCurrentRound();
+        for (int i = 0; i < 12 && bellEngine.outcome() == eBattleOutcome.BATTLE_OUTCOME_ONGOING; i++) {
+            bellEngine.submitAction(5002L, BattleAction.newBuilder()
+                    .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                    .setSkillTableId(magicSkill.getId()).setTargetId(bellBossId).build());
+            bellEngine.resolveCurrentRound();
+        }
+        assertThat(bellEngine.outcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN);
+        BattleSettlementData bellSettlement = bellEngine.buildSettlement(5002L);
+        assertThat(bellSettlement.getTrialFacts().getDealtYangBellPhysicalDamage()).isTrue();
+        assertThat(bellSettlement.getTrialFacts().getDealtYinDrumMagicDamage()).isTrue();
+        assertThat(TrialJournalRules.evaluateSealCondition(TrialJournalRules.COND_BELL_HARMONY, 0, bellSettlement)).isTrue();
+
+        // 3) 115 涨退潮：前 2 回合防御度过涨潮，R3 退潮窗口一举击杀 -> finished_in_ebb_tide = true
+        BattlePlayerSnapshot tidePlayer = strongPlayer(5003L, "踏浪人", 0, 1).toBuilder()
+                .clearPets().setPhysicalAttack(200_000L).build();
+        CreateBattleRequest tideReq = CreateBattleRequest.newBuilder()
+                .setBattleId(88103L)
+                .setBattleConfigId(115)
+                .setMatchMode(BattleConstants.MATCH_MODE_PVE_SOLO)
+                .setSeed(103L)
+                .addPlayers(tidePlayer)
+                .setTrialContext(TrialBattleContext.newBuilder()
+                        .setJournalEntryId(403)
+                        .setTrialRuleVersion(1)
+                        .setSeasonId(0))
+                .build();
+        TurnBattleEngine tideEngine = ((BattleStart.Started) TurnBattleEngine.start(tideReq, DATA)).engine();
+        tideEngine.submitAction(5003L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        tideEngine.resolveCurrentRound();
+        tideEngine.submitAction(5003L, BattleAction.newBuilder().setActionType(eBattleActionType.BATTLE_ACTION_DEFEND).build());
+        tideEngine.resolveCurrentRound();
+        // R3/R4 均为退潮窗口，强攻清场
+        for (int i = 0; i < 2 && tideEngine.outcome() == eBattleOutcome.BATTLE_OUTCOME_ONGOING; i++) {
+            tideEngine.resolveCurrentRound();
+        }
+        assertThat(tideEngine.outcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN);
+        BattleSettlementData tideSettlement = tideEngine.buildSettlement(5003L);
+        assertThat(tideSettlement.getTrialFacts().getFinishedInEbbTide()).isTrue();
+        assertThat(TrialJournalRules.evaluateSealCondition(TrialJournalRules.COND_TIDE_FINISH, 0, tideSettlement)).isTrue();
+    }
+
+    @Test
+    void 试炼誓约四项约束全部落地且非法掩码与非首领局被拒() {
+        var controlSkill = CONFIG.skill().all().stream()
+                .filter(s -> s.getBattleModel() == 1 && s.getAbilityKind() == 1 && (s.getCasterMask() & 1) != 0
+                        && s.getSeasonId() == 0 && s.getTargetTeam() == 1)
+                .filter(s -> s.getEffectList().stream().anyMatch(bid -> CONFIG.buff().find(bid)
+                        .map(b -> (b.getBattleOp() == BattleEffect.CONTROL && b.getStateKind() >= 1 && b.getStateKind() <= 6)
+                                || b.getBuffType() == BattleConstants.BUFF_TYPE_STUN
+                                || b.getBuffType() == BattleConstants.BUFF_TYPE_FREEZE
+                                || b.getBuffType() == BattleConstants.BUFF_TYPE_SILENCE)
+                        .orElse(false)))
+                .findFirst().orElseThrow();
+
+        int baseRounds = CONFIG.dungeon().find(101).orElseThrow().getRoundLimit();
+        BattlePlayerSnapshot p = strongPlayer(6001L, "孤剑誓约", 0, 1).toBuilder()
+                .addSkillTableIds(controlSkill.getId())
+                .putSkillRanks(controlSkill.getId(), 1)
+                .build();
+        CreateBattleRequest vowReq = CreateBattleRequest.newBuilder()
+                .setBattleId(88201L)
+                .setBattleConfigId(101)
+                .setMatchMode(BattleConstants.MATCH_MODE_PVE_SOLO)
+                .setSeed(201L)
+                .addPlayers(p)
+                .setTrialContext(TrialBattleContext.newBuilder()
+                        .setJournalEntryId(101)
+                        .setTrialRuleVersion(1)
+                        .setSeasonId(0)
+                        .setChallengeVowMask(TrialJournalRules.VOW_MASK_ALL))
+                .build();
+        TurnBattleEngine engine = ((BattleStart.Started) TurnBattleEngine.start(vowReq, DATA)).engine();
+        var state = engine.buildStateSnapshot();
+        assertThat(state.getTrialVowMask()).isEqualTo(TrialJournalRules.VOW_MASK_ALL);
+        assertThat(state.getRoundLimit()).isEqualTo(TrialJournalRules.tightenRoundLimit(baseRounds));
+        // 无宠孤剑：不生成玩家灵宠
+        assertThat(state.getActorsList()).noneMatch(a -> a.getActorType() == com.game.proto.eBattleActorType.BATTLE_ACTOR_TYPE_PET);
+        // 禁控硬破：控制技能被拒收
+        long bossId = state.getActorsList().stream().filter(a -> a.getTeamIndex() == 1).findFirst().orElseThrow().getActorId();
+        int tip = engine.validateAction(6001L, BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                .setSkillTableId(controlSkill.getId())
+                .setTargetId(bossId).build());
+        assertThat(tip).isEqualTo(ActionChecks.SKILL_CANNOT_CAST_IN_STATE);
+
+        for (int i = 0; i < 6 && engine.outcome() == eBattleOutcome.BATTLE_OUTCOME_ONGOING; i++) {
+            engine.resolveCurrentRound();
+        }
+        assertThat(engine.outcome()).isEqualTo(eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN);
+        BattleTrialJournalFacts facts = engine.buildSettlement(6001L).getTrialFacts();
+        assertThat(facts.getChallengeVowMask()).isEqualTo(TrialJournalRules.VOW_MASK_ALL);
+        assertThat(facts.getUsedPetTableId()).isZero();
+        // 单宝轻装：仅保留首位法宝（effectId=5）
+        assertThat(facts.getUsedArtifactEffectIdsList()).containsExactly(5);
+
+        // 非法高位掩码与护卫救援局拒收
+        CreateBattleRequest badMask = vowReq.toBuilder().setBattleId(88202L)
+                .setTrialContext(vowReq.getTrialContext().toBuilder().setChallengeVowMask(0x10)).build();
+        assertThat(TurnBattleEngine.start(badMask, DATA)).isInstanceOf(BattleStart.Rejected.class);
+
+        CreateBattleRequest rescueVow = vowReq.toBuilder().setBattleId(88203L).setBattleConfigId(109).build();
+        assertThat(TurnBattleEngine.start(rescueVow, DATA)).isInstanceOf(BattleStart.Rejected.class);
     }
 }

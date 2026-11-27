@@ -63,6 +63,7 @@ class RewardedAdFeatureAndServiceTest {
         assertThat(info.getSlotsList()).singleElement().satisfies(s -> {
             assertThat(s.getSlotId()).isEqualTo(1);
             assertThat(s.getEnabled()).isFalse();
+            assertThat(s.getDailyLimit()).isEqualTo(14);
             assertThat(s.getCurrencyType()).isEqualTo(Wallet.BOUND_GOLD);
             assertThat(s.getRewardAmount()).isEqualTo(300L);
         });
@@ -180,7 +181,7 @@ class RewardedAdFeatureAndServiceTest {
         assertThat(player.wallet().balance(Wallet.BOUND_GOLD)).isEqualTo(600L);
         assertThat(c2.getSlot().getClaimedToday()).isEqualTo(2);
 
-        // 6. 今日已满 2/2 拒 39004；时钟回拨 1 天绝不清零；次日 05:00 后清零恢复
+        // 6. 本周已满 2/2 拒 39004；同周次日不重置；时钟回拨 1 周绝不清零；下周一 05:00 后清零恢复
         assertThat(svc.beginSession(f.world, player,
                 BeginRewardedAdSessionRequest.newBuilder().setSlotId(1)
                         .setClientPlatform(AdClientPlatform.AD_CLIENT_PLATFORM_WECHAT_MINIGAME_VALUE).build(),
@@ -190,14 +191,20 @@ class RewardedAdFeatureAndServiceTest {
         assertThat(svc.beginSession(f.world, player,
                 BeginRewardedAdSessionRequest.newBuilder().setSlotId(1)
                         .setClientPlatform(AdClientPlatform.AD_CLIENT_PLATFORM_WECHAT_MINIGAME_VALUE).build(),
-                BASE_DAY_MS - RewardedAdRules.DAY_MS).getErrorMessage().getId())
+                BASE_DAY_MS + RewardedAdRules.DAY_MS).getErrorMessage().getId())
                 .isEqualTo(RewardedAdService.DAILY_LIMIT_REACHED);
 
-        long nextDayMs = c2.getSlot().getNextResetMs();
+        assertThat(svc.beginSession(f.world, player,
+                BeginRewardedAdSessionRequest.newBuilder().setSlotId(1)
+                        .setClientPlatform(AdClientPlatform.AD_CLIENT_PLATFORM_WECHAT_MINIGAME_VALUE).build(),
+                BASE_DAY_MS - RewardedAdRules.WEEK_MS).getErrorMessage().getId())
+                .isEqualTo(RewardedAdService.DAILY_LIMIT_REACHED);
+
+        long nextWeekMs = c2.getSlot().getNextResetMs();
         BeginRewardedAdSessionResponse s3 = svc.beginSession(f.world, player,
                 BeginRewardedAdSessionRequest.newBuilder().setSlotId(1)
                         .setClientPlatform(AdClientPlatform.AD_CLIENT_PLATFORM_WECHAT_MINIGAME_VALUE).build(),
-                nextDayMs);
+                nextWeekMs);
         assertThat(s3.getErrorMessage().getId()).isZero();
 
         // 7. 持久化往返验证
@@ -211,14 +218,14 @@ class RewardedAdFeatureAndServiceTest {
         assertThat(f.currency.block(player, Wallet.BOUND_GOLD)).isZero();
         assertThat(svc.claim(f.world, player, ClaimRewardedAdRequest.newBuilder()
                 .setClientRequestId(5006L).setSlotId(1).setAdSessionId(s3.getAdSessionId()).build(),
-                nextDayMs + 20_000L).getErrorMessage().getId())
+                nextWeekMs + 20_000L).getErrorMessage().getId())
                 .isEqualTo(RewardedAdService.CURRENCY_BLOCKED);
         assertThat(f.currency.unblock(player, Wallet.BOUND_GOLD)).isZero();
 
         WorldTestAccess.startFreezing(player);
         assertThat(svc.claim(f.world, player, ClaimRewardedAdRequest.newBuilder()
                 .setClientRequestId(5007L).setSlotId(1).setAdSessionId(s3.getAdSessionId()).build(),
-                nextDayMs + 20_000L).getErrorMessage().getId())
+                nextWeekMs + 20_000L).getErrorMessage().getId())
                 .isEqualTo(RewardedAdService.FROZEN);
     }
 

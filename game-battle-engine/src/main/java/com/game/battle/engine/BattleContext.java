@@ -85,6 +85,8 @@ final class BattleContext {
     long activeNextRoundBoostExtra;
     /** 本局战前 3 Ban 合并去重后的全局禁招集合（对双方人物与灵宠对称生效）。 */
     private final java.util.TreeSet<Integer> bannedSkillIds = new java.util.TreeSet<>(Integer::compareUnsigned);
+    /** 五行试炼志 V3：本局冻结的自选限制誓约位掩码（bit0 禁控 bit1 单宝 bit2 无宠 bit3 紧缩回合）。 */
+    private int trialVowMask;
 
     /**
      * @param matchMode 请求里的 match_mode（uint32）；只有 4 / 5 算 PVE，其余一律非 PVE（{@code IsPveMatch}，{@code engine.cpp:1312-1315}）
@@ -123,6 +125,66 @@ final class BattleContext {
 
     boolean isSkillBanned(int skillTableId) {
         return skillTableId != 0 && bannedSkillIds.contains(skillTableId);
+    }
+
+    int trialVowMask() {
+        return trialVowMask;
+    }
+
+    void setTrialVowMask(int mask) {
+        this.trialVowMask = mask;
+    }
+
+    boolean hasTrialVow(int vowBit) {
+        return (trialVowMask & vowBit) != 0;
+    }
+
+    boolean isControlBannedForActor(BattleUnit actor) {
+        return actor != null && actor.teamIndex() == 0 && hasTrialVow(TrialJournalRules.VOW_BAN_CONTROL);
+    }
+
+    boolean isHardControlBuff(int buffTableId) {
+        if (buffTableId == 0) {
+            return false;
+        }
+        Optional<BuffTable> opt = data.buff(buffTableId);
+        if (opt.isEmpty()) {
+            return false;
+        }
+        BuffTable row = opt.get();
+        int bt = row.getBuffType();
+        if (bt == BattleConstants.BUFF_TYPE_STUN
+                || bt == BattleConstants.BUFF_TYPE_SILENCE
+                || bt == BattleConstants.BUFF_TYPE_FREEZE) {
+            return true;
+        }
+        if (row.getBattleOp() == BattleEffect.CONTROL) {
+            int sk = row.getStateKind();
+            return sk >= BattleEffect.SEAL_ACTIVE && sk <= BattleEffect.FREEZE;
+        }
+        return false;
+    }
+
+    boolean isControlSkill(SkillTable skillRow) {
+        if (skillRow == null) {
+            return false;
+        }
+        for (int effectBuffId : skillRow.getEffectList()) {
+            if (isHardControlBuff(effectBuffId)) {
+                return true;
+            }
+            Optional<BuffTable> opt = data.buff(effectBuffId);
+            if (opt.isPresent()) {
+                BuffTable row = opt.get();
+                if ((row.getBattleOp() == BattleEffect.CONTROL && row.getStateKind() >= 1 && row.getStateKind() <= 6)
+                        || row.getBuffType() == BattleConstants.BUFF_TYPE_STUN
+                        || row.getBuffType() == BattleConstants.BUFF_TYPE_FREEZE
+                        || row.getBuffType() == BattleConstants.BUFF_TYPE_SILENCE) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     void setBannedSkills(java.util.Collection<Integer> ids) {

@@ -413,12 +413,16 @@ public final class GatherPipeline {
                     : (rankedStore != null ? rankedStore.tables() : null);
             if (catalogTables != null) {
                 catalogTables.trialContextFor(mode.getNumber(), plan.battleConfigId(), plan.activityContext(), rankedContext)
+                        .map(tc -> plan.trialVowMask() != 0
+                                ? tc.toBuilder().setChallengeVowMask(plan.trialVowMask()).build()
+                                : tc)
                         .ifPresent(create::setTrialContext);
             }
             // 观战可见性与战报录制标记在建房时决定一次、随建房原件冻结；落点记录抄同一份可见性
             create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext(),
                     create.hasCustomDuelRules() ? create.getCustomDuelRules() : null, rankedContext));
-            create.setRecordReplay(com.game.match.report.BattleReplayPolicy.decide(mode));
+            create.setRecordReplay(com.game.match.report.BattleReplayPolicy.decideForBattle(
+                    mode, create.hasTrialContext() ? create.getTrialContext() : null));
             if (scriptResolver != null && (rankedContext == null || !rankedContext.getUseFreePreset())) {
                 create.addAllTeamScripts(scriptResolver.resolveForBattle(battleId, mode.getNumber(), plan.battleConfigId(), create.getPlayersList()));
             }

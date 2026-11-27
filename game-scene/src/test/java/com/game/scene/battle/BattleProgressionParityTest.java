@@ -256,6 +256,29 @@ class BattleProgressionParityTest {
         assertThat(newWeek.candidateLedger().getWeekStartsAtMs()).isEqualTo(3000L);
         assertThat(newWeek.delta().silverGain()).isEqualTo(1000L);
         assertThat(newWeek.delta().silverDiminished()).isFalse();
+
+        // 滚存蓄水池验证：新号首周 30k/45k；打 10k 后过 1 周滚存为 50k/80k；休整 10 周封顶 3 周 = 90k/135k
+        long week1 = 1_795_381_200_000L;
+        var firstWeek = BattleProgressionRules.prepareEconomyLedger(BattleEconomyLedgerState.getDefaultInstance(),
+                week1, s1, 0L, 0L, tables.rewardRows(), tables.weeklySilverRule());
+        assertThat(firstWeek.candidateLedger().getSilverRolloverSoftCap()).isEqualTo(30_000L);
+        assertThat(firstWeek.candidateLedger().getSilverRolloverHardCap()).isEqualTo(45_000L);
+
+        BattleEconomyLedgerState partial = firstWeek.candidateLedger().toBuilder()
+                .setBattleSilverThisWeek(10_000L)
+                .build();
+        var week2 = BattleProgressionRules.prepareEconomyLedger(partial, week1 + BattleProgressionRules.WEEK_MS,
+                s1, 0L, 0L, tables.rewardRows(), tables.weeklySilverRule());
+        assertThat(week2.candidateLedger().getSilverRolloverSoftCap()).isEqualTo(50_000L);
+        assertThat(week2.candidateLedger().getSilverRolloverHardCap()).isEqualTo(80_000L);
+        assertThat(week2.delta().weeklySilverSoftCap()).isEqualTo(50_000L);
+
+        var week10 = BattleProgressionRules.prepareEconomyLedger(week2.candidateLedger(),
+                week1 + 10L * BattleProgressionRules.WEEK_MS, s1, 0L, 0L,
+                tables.rewardRows(), tables.weeklySilverRule());
+        assertThat(week10.candidateLedger().getSilverRolloverSoftCap()).isEqualTo(90_000L);
+        assertThat(week10.candidateLedger().getSilverRolloverHardCap()).isEqualTo(135_000L);
+        assertThat(week10.delta().weeklySilverSoftCap()).isEqualTo(90_000L);
     }
 
     @Test
@@ -328,12 +351,18 @@ class BattleProgressionParityTest {
         UnknownFieldSet ledgerUnknown = UnknownFieldSet.newBuilder()
                 .addField(991, UnknownFieldSet.Field.newBuilder().addVarint(77L).build())
                 .build();
+        UnknownFieldSet battleEconomyUnknown = UnknownFieldSet.newBuilder()
+                .addField(993, UnknownFieldSet.Field.newBuilder().addVarint(66L).build())
+                .build();
         ClientRequestLedgerState rawLedger = ClientRequestLedgerState.newBuilder()
                 .setNextSeq(5L)
                 .setBattleEconomy(BattleEconomyLedgerState.newBuilder()
                         .setWeekStartsAtMs(1900000000000L)
                         .setBattleSilverThisWeek(1200L)
                         .setBattleExpThisWeek(2000L)
+                        .setSilverRolloverSoftCap(50000L)
+                        .setSilverRolloverHardCap(80000L)
+                        .setUnknownFields(battleEconomyUnknown)
                         .build())
                 .setUnknownFields(ledgerUnknown)
                 .build();
@@ -342,6 +371,9 @@ class BattleProgressionParityTest {
         ClientRequestLedgerState savedLedger = restoredLedger.toState();
         assertThat(savedLedger.getUnknownFields().getField(991).getVarintList()).containsExactly(77L);
         assertThat(savedLedger.getBattleEconomy().getBattleSilverThisWeek()).isEqualTo(1200L);
+        assertThat(savedLedger.getBattleEconomy().getSilverRolloverSoftCap()).isEqualTo(50000L);
+        assertThat(savedLedger.getBattleEconomy().getSilverRolloverHardCap()).isEqualTo(80000L);
+        assertThat(savedLedger.getBattleEconomy().getUnknownFields().getField(993).getVarintList()).containsExactly(66L);
 
         UnknownFieldSet progUnknown = UnknownFieldSet.newBuilder()
                 .addField(992, UnknownFieldSet.Field.newBuilder().addVarint(88L).build())

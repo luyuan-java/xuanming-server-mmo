@@ -276,6 +276,17 @@ public final class GlobalMatchService implements AutoCloseable {
                     return MatchTips.joinRejected(MatchTip.JOIN_MODE_NOT_OPEN);
                 }
             }
+            int vowMask=request.getTrialVowMask();
+            if(vowMask!=0){
+                boolean isSoloDirect=mode==MatchModes.PVE_SOLO||(mode==MatchModes.PVE_TEAM&&size==1);
+                if(!com.game.match.ranked.RankedTables.isValidTrialVowMask(vowMask)
+                        ||request.getIsWuxingTower()
+                        ||!isSoloDirect
+                        ||rankedTables==null
+                        ||!rankedTables.supportsTrialVows(request.getBattleConfigId())){
+                    return MatchTips.joinRejected(MatchTip.JOIN_MODE_NOT_OPEN);
+                }
+            }
             if(mode==MatchModes.PVP_TEAM&&rankedStore!=null&&rankedTables!=null){
                 if(request.getBattleConfigId()!=rankedTables.rule().getBattleConfigId()){
                     return MatchTips.joinRejected(MatchTip.JOIN_MODE_NOT_OPEN);
@@ -348,9 +359,14 @@ public final class GlobalMatchService implements AutoCloseable {
             return reply;
         }catch(com.google.protobuf.InvalidProtocolBufferException bad){throw new IllegalStateException("原Join持久原件损坏",bad);}
     }
+    private int vowMaskForSoloTicket(GlobalTicketRow ticket){
+        if(ticket.getTeamSize()!=1)return 0;
+        return store.joinRequestForTicket(ticket.getPlayerId(),ticket.getTicket())
+                .map(JoinQueueRequest::getTrialVowMask).orElse(0);
+    }
     private void tryImmediate(GlobalTicketRow ticket){
         try{var choice=GlobalRegionPolicy.choose(List.of(ticket),directory.list(0),store.now(),config);if(choice==null)return;
-            var battle=ids.nextBattleId();if(battle.isEmpty())return;launch(store.claim(choice.members(),formation(battle.getAsLong(),choice.node(),ticket.getMode(),ticket.getConfigId()).setRequeueOnFailure(true).build(),false),true);
+            var battle=ids.nextBattleId();if(battle.isEmpty())return;launch(store.claim(choice.members(),formation(battle.getAsLong(),choice.node(),ticket.getMode(),ticket.getConfigId()).setRequeueOnFailure(true).setTrialVowMask(vowMaskForSoloTicket(ticket)).build(),false),true);
         }catch(RuntimeException race){log.debug("单人原准入由全球恢复继续，不另造请求");}
     }
     public GetQueueStatusResponse status(long player) {
@@ -427,7 +443,7 @@ public final class GlobalMatchService implements AutoCloseable {
                     if(peers.size()+1!=anchor.getTeamSize())continue;
                     List<GlobalTicketRow> members=new ArrayList<>();members.add(anchor);members.addAll(peers);
                     var id=ids.nextBattleId();if(id.isEmpty())return;
-                    try{var f=store.claim(members,formation(id.getAsLong(),node,anchor.getMode(),anchor.getConfigId()).setRequeueOnFailure(true).build(),false);launch(f,true);}
+                    try{var f=store.claim(members,formation(id.getAsLong(),node,anchor.getMode(),anchor.getConfigId()).setRequeueOnFailure(true).setTrialVowMask(vowMaskForSoloTicket(anchor)).build(),false);launch(f,true);}
                     catch(RuntimeException e){log.debug("成局竞争失败，下一轮重读");}
                     return;
                 }
@@ -596,10 +612,18 @@ public final class GlobalMatchService implements AutoCloseable {
             long stamp=store.now();int mode=MatchMode.MATCH_MODE_PVE_TEAM_VALUE;
             int target=original.getRequest().getTargetTeamSize();
             if(target>props.pveTeamSizeFor(request.getBattleConfigId())||target!=0&&target<roster.size())throw new IllegalArgumentException("整队目标人数超出副本范围");
+            int vowMask=original.getRequest().getTrialVowMask();
+            if(vowMask!=0){
+                boolean fullPartyDirect=target==0||target==roster.size();
+                if(!com.game.match.ranked.RankedTables.isValidTrialVowMask(vowMask)||!fullPartyDirect
+                        ||rankedTables==null||!rankedTables.supportsTrialVows(request.getBattleConfigId())){
+                    throw new IllegalArgumentException("整队试炼誓约参数或副本不支持");
+                }
+            }
             var prior=store.direct(key);GlobalDirectIntentRow prepared;
             if(prior!=null&&prior.getAdmissionPrepared()&&prior.hasStartOriginal())prepared=store.prepareTeam(key,request.getLaunchOriginal(),prior.getStartOriginal().getTicketsList(),prior.getStartOriginal().getFormation(),deadline);
             else {var initial=directMembers(mode,request.getBattleConfigId(),roster,tickets,request.getTeamId(),stamp).stream().map(member->member.toBuilder().setZoneId(original.getZonesOrThrow(member.getPlayerId())).build()).toList();
-                prepared=store.prepareTeam(key,request.getLaunchOriginal(),initial,target>roster.size()?GlobalFormationRow.getDefaultInstance():directFormation(initial,mode,request.getBattleConfigId(),stamp).build(),deadline);}
+                prepared=store.prepareTeam(key,request.getLaunchOriginal(),initial,target>roster.size()?GlobalFormationRow.getDefaultInstance():directFormation(initial,mode,request.getBattleConfigId(),stamp).setTrialVowMask(vowMask).build(),deadline);}
             var members=prepared.getStartOriginal().getTicketsList();exitSpectators(original.getObserverExitsList(),deadline);
             if(store.closeObsoleteTeam(prepared,deadline)){var closed=store.teamReplay(key,request.getClientRequest(),request.getLaunchOriginal(),deadline);if(closed==null)throw new IllegalStateException("Team终局证明尚未确认");return closed;}
             if(target>roster.size())return store.enqueueTeam(key,request.getLaunchOriginal(),members,deadline);
@@ -739,8 +763,12 @@ public final class GlobalMatchService implements AutoCloseable {
                 }
             }
             if (rankedTables != null) {
+                int formationVowMask = f.getTrialVowMask();
                 rankedTables.trialContextFor(f.getMode(), f.getConfigId(),
                                 request.hasActivityContext() ? request.getActivityContext() : null, rankedContext)
+                        .map(tc -> formationVowMask != 0
+                                ? tc.toBuilder().setChallengeVowMask(formationVowMask).build()
+                                : tc)
                         .ifPresent(request::setTrialContext);
             }
             // 观战可见性与战报录制标记建房时决定一次，随 formation 持久的 create_request 冻结
@@ -749,7 +777,8 @@ public final class GlobalMatchService implements AutoCloseable {
                     request.hasActivityContext() ? request.getActivityContext() : null,
                     request.hasCustomDuelRules() ? request.getCustomDuelRules() : null,
                     rankedContext));
-            request.setRecordReplay(com.game.match.report.BattleReplayPolicy.decide(mode));
+            request.setRecordReplay(com.game.match.report.BattleReplayPolicy.decideForBattle(
+                    mode, request.hasTrialContext() ? request.getTrialContext() : null));
             if(scriptResolver!=null && (rankedContext == null || !rankedContext.getUseFreePreset())) {
                 request.addAllTeamScripts(scriptResolver.resolveForBattle(f.getBattleId(),f.getMode(),f.getConfigId(),snapshots));
             }

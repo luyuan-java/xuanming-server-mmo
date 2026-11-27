@@ -22,6 +22,32 @@ public final class BattleProgressionRules {
     public static final int PVP_MIN_ROUNDS_FOR_LOSS = 3;
     public static final int PVP_MIN_MANUAL_ROUNDS_FOR_LOSS = 2;
     public static final long PERMYRIAD_BASE = 10_000L;
+    public static final long WEEK_MS = 7L * 86_400_000L;
+    /** 战斗银两周上限最多滚存 3 周（软上限 30,000 → 90,000；硬封顶 45,000 → 135,000）。 */
+    public static final long SILVER_ROLLOVER_MAX_WEEKS = 3L;
+
+    private static long saturatedMul(long a, long b) {
+        if (a == 0L || b == 0L) {
+            return 0L;
+        }
+        if (Long.compareUnsigned(a, Long.divideUnsigned(-1L, b)) > 0) {
+            return -1L;
+        }
+        return a * b;
+    }
+
+    private static long saturatedAdd(long a, long b) {
+        long room = -1L - a;
+        return Long.compareUnsigned(b, room) > 0 ? -1L : (a + b);
+    }
+
+    private static long unsignedMin(long a, long b) {
+        return Long.compareUnsigned(a, b) < 0 ? a : b;
+    }
+
+    private static long unsignedMax(long a, long b) {
+        return Long.compareUnsigned(a, b) > 0 ? a : b;
+    }
 
     private BattleProgressionRules() {
     }
@@ -316,7 +342,41 @@ public final class BattleProgressionRules {
         BattleEconomyLedgerState.Builder cand = base.toBuilder();
 
         boolean weekReset = false;
+        boolean ruleValid = validateWeeklySilverRule(rule);
         if (Long.compareUnsigned(currentWeekStartMs, cand.getWeekStartsAtMs()) > 0) {
+            long prevWeekStart = cand.getWeekStartsAtMs();
+            long prevUsed = cand.getBattleSilverThisWeek();
+            if (ruleValid) {
+                long maxSoftCap = saturatedMul(rule.softCap(), SILVER_ROLLOVER_MAX_WEEKS);
+                long maxHardCap = rule.hardCap() != 0L ? saturatedMul(rule.hardCap(), SILVER_ROLLOVER_MAX_WEEKS) : 0L;
+                long nextSoftCap = rule.softCap();
+                long nextHardCap = rule.hardCap();
+                if (prevWeekStart != 0L) {
+                    long prevSoftCap = cand.getSilverRolloverSoftCap() != 0L
+                            ? unsignedMin(unsignedMax(cand.getSilverRolloverSoftCap(), rule.softCap()), maxSoftCap)
+                            : rule.softCap();
+                    long prevHardCap = rule.hardCap() != 0L
+                            ? (cand.getSilverRolloverHardCap() != 0L
+                                    ? unsignedMin(unsignedMax(cand.getSilverRolloverHardCap(), rule.hardCap()), maxHardCap)
+                                    : rule.hardCap())
+                            : 0L;
+                    long elapsedWeeks = Long.divideUnsigned(currentWeekStartMs - prevWeekStart, WEEK_MS);
+                    if (elapsedWeeks == 0L) {
+                        elapsedWeeks = 1L;
+                    }
+                    long addedWeeks = unsignedMin(elapsedWeeks, SILVER_ROLLOVER_MAX_WEEKS);
+                    long carrySoft = Long.compareUnsigned(prevSoftCap, prevUsed) > 0 ? (prevSoftCap - prevUsed) : 0L;
+                    nextSoftCap = unsignedMin(maxSoftCap,
+                            unsignedMax(rule.softCap(), saturatedAdd(carrySoft, saturatedMul(addedWeeks, rule.softCap()))));
+                    if (rule.hardCap() != 0L) {
+                        long carryHard = Long.compareUnsigned(prevHardCap, prevUsed) > 0 ? (prevHardCap - prevUsed) : 0L;
+                        nextHardCap = unsignedMin(maxHardCap,
+                                unsignedMax(rule.hardCap(), saturatedAdd(carryHard, saturatedMul(addedWeeks, rule.hardCap()))));
+                    }
+                }
+                cand.setSilverRolloverSoftCap(nextSoftCap)
+                        .setSilverRolloverHardCap(nextHardCap);
+            }
             cand.setWeekStartsAtMs(currentWeekStartMs)
                     .setBattleSilverThisWeek(0L)
                     .setBattleExpThisWeek(0L);
@@ -347,11 +407,22 @@ public final class BattleProgressionRules {
         long softCap = 0L;
         boolean usedTableSilver = false;
 
-        if (validateWeeklySilverRule(rule)) {
-            softCap = rule.softCap();
+        if (ruleValid) {
+            long maxSoftCap = saturatedMul(rule.softCap(), SILVER_ROLLOVER_MAX_WEEKS);
+            long maxHardCap = rule.hardCap() != 0L ? saturatedMul(rule.hardCap(), SILVER_ROLLOVER_MAX_WEEKS) : 0L;
+            long effectiveSoftCap = cand.getSilverRolloverSoftCap() != 0L
+                    ? unsignedMin(unsignedMax(cand.getSilverRolloverSoftCap(), rule.softCap()), maxSoftCap)
+                    : rule.softCap();
+            long effectiveHardCap = rule.hardCap() != 0L
+                    ? (cand.getSilverRolloverHardCap() != 0L
+                            ? unsignedMin(unsignedMax(cand.getSilverRolloverHardCap(), rule.hardCap()), maxHardCap)
+                            : rule.hardCap())
+                    : 0L;
+            WeeklySilverRule effectiveRule = new WeeklySilverRule(effectiveSoftCap, rule.diminishedRatePermyriad(), effectiveHardCap);
+            softCap = effectiveRule.softCap();
             if (tableSilver != 0L) {
                 usedTableSilver = true;
-                WeeklySilverEval eval = evaluateWeeklySilverCap(rawSilver, cand.getBattleSilverThisWeek(), rule);
+                WeeklySilverEval eval = evaluateWeeklySilverCap(rawSilver, cand.getBattleSilverThisWeek(), effectiveRule);
                 creditedSilver = eval.creditedSilver();
                 usedAfter = eval.usedAfter();
                 diminished = eval.diminished();

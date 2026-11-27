@@ -552,6 +552,18 @@ public final class TeamService {
                             || Integer.compareUnsigned(targetTeamSize, com.game.team.rules.TeamLimits.CAPACITY) > 0)) {
                 return matchReject(caller, TeamTips.SIZE_EXCEEDED, 0, snap, deadline);
             }
+            int vowMask = request.getTrialVowMask();
+            if (vowMask != 0) {
+                boolean pveMode = request.getMatchMode() == MatchMode.MATCH_MODE_UNSPECIFIED
+                        || request.getMatchMode() == MatchMode.MATCH_MODE_PVE_TEAM;
+                boolean fullPartyDirect = targetTeamSize == 0 || targetTeamSize == roster.size();
+                if (!TeamRankedRules.isValidTrialVowMask(vowMask)
+                        || !pveMode
+                        || !fullPartyDirect
+                        || !rankedRules.supportsTrialVows(configId)) {
+                    return matchReject(caller, TeamTips.DUNGEON_NOT_OPEN, 0, snap, deadline);
+                }
+            }
             TeamBattlePort.Check check = battle.checkTeamMatch(configId, roster, targetTeamSize, deadline);
             if (!check.ok()) {
                 return matchReject(caller, check.code(), check.param(), snap, deadline);

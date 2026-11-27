@@ -62,7 +62,9 @@ class MatchMethodsTest {
                 MatchMethods.CREATE_JIANGHU_DUEL_INVITE, MatchMethods.CONFIRM_JIANGHU_DUEL_MEMBER,
                 MatchMethods.RESPOND_JIANGHU_DUEL_INVITE, MatchMethods.LIST_JIANGHU_GRUDGES,
                 MatchMethods.DISMISS_JIANGHU_GRUDGE, MatchMethods.NOTIFY_JIANGHU_DUEL_INVITE,
-                MatchMethods.NOTIFY_JIANGHU_DUEL_STATUS)) {
+                MatchMethods.NOTIFY_JIANGHU_DUEL_STATUS,
+                MatchMethods.CREATE_TRIAL_CHALLENGE_CARD, MatchMethods.GET_TRIAL_CHALLENGE_CARD,
+                MatchMethods.GET_SHARED_TRIAL_REPLAY)) {
             expected.put(tournamentMethod, REGISTRY.requireId(MatchMethods.SERVICE, tournamentMethod));
         }
 

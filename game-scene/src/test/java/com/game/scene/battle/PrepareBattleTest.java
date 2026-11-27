@@ -1273,6 +1273,26 @@ class PrepareBattleTest {
     }
 
     @Test
+    void 卷四三境明雷野外首领必须在对应野外图备战() {
+        // 主城(scene1, configId=1)请求八景岛风眼明雷首领(Dungeon 113, boss_trial_kind=12, scene_id=2) -> 必须拒收(1006)且不写锁。
+        f.enter(SESSION, PLAYER);
+        var mismatchReq = f.prepareRequest(PLAYER, BATTLE, f.deadline(), f.prepareDeadline())
+                .toBuilder().setBattleConfigId(113).build();
+        var mismatchResp = BattleFixture.done(f.battle.prepare(mismatchReq));
+        assertThat(BattleFixture.tipOf(mismatchResp)).isEqualTo(FEATURE_UNAVAILABLE);
+        assertThat(f.locks.ops()).isEmpty();
+
+        // 身处八景岛(scene2, configId=2)请求 Dungeon 113 -> 通过。
+        long wildPlayer = PLAYER + 1;
+        f.enter(SESSION + 1, wildPlayer, 1, f.scene2, PlayerState.getDefaultInstance());
+        var okReq = f.prepareRequest(wildPlayer, BATTLE + 1, f.deadline(), f.prepareDeadline())
+                .toBuilder().setBattleConfigId(113).build();
+        var okReply = f.battle.prepare(okReq);
+        f.drain();
+        assertThat(BattleFixture.tipOf(BattleFixture.done(okReply))).isZero();
+    }
+
+    @Test
     void 野外灵潮珍兽潮必须同时满足对应野外图与灵潮激活窗口() {
         // 校验确定性灵潮窗口（[2, 3, 5] 每小时轮转，前 40 分钟激活，后 20 分钟休潮）。
         assertThat(PlayerBattleService.isWorldTideActiveOnScene(0L, 2)).isTrue();

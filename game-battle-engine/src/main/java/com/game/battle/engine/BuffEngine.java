@@ -81,6 +81,12 @@ final class BuffEngine {
         }
         // 免疫先于抵抗；抵抗成功必须早于驱散、叠层和子 buff，不能让没挂上的异常产生副作用。
         BattleUnit caster = ctx.findActor(casterId);
+        if (ctx.isHardControlBuff(buffTableId)
+                && caster != null && caster.teamIndex() != target.teamIndex()
+                && ctx.isControlBannedForActor(caster)) {
+            ctx.events().append(eBattleEventType.BATTLE_EVENT_RESIST, casterId, target.actorId()).setBuffTableId(buffTableId);
+            return;
+        }
         if (caster != null && caster.teamIndex() != target.teamIndex()) {
             var resist = EquipmentCombatRules.ailmentResistance(target.combat(), caster.combat(), row.getBuffType());
             if (resist.isPresent() && ctx.rng().rollPercent(resist.getAsLong())) {

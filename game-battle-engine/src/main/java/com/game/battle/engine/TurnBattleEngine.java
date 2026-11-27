@@ -319,6 +319,33 @@ public final class TurnBattleEngine {
                             + " affix=" + Integer.toUnsignedString(request.getBossWeeklyAffixId()));
         }
 
+        // 五行试炼志 V3 自选试炼誓约校验与冻结（bit0 禁控 / bit1 单宝 / bit2 无宠 / bit3 紧缩回合）。
+        int requestedVowMask = request.hasTrialContext() ? request.getTrialContext().getChallengeVowMask() : 0;
+        if (!TrialJournalRules.isValidVowMask(requestedVowMask)) {
+            return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                    "试炼誓约掩码非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                            + " mask=" + Integer.toUnsignedString(requestedVowMask));
+        }
+        if (requestedVowMask != 0) {
+            boolean isPveRequest = request.getMatchMode() == BattleConstants.MATCH_MODE_PVE_SOLO
+                    || request.getMatchMode() == BattleConstants.MATCH_MODE_PVE_TEAM;
+            boolean hasTowerReq = request.getPlayersList().stream()
+                    .anyMatch(p -> p.hasTowerContext() && p.getTowerContext().getFloor() != 0);
+            if (!isPveRequest || !BattleConstants.isBossTrialKind(bossTrialKind)
+                    || hasTowerReq || request.hasCustomDuelRules()
+                    || BattleConstants.isNpcIsolatedEncounterKind(bossTrialKind)) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "当前对局不支持试炼誓约: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                + " mode=" + Integer.toUnsignedString(request.getMatchMode())
+                                + " boss_trial_kind=" + Integer.toUnsignedString(bossTrialKind)
+                                + " mask=" + Integer.toUnsignedString(requestedVowMask));
+            }
+            engine.ctx.setTrialVowMask(requestedVowMask);
+            if (engine.ctx.hasTrialVow(TrialJournalRules.VOW_TIGHT_ROUNDS)) {
+                engine.maxRounds = TrialJournalRules.tightenRoundLimit(engine.maxRounds);
+            }
+        }
+
         engine.ctx.setMaxRounds(engine.maxRounds);
         engine.ctx.encounter.configure(bossTrialKind, battleDifficulty);
         int weeklyAffixId = BossTrialWeeklyAffixRules.resolveForBattle(
@@ -483,8 +510,16 @@ public final class TurnBattleEngine {
             }
             // 只复制明确提供的玩家加成；缺省子消息不能因读取而产生 presence，宝宝与怪物不继承主人的装备。
             ctx.configured.equipment.inspectLearnedSkills(snapshot);
-            if (snapshot.hasEquipmentEffects() && !BattleEquipment.initialize(actor,snapshot.getEquipmentEffects()))
-                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,"装备快照非法");
+            if (snapshot.hasEquipmentEffects()) {
+                var effects = snapshot.getEquipmentEffects();
+                if (snapshot.getTeamIndex() == 0 && ctx.hasTrialVow(TrialJournalRules.VOW_SINGLE_ARTIFACT)
+                        && effects.getArtifactsCount() > 1) {
+                    var firstArtifact = effects.getArtifacts(0);
+                    effects = effects.toBuilder().clearArtifacts().addArtifacts(firstArtifact).build();
+                }
+                if (!BattleEquipment.initialize(actor, effects))
+                    return new BattleStart.Rejected(InitRejection.INVALID_PLAYER, "装备快照非法");
+            }
             if (snapshot.hasCombat()) actor.setCombat(snapshot.getCombat());
             // 参战 buff 原样拷贝；实例号也纳入局内自增域，避免与新加 buff 撞号
             for (BattleBuffEntry buff : snapshot.getBuffsList()) {
@@ -547,6 +582,9 @@ public final class TurnBattleEngine {
         nextPetActorIndex = 0;
         boolean allowTempPet = usesFreePreset();
         for (BattlePlayerSnapshot snapshot : request.getPlayersList()) {
+            if (snapshot.getTeamIndex() == 0 && ctx.hasTrialVow(TrialJournalRules.VOW_NO_PET)) {
+                continue;
+            }
             for (BattlePetSnapshot pet : snapshot.getPetsList()) {
                 boolean competitiveTemp = pet.getCompetitiveTemporary();
                 if (competitiveTemp && !allowTempPet) {
@@ -2106,25 +2144,7 @@ public final class TurnBattleEngine {
     }
 
     private boolean isHardControlBuff(int buffTableId) {
-        if (buffTableId == 0) {
-            return false;
-        }
-        Optional<BuffTable> opt = ctx.data().buff(buffTableId);
-        if (opt.isEmpty()) {
-            return false;
-        }
-        BuffTable row = opt.get();
-        int bt = row.getBuffType();
-        if (bt == BattleConstants.BUFF_TYPE_STUN
-                || bt == BattleConstants.BUFF_TYPE_SILENCE
-                || bt == BattleConstants.BUFF_TYPE_FREEZE) {
-            return true;
-        }
-        if (row.getBattleOp() == BattleEffect.CONTROL) {
-            int sk = row.getStateKind();
-            return sk >= BattleEffect.SEAL_ACTIVE && sk <= BattleEffect.FREEZE;
-        }
-        return false;
+        return ctx.isHardControlBuff(buffTableId);
     }
 
     private void accumulateRoundMvpMetrics(TurnResultS2C.Builder result, int resolvedEscalation) {
@@ -3230,7 +3250,7 @@ public final class TurnBattleEngine {
             }
             settlement.setExpGain(expSum).setGoldGain(goldSum);
         }
-        ctx.encounter.populateTrialFacts(request, actor, playerId, settlement);
+        ctx.encounter.populateTrialFacts(request, actor, playerId, outcome, usesFreePreset(), settlement);
         return settlement.build();
     }
 

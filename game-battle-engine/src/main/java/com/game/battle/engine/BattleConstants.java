@@ -73,10 +73,30 @@ public final class BattleConstants {
     public static final int BOSS_TRIAL_KIND_PRACTICE_DUMMY = 9;
     public static final int BOSS_TRIAL_KIND_TACTICAL_PUZZLE = 10;
     public static final int BOSS_TRIAL_KIND_CHARACTER_TALE = 11;
+    public static final int BOSS_TRIAL_KIND_WILD_WIND = 12;
+    public static final int BOSS_TRIAL_KIND_WILD_BELL = 13;
+    public static final int BOSS_TRIAL_KIND_WILD_TIDE = 14;
+
+    public static boolean isWildBossTrialKind(int kind) {
+        return kind >= BOSS_TRIAL_KIND_WILD_WIND && kind <= BOSS_TRIAL_KIND_WILD_TIDE;
+    }
 
     public static boolean isBossTrialKind(int kind) {
         return (kind >= BOSS_TRIAL_KIND_BREAK_REJUV && kind <= BOSS_TRIAL_KIND_VENOM)
-                || kind == BOSS_TRIAL_KIND_BREAK_DUAL_GUARD;
+                || kind == BOSS_TRIAL_KIND_BREAK_DUAL_GUARD
+                || isWildBossTrialKind(kind);
+    }
+
+    /** 卷四·碧渊水宫每 2 回合交替阳钟（R1-2/5-6/...）与阴鼓（R3-4/7-8/...）。 */
+    public static boolean isWildBellYangRound(int roundIndex) {
+        int block = Integer.divideUnsigned(roundIndex != 0 ? roundIndex - 1 : 0, 2);
+        return Integer.remainderUnsigned(block, 2) == 0;
+    }
+
+    /** 卷四·月汐湾每 2 回合交替涨潮（R1-2/5-6/...）与退潮（R3-4/7-8/...）。 */
+    public static boolean isWildTideEbbRound(int roundIndex) {
+        int block = Integer.divideUnsigned(roundIndex != 0 ? roundIndex - 1 : 0, 2);
+        return Integer.remainderUnsigned(block, 2) == 1;
     }
 
     public static boolean isPracticeDummyKind(int kind) {
@@ -142,6 +162,7 @@ public final class BattleConstants {
     public static final int TELEGRAPH_KIND_BOSS_MAGIC_STRIKE = 7;
     public static final int TELEGRAPH_KIND_BOSS_VENOM_AOE = 8;
     public static final int TELEGRAPH_KIND_FESTIVAL_HEAVY_STRIKE = 9;
+    public static final int TELEGRAPH_KIND_WILD_WIND_GUST = 10;
 
     public static final int TELEGRAPH_STATUS_UPCOMING = 1;
     public static final int TELEGRAPH_STATUS_EXECUTING = 2;

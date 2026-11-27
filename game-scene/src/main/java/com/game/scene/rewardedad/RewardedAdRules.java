@@ -9,8 +9,11 @@ import com.game.scene.player.Wallet;
 public final class RewardedAdRules {
 
     public static final long DAY_MS = 86_400_000L;
+    public static final long WEEK_MS = 7L * DAY_MS;
     /** UTC+8 05:00 切日偏移（与装备材料自选/周软上限同源）。 */
     public static final long SHIFT_MS = 10_800_000L;
+    /** 1970-01-05 05:00:00 UTC+8 = 1970-01-04 21:00:00 UTC（每周一 05:00 切周基准）。 */
+    public static final long FIRST_MONDAY_05_UTC8_MS = 334_800_000L;
     public static final int MAX_DAILY_LIMIT = 20;
     public static final int MAX_SESSION_TTL_SEC = 3600;
     public static final long MAX_REWARD_AMOUNT = 100_000L;
@@ -51,6 +54,20 @@ public final class RewardedAdRules {
         long dayStart = dayIndex == 0L ? 0L : (dayIndex * DAY_MS - SHIFT_MS);
         long nextDay = (dayIndex + 1L) * DAY_MS - SHIFT_MS;
         return new long[] { dayStart, nextDay };
+    }
+
+    /** 解析 nowMs 所属游戏周区间 [weekStartMs, nextWeekMs)，切点 UTC+8 每周一 05:00；异常/溢出返回 null。 */
+    public static long[] resolveGameWeek(long nowMs) {
+        if (nowMs < 0L || Long.compareUnsigned(nowMs, FIRST_MONDAY_05_UTC8_MS) < 0) {
+            return null;
+        }
+        long offset = Long.remainderUnsigned(nowMs - FIRST_MONDAY_05_UTC8_MS, WEEK_MS);
+        long weekStart = nowMs - offset;
+        long nextWeek = weekStart + WEEK_MS;
+        if (Long.compareUnsigned(nextWeek, weekStart) <= 0) {
+            return null;
+        }
+        return new long[] { weekStart, nextWeek };
     }
 
     public static int platformBit(int clientPlatform) {

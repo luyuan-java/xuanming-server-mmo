@@ -47,6 +47,23 @@ public final class BattleReplayPolicy {
         return enabled && mode != null && Boolean.TRUE.equals(BY_MODE.get(mode));
     }
 
+    /** 建房期最终录制入口（缺省开关打开）：在既有 PVP 基线之上，仅对五行试炼志有格 PVE 受控开启录制。 */
+    public static boolean decideForBattle(MatchMode mode, com.game.proto.TrialBattleContext trialCtx) {
+        return decideForBattle(true, mode, trialCtx);
+    }
+
+    /** 建房期最终录制入口（对齐 Go {@code recordReplayForBattle}）：普通刷怪/爬塔/历练 PVE 保持关闭。 */
+    public static boolean decideForBattle(boolean enabled, MatchMode mode, com.game.proto.TrialBattleContext trialCtx) {
+        if (!enabled) {
+            return false;
+        }
+        if (decide(true, mode)) {
+            return true;
+        }
+        return (mode == MatchMode.MATCH_MODE_PVE_SOLO || mode == MatchMode.MATCH_MODE_PVE_TEAM)
+                && trialCtx != null && trialCtx.getJournalEntryId() != 0;
+    }
+
     /** 决策表里显式表态过的模式（只读；测试据此钉住「每个枚举都在表里」）。 */
     static Set<MatchMode> decidedModes() {
         return BY_MODE.keySet();

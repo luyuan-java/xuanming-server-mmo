@@ -78,7 +78,7 @@ public final class RewardedAdService {
         if (!ledger.isValid()) {
             return GetRewardedAdInfoResponse.newBuilder().setErrorMessage(tip(UNAVAILABLE)).build();
         }
-        long[] day = RewardedAdRules.resolveGameDay(nowMs);
+        long[] day = RewardedAdRules.resolveGameWeek(nowMs);
         if (day == null) {
             return GetRewardedAdInfoResponse.newBuilder().setErrorMessage(tip(UNAVAILABLE)).build();
         }
@@ -127,7 +127,7 @@ public final class RewardedAdService {
         if (Integer.compareUnsigned(playerLevel, cfg.minLevel()) < 0) {
             return rejectBegin(LEVEL_NOT_ENOUGH);
         }
-        long[] day = RewardedAdRules.resolveGameDay(nowMs);
+        long[] day = RewardedAdRules.resolveGameWeek(nowMs);
         if (day == null) {
             return rejectBegin(UNAVAILABLE);
         }
@@ -201,7 +201,7 @@ public final class RewardedAdService {
                     .setGoldBalance(player.wallet().balance(Wallet.GOLD))
                     .setReplayed(true);
             SlotConfig cfg = tables.slot(req.getSlotId());
-            long[] day = RewardedAdRules.resolveGameDay(nowMs);
+            long[] day = RewardedAdRules.resolveGameWeek(nowMs);
             if (cfg != null && day != null) {
                 out.setSlot(buildSlotView(cfg, ledger.rewardedAd(), 0,
                         PlayerLevels.effective(player.level()), day[0], day[1], nowMs));
@@ -233,7 +233,7 @@ public final class RewardedAdService {
         if (Integer.compareUnsigned(playerLevel, cfg.minLevel()) < 0) {
             return rejectClaim(LEVEL_NOT_ENOUGH);
         }
-        long[] day = RewardedAdRules.resolveGameDay(nowMs);
+        long[] day = RewardedAdRules.resolveGameWeek(nowMs);
         if (day == null) {
             return rejectClaim(UNAVAILABLE);
         }

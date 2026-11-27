@@ -56,4 +56,16 @@ class BattleReplayPolicyTest {
                 .as("新增 MatchMode 必须在 BattleReplayPolicy 的决策表里显式表态")
                 .containsExactlyInAnyOrderElementsOf(declared);
     }
+
+    @Test
+    void 试炼志有格PVE受控开启录制_普通PVE与全局关停保持关闭() {
+        var trialCtx = com.game.proto.TrialBattleContext.newBuilder().setJournalEntryId(401).setTrialRuleVersion(1).build();
+        assertThat(BattleReplayPolicy.decideForBattle(MatchMode.MATCH_MODE_PVE_SOLO, trialCtx)).isTrue();
+        assertThat(BattleReplayPolicy.decideForBattle(MatchMode.MATCH_MODE_PVE_TEAM, trialCtx)).isTrue();
+        assertThat(BattleReplayPolicy.decideForBattle(MatchMode.MATCH_MODE_PVE_SOLO, null)).isFalse();
+        assertThat(BattleReplayPolicy.decideForBattle(MatchMode.MATCH_MODE_PVE_SOLO,
+                com.game.proto.TrialBattleContext.getDefaultInstance())).isFalse();
+        assertThat(BattleReplayPolicy.decideForBattle(false, MatchMode.MATCH_MODE_PVE_SOLO, trialCtx)).isFalse();
+        assertThat(BattleReplayPolicy.decideForBattle(MatchMode.MATCH_MODE_GUILD_WAR_SIEGE, trialCtx)).isFalse();
+    }
 }

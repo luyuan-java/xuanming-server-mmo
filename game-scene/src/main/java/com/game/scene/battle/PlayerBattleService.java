@@ -282,7 +282,7 @@ public final class PlayerBattleService implements BattleHooks {
             }
         }
         int bossTrialKind = dungeonRow != null ? dungeonRow.getBossTrialKind() : 0;
-        boolean isBossTrial = (bossTrialKind >= 1 && bossTrialKind <= 4) || bossTrialKind == 8;
+        boolean isBossTrial = com.game.battle.engine.BattleConstants.isBossTrialKind(bossTrialKind);
         boolean isGuardRescue = bossTrialKind == 5;
         boolean isNpcIsolatedEncounter = com.game.battle.engine.BattleConstants.isNpcIsolatedEncounterKind(bossTrialKind);
         if (isNpcIsolatedEncounter && dungeonRow != null) {
@@ -301,6 +301,19 @@ public final class PlayerBattleService implements BattleHooks {
                 log.warn("备战被拒：演武试招木桩禁止挂载免费预设 player={} battle_id={} battle_config_id={}",
                         Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
                         Integer.toUnsignedString(request.getBattleConfigId()));
+                return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
+            }
+        }
+        // 卷四·三境明雷野外首领试炼（boss_trial_kind 12..14）：玩家必须身处对应野外图（八景岛2 / 碧渊水宫5 / 月汐湾3），防原地跨图偷开。
+        if (com.game.battle.engine.BattleConstants.isWildBossTrialKind(bossTrialKind)
+                && dungeonRow != null && dungeonRow.getSceneId() > 1) {
+            int currentSceneConfigId = player.scene() != null ? player.scene().configId() : 0;
+            if (currentSceneConfigId != dungeonRow.getSceneId()) {
+                log.warn("备战被拒：卷四三境明雷野外首领场景不匹配 player={} battle_id={} battle_config_id={} required_scene={} current_scene={}",
+                        Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),
+                        Integer.toUnsignedString(request.getBattleConfigId()),
+                        Integer.toUnsignedString(dungeonRow.getSceneId()),
+                        Integer.toUnsignedString(currentSceneConfigId));
                 return prepareRejected(FEATURE_UNAVAILABLE, Prepare.INVALID);
             }
         }

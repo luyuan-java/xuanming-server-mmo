@@ -78,8 +78,12 @@ public final class MatchMethods {
     public static final String DISMISS_JIANGHU_GRUDGE = "DismissJianghuGrudge";
     public static final String NOTIFY_JIANGHU_DUEL_INVITE = "NotifyJianghuDuelInvite";
     public static final String NOTIFY_JIANGHU_DUEL_STATUS = "NotifyJianghuDuelStatus";
+    /** 五行试炼志 V3 好友约战帖与受控 PVE 录像播放(570..572)。 */
+    public static final String CREATE_TRIAL_CHALLENGE_CARD = "CreateTrialChallengeCard";
+    public static final String GET_TRIAL_CHALLENGE_CARD = "GetTrialChallengeCard";
+    public static final String GET_SHARED_TRIAL_REPLAY = "GetSharedTrialReplay";
 
-    /** 全部 48 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
+    /** 全部 51 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
     public static final List<String> ALL = List.of(JOIN_QUEUE, CANCEL_QUEUE, GET_QUEUE_STATUS, CHALLENGE_PLAYER, RESPOND_CHALLENGE,
             NOTIFY_CHALLENGE_INVITE, NOTIFY_CHALLENGE_RESULT, WATCH_BATTLE, LIST_WATCHABLE_BATTLES, REQUEST_BATTLE_TICKET,
             GET_NETWORK_PROBE_PLAN, COMMIT_NETWORK_PROBE,
@@ -93,7 +97,8 @@ public final class MatchMethods {
             UPDATE_TOURNAMENT_SQUAD_EMBLEM, START_TOURNAMENT_WARMUP, PREDICT_TOURNAMENT_MATCH, GET_TOURNAMENT_PREDICTION_BOARD,
             BAN_TOURNAMENT_LEYLINE, GET_TOURNAMENT_HIGHLIGHTS,
             CREATE_JIANGHU_DUEL_INVITE, CONFIRM_JIANGHU_DUEL_MEMBER, RESPOND_JIANGHU_DUEL_INVITE,
-            LIST_JIANGHU_GRUDGES, DISMISS_JIANGHU_GRUDGE, NOTIFY_JIANGHU_DUEL_INVITE, NOTIFY_JIANGHU_DUEL_STATUS);
+            LIST_JIANGHU_GRUDGES, DISMISS_JIANGHU_GRUDGE, NOTIFY_JIANGHU_DUEL_INVITE, NOTIFY_JIANGHU_DUEL_STATUS,
+            CREATE_TRIAL_CHALLENGE_CARD, GET_TRIAL_CHALLENGE_CARD, GET_SHARED_TRIAL_REPLAY);
 
     private MatchMethods() {
     }

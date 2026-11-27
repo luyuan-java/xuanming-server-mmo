@@ -60,16 +60,16 @@ class TrialJournalFeatureAndServiceTest {
         alignActiveSeason(f);
         ScenePlayer p = f.enter(11, 2001L);
 
-        // 1. 初始快照：3 卷全部可见，永久分母 27 枚（含 V2 双卫同阵 1051..1053），未通普通首领时困难未解锁
+        // 1. 初始快照：4 卷全部可见，永久分母 36 枚（含 V2 双卫同阵 1051..1053 与 V3 卷四三境明雷 4011..4033），未通普通首领时困难未解锁
         GetTrialJournalResponse initResp = rpc(f, p, SERVICE, "GetTrialJournal",
                 GetTrialJournalRequest.getDefaultInstance(), GetTrialJournalResponse.parser());
         assertThat(initResp.getErrorMessage().getId()).isZero();
         TrialJournalSnapshot initSnap = initResp.getSnapshot();
         assertThat(initSnap.getAvailable()).isTrue();
-        assertThat(initSnap.getTotalPermanentSeals()).isEqualTo(27);
+        assertThat(initSnap.getTotalPermanentSeals()).isEqualTo(36);
         assertThat(initSnap.getTotalPermanentLitSeals()).isZero();
         assertThat(initSnap.getHardBossTrialUnlocked()).isFalse();
-        assertThat(initSnap.getChaptersList()).hasSize(3);
+        assertThat(initSnap.getChaptersList()).hasSize(4);
         assertThat(initSnap.getRedeemableArtifactsList()).hasSize(8);
 
         // 预设高位未识别 bit（字节索引 10 置 0x80），验证点亮新印后高位完好保留
@@ -118,6 +118,7 @@ class TrialJournalFeatureAndServiceTest {
         assertThat(res.getTrialNewlyLitSealIdsList()).containsExactly(1011, 1012, 1013);
         assertThat(res.getTrialNewSoloBest()).isTrue();
         assertThat(res.getTrialNewCoopBest()).isFalse();
+        assertThat(res.getTrialBattleId()).isEqualTo(90001L);
 
         // 3. 好友合战 4 回合：刷新合战最快、不覆写单人最快，并记队友名
         f.fighting(p.playerId(), 90002L);
@@ -146,11 +147,14 @@ class TrialJournalFeatureAndServiceTest {
         assertThat(snap.getTotalPermanentLitSeals()).isEqualTo(3);
         var entry101 = snap.getChapters(0).getEntriesList().stream()
                 .filter(e -> e.getEntryId() == 101).findFirst().orElseThrow();
+        assertThat(entry101.getVowSupported()).isTrue();
         assertThat(entry101.getSoloRecorded()).isTrue();
         assertThat(entry101.getSoloBest().getBestRounds()).isEqualTo(5);
+        assertThat(entry101.getSoloBest().getBattleId()).isEqualTo(90001L);
         assertThat(entry101.getSoloBest().getLoadout().getArtifactEffectIdsList()).containsExactly(1, 5);
         assertThat(entry101.getCoopRecorded()).isTrue();
         assertThat(entry101.getCoopBest().getBestRounds()).isEqualTo(4);
+        assertThat(entry101.getCoopBest().getBattleId()).isEqualTo(90002L);
         assertThat(entry101.getCoopBest().getTeammateNamesList()).containsExactly("明心道友");
 
         // 4. 卷三赛季隔离：正确当前赛季写入 season_records，不污染 lit_seal_bits；跨季迟到结算被拒
@@ -369,5 +373,150 @@ class TrialJournalFeatureAndServiceTest {
         assertThat(appResp.getInfo().getSkillVfxCosmeticsList().stream()
                 .filter(c -> c.getConfigId() == 3).findFirst().orElseThrow().getOwned()).isTrue();
         assertThat(appResp.getInfo().getEquippedSkillVfxMap()).isEmpty();
+    }
+
+    @Test
+    void 卷四三境明雷战法印与里程碑_试炼誓约最高纪录及未知字段往返保留() throws Exception {
+        BattleFixture f = new BattleFixture();
+        alignActiveSeason(f);
+        ScenePlayer p = f.enter(11, 2004L);
+
+        // 1. 未知字段领域往返证明（对应 PlayerStateSchemaLedgerTest.ALLOW_ADDITIONS 的三张试炼格纪录消息）
+        var entryUnknown = com.google.protobuf.UnknownFieldSet.newBuilder()
+                .addField(999, com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(12345L).build()).build();
+        var soloUnknown = com.google.protobuf.UnknownFieldSet.newBuilder()
+                .addField(998, com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(54321L).build()).build();
+        var coopUnknown = com.google.protobuf.UnknownFieldSet.newBuilder()
+                .addField(997, com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(67890L).build()).build();
+        p.trialJournal().replace(PlayerTrialJournalState.newBuilder()
+                .addRecords(com.game.player.store.state.TrialJournalEntryRecordState.newBuilder()
+                        .setEntryId(401).setRuleVersion(1)
+                        .setSoloBest(com.game.player.store.state.TrialJournalSoloRecordState.newBuilder()
+                                .setBestRounds(12).setAchievedAtMs(1L).setBattleId(10L)
+                                .setUnknownFields(soloUnknown))
+                        .setCoopBest(com.game.player.store.state.TrialJournalCoopRecordState.newBuilder()
+                                .setBestRounds(12).setPartySize(2).setAchievedAtMs(1L).setBattleId(11L)
+                                .setUnknownFields(coopUnknown))
+                        .setUnknownFields(entryUnknown))
+                .build());
+
+        // 2. 401 风眼引风（2 条誓约，7 回合）点亮 4011/4012/4013 + 刷新单人最佳与誓约最佳 + 保留未知字段
+        int mask2 = TrialJournalRules.VOW_BAN_CONTROL | TrialJournalRules.VOW_TIGHT_ROUNDS;
+        f.fighting(p.playerId(), 99101L);
+        f.deliver(BattleFixture.settlement(p.playerId(), 99101L, 0L)
+                .setBattleConfigId(113).setMatchMode(4).setTotalRounds(7)
+                .setBossTrialKind(12).setBattleDifficulty(1).setFinishedAtMs(f.clock.epochMillis())
+                .setTrialFacts(BattleTrialJournalFacts.newBuilder()
+                        .setJournalEntryId(401).setTrialRuleVersion(1).setSeasonId(0)
+                        .setInitialHumanCount(1).setBossWindHitUnprotectedDeath(false)
+                        .setChallengeVowMask(mask2))
+                .build());
+        f.drain();
+        f.completeSaves(ProgressResult.SAVED);
+
+        var rec401 = p.trialJournal().toState().getRecordsList().stream()
+                .filter(r -> r.getEntryId() == 401 && r.getRuleVersion() == 1).findFirst().orElseThrow();
+        assertThat(rec401.getUnknownFields()).isEqualTo(entryUnknown);
+        assertThat(rec401.getSoloBest().getUnknownFields()).isEqualTo(soloUnknown);
+        assertThat(rec401.getCoopBest().getUnknownFields()).isEqualTo(coopUnknown);
+        assertThat(rec401.getBestVowMask()).isEqualTo(mask2);
+        assertThat(rec401.getBestVowCount()).isEqualTo(2);
+        assertThat(rec401.getBestVowRounds()).isEqualTo(7);
+        assertThat(rec401.getBestVowBattleId()).isEqualTo(99101L);
+
+        // 校验战果回显字段 47..49
+        GetRecentBattleResultsResponse r1 = rpc(f, p, "SceneBattleResultClientPlayer", "GetRecentBattleResults",
+                GetRecentBattleResultsRequest.getDefaultInstance(), GetRecentBattleResultsResponse.parser());
+        assertThat(r1.getResults(0).getTrialVowMask()).isEqualTo(mask2);
+        assertThat(r1.getResults(0).getTrialNewVowBest()).isTrue();
+        assertThat(r1.getResults(0).getTrialBattleId()).isEqualTo(99101L);
+
+        // 3. 更少誓约条数（1 条，4 回合）刷单人最快但不覆盖誓约最高纪录
+        f.fighting(p.playerId(), 99102L);
+        f.deliver(BattleFixture.settlement(p.playerId(), 99102L, 0L)
+                .setBattleConfigId(113).setMatchMode(4).setTotalRounds(4)
+                .setBossTrialKind(12).setBattleDifficulty(1).setFinishedAtMs(f.clock.epochMillis())
+                .setTrialFacts(BattleTrialJournalFacts.newBuilder()
+                        .setJournalEntryId(401).setTrialRuleVersion(1).setSeasonId(0)
+                        .setInitialHumanCount(1).setChallengeVowMask(TrialJournalRules.VOW_BAN_CONTROL))
+                .build());
+        f.drain();
+        f.completeSaves(ProgressResult.SAVED);
+        assertThat(p.trialJournal().state().getRecords(0).getBestVowCount()).isEqualTo(2);
+        assertThat(p.trialJournal().state().getRecords(0).getBestVowBattleId()).isEqualTo(99101L);
+
+        // 4. 同誓约条数更短回合（2 条，5 回合）刷新誓约纪录；更多条数（3 条，9 回合）再刷新
+        f.fighting(p.playerId(), 99103L);
+        f.deliver(BattleFixture.settlement(p.playerId(), 99103L, 0L)
+                .setBattleConfigId(113).setMatchMode(4).setTotalRounds(5)
+                .setBossTrialKind(12).setBattleDifficulty(1).setFinishedAtMs(f.clock.epochMillis())
+                .setTrialFacts(BattleTrialJournalFacts.newBuilder()
+                        .setJournalEntryId(401).setTrialRuleVersion(1).setSeasonId(0)
+                        .setInitialHumanCount(1).setChallengeVowMask(mask2))
+                .build());
+        f.drain();
+        f.completeSaves(ProgressResult.SAVED);
+        assertThat(p.trialJournal().state().getRecords(0).getBestVowRounds()).isEqualTo(5);
+        assertThat(p.trialJournal().state().getRecords(0).getBestVowBattleId()).isEqualTo(99103L);
+
+        int mask3 = TrialJournalRules.VOW_BAN_CONTROL | TrialJournalRules.VOW_SINGLE_ARTIFACT | TrialJournalRules.VOW_NO_PET;
+        f.fighting(p.playerId(), 99104L);
+        f.deliver(BattleFixture.settlement(p.playerId(), 99104L, 0L)
+                .setBattleConfigId(113).setMatchMode(4).setTotalRounds(9)
+                .setBossTrialKind(12).setBattleDifficulty(1).setFinishedAtMs(f.clock.epochMillis())
+                .setTrialFacts(BattleTrialJournalFacts.newBuilder()
+                        .setJournalEntryId(401).setTrialRuleVersion(1).setSeasonId(0)
+                        .setInitialHumanCount(1).setChallengeVowMask(mask3))
+                .build());
+        f.drain();
+        f.completeSaves(ProgressResult.SAVED);
+
+        // 5. 402 水镜钟鸣 + 403 涨退潮点满卷四 9 印 -> M401(4印) 与 M402(8印) 均可领取
+        f.fighting(p.playerId(), 99105L);
+        f.deliver(BattleFixture.settlement(p.playerId(), 99105L, 0L)
+                .setBattleConfigId(114).setMatchMode(4).setTotalRounds(8)
+                .setBossTrialKind(13).setBattleDifficulty(1).setFinishedAtMs(f.clock.epochMillis())
+                .setTrialFacts(BattleTrialJournalFacts.newBuilder()
+                        .setJournalEntryId(402).setTrialRuleVersion(1).setSeasonId(0)
+                        .setInitialHumanCount(1)
+                        .setDealtYangBellPhysicalDamage(true)
+                        .setDealtYinDrumMagicDamage(true))
+                .build());
+        f.drain();
+        f.completeSaves(ProgressResult.SAVED);
+
+        f.fighting(p.playerId(), 99106L);
+        f.deliver(BattleFixture.settlement(p.playerId(), 99106L, 0L)
+                .setBattleConfigId(115).setMatchMode(4).setTotalRounds(8)
+                .setBossTrialKind(14).setBattleDifficulty(1).setFinishedAtMs(f.clock.epochMillis())
+                .setTrialFacts(BattleTrialJournalFacts.newBuilder()
+                        .setJournalEntryId(403).setTrialRuleVersion(1).setSeasonId(0)
+                        .setInitialHumanCount(1)
+                        .setFinishedInEbbTide(true))
+                .build());
+        f.drain();
+        f.completeSaves(ProgressResult.SAVED);
+
+        GetTrialJournalResponse snapResp = rpc(f, p, SERVICE, "GetTrialJournal",
+                GetTrialJournalRequest.getDefaultInstance(), GetTrialJournalResponse.parser());
+        var ch4 = snapResp.getSnapshot().getChaptersList().stream()
+                .filter(c -> c.getChapterId() == TrialJournalRules.CHAPTER_WILD_REALMS).findFirst().orElseThrow();
+        assertThat(ch4.getLitSealCount()).isEqualTo(9);
+        assertThat(ch4.getTotalSealCount()).isEqualTo(9);
+        var e401 = ch4.getEntriesList().stream().filter(e -> e.getEntryId() == 401).findFirst().orElseThrow();
+        assertThat(e401.getVowSupported()).isTrue();
+        assertThat(e401.getBestVowMask()).isEqualTo(mask3);
+        assertThat(e401.getBestVowCount()).isEqualTo(3);
+        assertThat(e401.getBestVowRounds()).isEqualTo(9);
+        assertThat(e401.getBestVowBattleId()).isEqualTo(99104L);
+
+        ClaimTrialJournalMilestoneResponse m401 = rpc(f, p, SERVICE, "ClaimTrialJournalMilestone",
+                ClaimTrialJournalMilestoneRequest.newBuilder().setClientRequestId(8401L).setMilestoneId(401).build(),
+                ClaimTrialJournalMilestoneResponse.parser());
+        assertThat(m401.getErrorMessage().getId()).isZero();
+        ClaimTrialJournalMilestoneResponse m402 = rpc(f, p, SERVICE, "ClaimTrialJournalMilestone",
+                ClaimTrialJournalMilestoneRequest.newBuilder().setClientRequestId(8402L).setMilestoneId(402).build(),
+                ClaimTrialJournalMilestoneResponse.parser());
+        assertThat(m402.getErrorMessage().getId()).isZero();
     }
 }

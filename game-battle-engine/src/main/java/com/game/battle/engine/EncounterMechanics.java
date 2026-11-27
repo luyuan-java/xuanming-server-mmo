@@ -86,6 +86,9 @@ final class EncounterMechanics {
     private int healInterruptBacklashCount;
     private int stanceBreakCount;
     private boolean guardStanceDispelled;
+    private boolean bossWindHitUnprotectedDeath;
+    private boolean dealtYangBellPhysicalDamage;
+    private boolean dealtYinDrumMagicDamage;
 
     EncounterMechanics(BattleContext ctx) {
         this.ctx = ctx;
@@ -230,12 +233,20 @@ final class EncounterMechanics {
             if (source.teamIndex() == 0 && target.teamIndex() == 1) {
                 long[] tally = roundPlayerDirectDamage.computeIfAbsent(ctx.roundIndex(), k -> new long[2]);
                 tally[0] = EquipmentCombatRules.addSaturated(tally[0], dealtOrAbsorbed);
+                if (bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_WILD_BELL
+                        && BattleConstants.isWildBellYangRound(ctx.roundIndex())) {
+                    dealtYangBellPhysicalDamage = true;
+                }
             }
         } else if (damageType == CombatDamageRules.MAGIC_DAMAGE) {
             teamDealtMagicDirectDamage[source.teamIndex()] = true;
             if (source.teamIndex() == 0 && target.teamIndex() == 1) {
                 long[] tally = roundPlayerDirectDamage.computeIfAbsent(ctx.roundIndex(), k -> new long[2]);
                 tally[1] = EquipmentCombatRules.addSaturated(tally[1], dealtOrAbsorbed);
+                if (bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_WILD_BELL
+                        && !BattleConstants.isWildBellYangRound(ctx.roundIndex())) {
+                    dealtYinDrumMagicDamage = true;
+                }
             }
         }
     }
@@ -717,6 +728,24 @@ final class EncounterMechanics {
         if (isDirectPrimary && activePolarity != POLARITY_NONE && activePolarity == dmgPolarity) {
             result = Long.divideUnsigned(result * BattleConstants.POLARITY_DAMAGE_NUM, BattleConstants.POLARITY_DAMAGE_DEN);
         }
+        // 1.8 卷四·三境明雷野外首领机制（碧渊水宫·阳钟阴鼓 / 月汐湾·涨退潮，纯整数定点数倍率）。
+        if (isDirectPrimary && bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_WILD_BELL
+                && source != null && source.teamIndex() == 0 && target.teamIndex() == 1) {
+            boolean yangBell = BattleConstants.isWildBellYangRound(ctx.roundIndex());
+            if ((yangBell && damageType == CombatDamageRules.PHYSICAL_DAMAGE)
+                    || (!yangBell && damageType == CombatDamageRules.MAGIC_DAMAGE)) {
+                result = Long.divideUnsigned(result * 115L, 100L);
+            } else if (damageType == CombatDamageRules.PHYSICAL_DAMAGE
+                    || damageType == CombatDamageRules.MAGIC_DAMAGE) {
+                result = Long.divideUnsigned(result * 88L, 100L);
+            }
+        }
+        if (bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_WILD_TIDE
+                && source != null && source.teamIndex() == 0 && target.teamIndex() == 1 && target.isBoss()) {
+            result = BattleConstants.isWildTideEbbRound(ctx.roundIndex())
+                    ? Long.divideUnsigned(result * 120L, 100L)
+                    : Long.divideUnsigned(result * 75L, 100L);
+        }
         // 2. 首领试炼 V2 阵型「主目标聚火 100% / 多目标直伤副目标溅射 60%」（仅限试炼敌方，零侵入常规 PVE/PVP，V6）。
         if (isDirectPrimary && isBossTrial() && source != null && source.teamIndex() == 0 && target.teamIndex() == 1
                 && isMultiTargetSkill && !isPrimaryTarget) {
@@ -1037,6 +1066,17 @@ final class EncounterMechanics {
                 entry.setIntentKind(BattleConstants.TELEGRAPH_KIND_BOSS_VENOM_AOE)
                         .setTargetActorId(0L)
                         .setLabel("玄毒冲击：下回合慢速群体法术伤害，防御可减半、控场打断触发破绽");
+            } else if (bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_WILD_WIND) {
+                boolean dualTarget = initialAttackerHumanCount >= 3;
+                List<Long> targets = pickCleaveTargets(boss, dualTarget);
+                entry.setIntentKind(BattleConstants.TELEGRAPH_KIND_WILD_WIND_GUST);
+                if (!targets.isEmpty()) {
+                    entry.setTargetActorId(targets.getFirst());
+                    for (long tid : targets) {
+                        entry.addTargetActorIds(tid);
+                    }
+                }
+                entry.setLabel("风眼引风：下回合慢速风袭锁定目标，防御或护盾化解可免折损并触发首领破绽");
             } else {
                 boolean dualTarget = isBossTrial() && initialAttackerHumanCount >= 3;
                 List<Long> targets = pickCleaveTargets(boss, dualTarget);
@@ -1168,13 +1208,16 @@ final class EncounterMechanics {
                     switch (entry.getIntentKind()) {
                         case BattleConstants.TELEGRAPH_KIND_SLOW_CLEAVE,
                              BattleConstants.TELEGRAPH_KIND_BOSS_MAGIC_STRIKE,
-                             BattleConstants.TELEGRAPH_KIND_BOSS_VENOM_AOE -> {
+                             BattleConstants.TELEGRAPH_KIND_BOSS_VENOM_AOE,
+                             BattleConstants.TELEGRAPH_KIND_WILD_WIND_GUST -> {
                             applyBossExposed(source.actorId(), BattleConstants.BOSS_EXPOSED_FULL_PCT, r + 1);
                             cleaveParryCount++;
                             emitBossMechanicEvent(BattleConstants.BOSS_MECHANIC_CLEAVE_PARRY_EXPOSE,
                                     source.actorId(), source.actorId(), BattleConstants.BOSS_EXPOSED_FULL_PCT);
                             recordResolved(roundResolved, entry, BattleConstants.TELEGRAPH_STATUS_CANCELLED_BY_CONTROL,
-                                    "重击受控取消，首领陷入破绽");
+                                    entry.getIntentKind() == BattleConstants.TELEGRAPH_KIND_WILD_WIND_GUST
+                                            ? "风眼强袭受控取消，首领陷入破绽"
+                                            : "重击受控取消，首领陷入破绽");
                         }
                         case BattleConstants.TELEGRAPH_KIND_GUARD_HEAL -> {
                             BattleUnit boss = findAliveBoss();
@@ -1234,7 +1277,8 @@ final class EncounterMechanics {
                     recordResolved(roundResolved, entry, BattleConstants.TELEGRAPH_STATUS_EXECUTED, "春禧重击已发动");
                 }
                 case BattleConstants.TELEGRAPH_KIND_SLOW_CLEAVE,
-                     BattleConstants.TELEGRAPH_KIND_BOSS_MAGIC_STRIKE -> {
+                     BattleConstants.TELEGRAPH_KIND_BOSS_MAGIC_STRIKE,
+                     BattleConstants.TELEGRAPH_KIND_WILD_WIND_GUST -> {
                     List<Long> targetIds = new ArrayList<>();
                     if (entry.getTargetActorIdsCount() > 0) {
                         targetIds.addAll(entry.getTargetActorIdsList());
@@ -1244,11 +1288,14 @@ final class EncounterMechanics {
                     if (targetIds.isEmpty()) {
                         break;
                     }
-                    boolean magic = entry.getIntentKind() == BattleConstants.TELEGRAPH_KIND_BOSS_MAGIC_STRIKE;
+                    boolean windGust = entry.getIntentKind() == BattleConstants.TELEGRAPH_KIND_WILD_WIND_GUST;
+                    boolean magic = entry.getIntentKind() == BattleConstants.TELEGRAPH_KIND_BOSS_MAGIC_STRIKE || windGust;
                     int dmgType = magic ? CombatDamageRules.MAGIC_DAMAGE : CombatDamageRules.PHYSICAL_DAMAGE;
-                    double scale = magic
+                    double scale = windGust
+                            ? 1.75
+                            : (magic
                             ? (Integer.compareUnsigned(battleDifficulty, 2) >= 0 ? 2.0 : 1.7)
-                            : (Integer.compareUnsigned(battleDifficulty, 2) >= 0 ? 2.1 : 1.8);
+                            : (Integer.compareUnsigned(battleDifficulty, 2) >= 0 ? 2.1 : 1.8));
                     if (isBossTrial()) {
                         if (bossMomentumStacks > 0) {
                             scale *= (1.0 + (bossMomentumStacks * BattleConstants.BOSS_MOMENTUM_PER_STACK_PCT) / 100.0);
@@ -1303,6 +1350,8 @@ final class EncounterMechanics {
                             if (ownerId != 0L && isBossTrial()) {
                                 selfCleavesParriedByPlayer.merge(ownerId, 1, Integer::sum);
                             }
+                        } else if (windGust && target.health() == 0L) {
+                            bossWindHitUnprotectedDeath = true;
                         }
                     }
                     if (isBossTrial()) {
@@ -1586,10 +1635,14 @@ final class EncounterMechanics {
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             state.addAllTelegraphs(activeTelegraphs);
         }
+        if (ctx.trialVowMask() != 0) {
+            state.setTrialVowMask(ctx.trialVowMask());
+        }
     }
 
-    /** 五行试炼志 V2：冻结权威战法事实与轻量阵容快照（不查配置表、不掷随机，对齐 C++ BuildSettlement）。 */
+    /** 五行试炼志 V2/V3：冻结权威战法事实与轻量阵容快照（不查配置表、不掷随机，对齐 C++ BuildSettlement）。 */
     void populateTrialFacts(CreateBattleRequest request, BattleUnit actor, long playerId,
+                            eBattleOutcome outcome, boolean usesFreePreset,
                             BattleSettlementData.Builder settlement) {
         if (!request.hasTrialContext() || request.getTrialContext().getJournalEntryId() == 0) {
             return;
@@ -1610,7 +1663,16 @@ final class EncounterMechanics {
             }
             humanCount++;
             if (snapshot.getPlayerId() == playerId) {
-                if (snapshot.getPetsCount() > 0) {
+                int livePetTableId = 0;
+                for (BattleUnit candidate : ctx.units()) {
+                    if (candidate.isPet() && candidate.ownerPlayerId() == playerId) {
+                        livePetTableId = candidate.state().getPetTableId();
+                        break;
+                    }
+                }
+                if (livePetTableId != 0 && !usesFreePreset) {
+                    facts.setUsedPetTableId(livePetTableId);
+                } else if (!ctx.hasTrialVow(TrialJournalRules.VOW_NO_PET) && snapshot.getPetsCount() > 0) {
                     var pet = snapshot.getPets(0);
                     facts.setUsedPetTableId(pet.getCombatPetTableId() != 0
                             ? pet.getCombatPetTableId() : pet.getPetTableId());
@@ -1661,7 +1723,14 @@ final class EncounterMechanics {
                 .setHealInterruptBacklashCount(healInterruptBacklashCount)
                 .setStanceBreakCount(stanceBreakCount)
                 .setSelfParriedCleaveAtLeastOnce(selfParried > 0)
-                .setAllSelfCleavesParried(selfTargeted > 0 && selfParried == selfTargeted);
+                .setAllSelfCleavesParried(selfTargeted > 0 && selfParried == selfTargeted)
+                .setBossWindHitUnprotectedDeath(bossWindHitUnprotectedDeath)
+                .setDealtYangBellPhysicalDamage(dealtYangBellPhysicalDamage)
+                .setDealtYinDrumMagicDamage(dealtYinDrumMagicDamage)
+                .setFinishedInEbbTide(bossTrialKind == BattleConstants.BOSS_TRIAL_KIND_WILD_TIDE
+                        && outcome == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN
+                        && BattleConstants.isWildTideEbbRound(ctx.roundIndex()))
+                .setChallengeVowMask(ctx.trialVowMask());
 
         List<Integer> rawEffects = new ArrayList<>();
         for (EquipmentArtifactSource artifact : actor.state().getEquipmentEffects().getArtifactsList()) {

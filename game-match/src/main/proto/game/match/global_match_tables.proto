@@ -251,6 +251,8 @@ message GlobalFormationRow {
   bytes tournament_context = 20;
   // 帮战守旗阵踢馆（GUILD_WAR_SIEGE）的 AI 守卫快照原件（强制 team_index=1, ai_controlled=true）。
   repeated bytes ai_defender_snapshots = 21;
+  // 五行试炼志 V3：开局冻结的自选限制誓约位掩码（bit0 禁控 bit1 单宝 bit2 无宠 bit3 紧缩回合）。
+  uint32 trial_vow_mask = 22;
 }
 message GlobalPreparedEndpoint {
   uint64 player_id = 1;

@@ -22,6 +22,8 @@ import com.game.match.rating.MatchRatingTables;
 import com.game.match.rating.RatingConfiguration;
 import com.game.match.report.BattleReportHandlers;
 import com.game.match.report.BattleReportStore;
+import com.game.match.report.TrialChallengeCardHandlers;
+import com.game.match.report.TrialChallengeCardStore;
 import com.game.match.script.BattleScriptCatalog;
 import com.game.match.script.BattleScriptResolver;
 import com.game.match.script.BattleScriptService;
@@ -102,6 +104,28 @@ public class MatchFeatureConfiguration {
     @Bean
     public MatchMethodHandler getBattleReportHandler(BattleReportStore store) {
         return BattleReportHandlers.getHandler(store);
+    }
+
+    // ---- 五行试炼志 V3 好友约战帖与受控 PVE 录像播放（570–572） ----
+
+    @Bean
+    public TrialChallengeCardStore trialChallengeCardStore(DataSource dataSource, FeatureSchemaReady schemaReady) {
+        return new TrialChallengeCardStore(dataSource, System::currentTimeMillis);
+    }
+
+    @Bean
+    public MatchMethodHandler createTrialChallengeCardHandler(TrialChallengeCardStore store, MatchIds matchIds) {
+        return TrialChallengeCardHandlers.createHandler(store, () -> matchIds.nextBattleId().orElse(0L));
+    }
+
+    @Bean
+    public MatchMethodHandler getTrialChallengeCardHandler(TrialChallengeCardStore store) {
+        return TrialChallengeCardHandlers.getHandler(store);
+    }
+
+    @Bean
+    public MatchMethodHandler getSharedTrialReplayHandler(TrialChallengeCardStore store) {
+        return TrialChallengeCardHandlers.sharedReplayHandler(store);
     }
 
     // ---- 战斗剧本与运营审核（387–392） ----

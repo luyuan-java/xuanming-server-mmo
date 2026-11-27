@@ -220,12 +220,28 @@ class EnhancePityAndMaterialLedgerTest {
         long prevWeekMs = monWeek1 - 7L * 86_400_000L;
         assertThat(EquipmentCraftService.creditBattleMaterialRewardDelta(
                 player, hardPveWin.toBuilder().setBattleId(22L).build(), prevWeekMs).totalUnitsAdded()).isZero();
-        // 跨入下一周（+7 天）：重新开放 150 绑定额度
+        // 跨入下一周（+7 天）：上周已满 150 无余量，本周新池仍为 150
         long nextWeekMs = monWeek1 + 7L * 86_400_000L;
         var nextWeekDelta = EquipmentCraftService.creditBattleMaterialRewardDelta(
                 player, hardPveWin.toBuilder().setBattleId(23L).build(), nextWeekMs);
         assertThat(nextWeekDelta.totalUnitsAdded()).isEqualTo(15);
         assertThat(nextWeekDelta.tradableUnitsAdded()).isZero();
+        assertThat(player.clientRequestLedger().materialReward().getStage2PoolCap()).isEqualTo(150);
+
+        // 跳过 2 周（+14 天）：上周剩 135 + 2*150 = 435，滚存蓄水；再跳过 10 周封顶 4 周 = 600
+        long week4Ms = nextWeekMs + 14L * 86_400_000L;
+        assertThat(f.craft.getMaterialReward(player, week4Ms).getSnapshot().getWeeklyLimit()).isEqualTo(435);
+        var week4Delta = EquipmentCraftService.creditBattleMaterialRewardDelta(
+                player, hardPveWin.toBuilder().setBattleId(24L).build(), week4Ms);
+        assertThat(week4Delta.totalUnitsAdded()).isEqualTo(15);
+        assertThat(player.clientRequestLedger().materialReward().getStage2PoolCap()).isEqualTo(435);
+
+        long week14Ms = week4Ms + 70L * 86_400_000L;
+        assertThat(f.craft.getMaterialReward(player, week14Ms).getSnapshot().getWeeklyLimit()).isEqualTo(600);
+        var week14Delta = EquipmentCraftService.creditBattleMaterialRewardDelta(
+                player, hardPveWin.toBuilder().setBattleId(25L).build(), week14Ms);
+        assertThat(week14Delta.totalUnitsAdded()).isEqualTo(15);
+        assertThat(player.clientRequestLedger().materialReward().getStage2PoolCap()).isEqualTo(600);
     }
 
     @Test

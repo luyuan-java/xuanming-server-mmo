@@ -271,18 +271,21 @@ class MessageRoutesTest {
                 "UpdateTournamentSquadEmblem", "StartTournamentWarmup", "PredictTournamentMatch",
                 "GetTournamentPredictionBoard", "BanTournamentLeyline", "GetTournamentHighlights",
                 "CreateJianghuDuelInvite", "ConfirmJianghuDuelMember", "RespondJianghuDuelInvite",
-                "ListJianghuGrudges", "DismissJianghuGrudge");
+                "ListJianghuGrudges", "DismissJianghuGrudge",
+                // 五行试炼志 V3 好友约战帖与受控 PVE 回放 570–572
+                "CreateTrialChallengeCard", "GetTrialChallengeCard", "GetSharedTrialReplay");
         List<MessageMethod> match = registry.all().stream().filter(m -> m.serviceName().equals("MatchService")).toList();
         assertThat(match).as("契约里 MatchService 的方法").extracting(MessageMethod::methodName)
                 .containsExactlyInAnyOrderElementsOf(Stream.concat(noReply.stream(), replied.stream()).toList());
-        // 既有 35 个号逐个钉住（506 已停用）+ V3/V4 与江湖生死状新增 13 个号从契约表读取（正式同步 message_id.txt 后自动对齐）。
+        // 既有 35 个号逐个钉住（506 已停用）+ V3/V4、江湖生死状与试炼志 V3 约战帖新增 16 个号从契约表读取。
         List<Integer> expectedMatchIds = Stream.concat(
                 Stream.of(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392,
                         448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 507, 508),
                 Stream.of("UpdateTournamentSquadEmblem", "StartTournamentWarmup", "PredictTournamentMatch",
                         "GetTournamentPredictionBoard", "BanTournamentLeyline", "GetTournamentHighlights",
                         "CreateJianghuDuelInvite", "ConfirmJianghuDuelMember", "RespondJianghuDuelInvite",
-                        "ListJianghuGrudges", "DismissJianghuGrudge", "NotifyJianghuDuelInvite", "NotifyJianghuDuelStatus")
+                        "ListJianghuGrudges", "DismissJianghuGrudge", "NotifyJianghuDuelInvite", "NotifyJianghuDuelStatus",
+                        "CreateTrialChallengeCard", "GetTrialChallengeCard", "GetSharedTrialReplay")
                         .map(name -> registry.requireId("MatchService", name)))
                 .sorted()
                 .toList();

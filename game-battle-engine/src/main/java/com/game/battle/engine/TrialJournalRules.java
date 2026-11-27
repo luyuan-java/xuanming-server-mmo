@@ -26,6 +26,34 @@ public final class TrialJournalRules {
     public static final int CHAPTER_BREAKTHROUGH = 1;
     public static final int CHAPTER_THREE_REALMS = 2;
     public static final int CHAPTER_SEASONAL = 3;
+    public static final int CHAPTER_WILD_REALMS = 4;
+
+    /** 五行试炼志 V3 自选试炼誓约位图（bit 0..3，仅常驻 PVE 首领试炼可勾选，零额外材料产出）。 */
+    public static final int VOW_NONE = 0;
+    public static final int VOW_BAN_CONTROL = 1;
+    public static final int VOW_SINGLE_ARTIFACT = 1 << 1;
+    public static final int VOW_NO_PET = 1 << 2;
+    public static final int VOW_TIGHT_ROUNDS = 1 << 3;
+    public static final int VOW_MASK_ALL = VOW_BAN_CONTROL | VOW_SINGLE_ARTIFACT | VOW_NO_PET | VOW_TIGHT_ROUNDS;
+
+    public static boolean isValidVowMask(int mask) {
+        return (mask & ~VOW_MASK_ALL) == 0;
+    }
+
+    public static int countVows(int mask) {
+        return Integer.bitCount(mask & VOW_MASK_ALL);
+    }
+
+    public static int tightenRoundLimit(int baseRounds) {
+        if (baseRounds == 0) {
+            return 0;
+        }
+        if (Integer.compareUnsigned(baseRounds, 6) <= 0) {
+            return baseRounds;
+        }
+        long scaled = Long.divideUnsigned(Integer.toUnsignedLong(baseRounds) * 7L + 9L, 10L);
+        return (int) Math.max(6L, scaled);
+    }
 
     /** 准入模式（TrialJournalEntry.unlock_mode）。 */
     public static final int UNLOCK_MODE_OPEN = 0;
