@@ -3159,3 +3159,34 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 - **Java 待做**:随上两条一起核对:Java 的 location(或等价的落点记录)认会话时是否只看会话号;托管落点是否带网关实例。有同类窗口就按上面的口径修;已有等价机制就把本条改成已对齐。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-26 防沉迷会话账本:截止时刻一到清扫就删登记,续租兜底踢线失效(主仓已修未编译,Java 待做)
+
+主仓 main 工作区;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。不改客户端协议。主仓设计稿 `docs/design/real-name-anti-addiction.md` §5.4、§5.5。
+
+- **主仓问题**:未成年人的租约封顶在截止时刻(21:00),上报器每秒清扫,截止一到就把账本里这条会话整条删掉。之后 gate 代发的续租查不到它,`Renew` 回 -1,login 的兜底踢线不触发。gate 本地到点没断开的未成年人会一直在线。
+- **主仓做法**(`go/login/internal/logic/pkg/nppa/ledger.go` 的两段 Lua):
+  1. `lease_end` 只在截止时刻还没到时封顶(`cap_ms > now_ms and cap_ms < e`),截止之后的续租不再当场到期;
+  2. 清扫遇到「租约正好在截止时刻到期」的条目(`lease_ended == cap`):要上报的照样补一条下线,但登记不删,改写成 `"||截止毫秒"`(不再上报),租约续到 `now + lease`。连接还在时下一次续租仍回截止时刻、照常兜底踢线;断开时 End 删掉它、不再报第二条下线;一直没有续租的,过一个租约在普通分支里删掉,不计入收尾数。
+  3. 回归用例:`TestLedgerKeepsTheDeadlineAfterItPassesForTheLoginBackstop`、`TestLedgerDropsAKeptDeadlineOneLeaseLater`,以及登录侧 `TestRenewSessionKicksAMinorTheGateFailedToClose`(续租前先跑一次清扫)。
+- **Java 待做**:`game-login/src/main/java/com/game/login/compliance/NppaLedger.java` 的脚本是照主仓移植的,`lease_end` 与清扫是同一写法,`AntiAddictionGate.renew` 也靠 `ledger.renew` 的返回值,同样的缺陷。按上面两点改脚本,并补「截止后先清扫再续租仍能拿到截止时刻」的用例。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+
+### 2026-11-26 官方通行证(auth_type=passport,Casdoor OIDC):只收身份令牌、注销时删通行证用户(主仓已落码未编译,Java 待做)
+
+主仓设计 `docs/design/official-passport-registration.md`(§3.5、§4 第 11～13 项、§5.4),验证命令见主仓 `docs/PROGRESS.md` 2026-11-26「官方通行证审核」。Java 版目前没有 `passport` 渠道,整条都待做。
+
+**客户端契约(两版同批)**:`POST /api/login` 与 `POST /api/account/delete` 的 `auth_type` 新增 `passport`,`auth_token` 是客户端经 OAuth2 授权码 + PKCE 向官方通行证换到的 `id_token`(JWT)原文;账号串 `passport_<sub>`。回包、错误码与 `apple` / `google` 相同。
+
+**Java 待做**:
+
+1. 渠道校验同 `apple` / `google` 的身份令牌(RS256 + JWKS 缓存、`iss` / `aud` / `exp` / `iat` / `nbf` / `sub`、一次性消费)。公钥地址 `<Endpoint 或 Issuer>/.well-known/jwks`;`iss` 必须等于配置的 `Issuer`(生产只收 https、不带末尾斜杠)。
+2. 通行证特有的三条:
+   - `tokenType` 必须是 `id-token`。Casdoor 同一次换票给的访问令牌、刷新令牌与身份令牌同一把钥匙签,`iss` / `aud` / `sub` 相同,只有这一项不同。别的类型按凭证无效拒绝,不算渠道故障,并排在有效期检查之前。
+   - `exp - iat` 超过 2 小时按渠道配置故障拒绝(Casdoor 缺省 168 小时)。
+   - `passport_` + `sub` 不含空白且不超过 191 字节。
+3. 账号注销:冷静期满执行时,角色全部删完之后、删账号行之前,用机密应用凭据(HTTP Basic)调 Casdoor:`GET /api/get-user?userId=<sub>` → `POST /api/delete-user {owner,name}` → 再查一次,查不到才算删掉。`data` 为 `null` 按已删;回 `Unaffected`、删完还查得到、`status=error`、应答里的 id 对不上都重试,不当成删完。
+4. 启动门禁:生产模式配了通行证却没配管理凭据(`AdminClientId` + 存密钥的环境变量名,且 `AdminClientId` 不能等于客户端的 `ClientId`)拒绝启动。
+
+本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。

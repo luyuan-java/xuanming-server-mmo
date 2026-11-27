@@ -33,6 +33,10 @@ public final class GameDay {
     public static final int PERIOD_DAILY = 1;
     /** 限购周期：每游戏周。 */
     public static final int PERIOD_WEEKLY = 2;
+    /** 限购周期：永久/终身限购（不随日周重置，用固定哨兵键 {@link #LIFETIME_PERIOD_KEY} 落库，避开日键 ≥19700101 与周键 ≥100000 清理范围）。 */
+    public static final int PERIOD_LIFETIME = 3;
+    /** 终身限购的固定周期键（与 0=不限、6位周键、8位日键完全不相交，永不被清理任务删除）。 */
+    public static final int LIFETIME_PERIOD_KEY = 1;
 
     private GameDay() {
     }
@@ -95,6 +99,7 @@ public final class GameDay {
             case PERIOD_NONE -> OptionalInt.of(0);
             case PERIOD_DAILY -> OptionalInt.of(dayKey(t));
             case PERIOD_WEEKLY -> OptionalInt.of(weekKey(t));
+            case PERIOD_LIFETIME -> OptionalInt.of(LIFETIME_PERIOD_KEY);
             default -> OptionalInt.empty();
         };
     }

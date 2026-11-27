@@ -136,9 +136,9 @@ public final class JdbcEconomyStore implements EconomyStore {
     /** C2：本人某游戏日的捐献用量。 */
     static final String SELECT_DONATE_USAGE = "SELECT ref_id, used_count FROM guild_daily_counter"
             + " WHERE player_id = ? AND counter_kind = ? AND period_key = ?";
-    /** C3：本人日键与周键的商店用量（两个数值域不相交，一条 IN）。 */
+    /** C3：本人日键、周键与终身键的商店用量（三个数值域不相交，一条 IN）。 */
     static final String SELECT_SHOP_USAGE = "SELECT ref_id, period_key, used_count FROM guild_daily_counter"
-            + " WHERE player_id = ? AND counter_kind = ? AND period_key IN (?, ?)";
+            + " WHERE player_id = ? AND counter_kind = ? AND period_key IN (?, ?, ?)";
 
     // ---------------------------------------------------------------- R：guild_client_request（客户端幂等键的去重记录）
     /**
@@ -384,7 +384,8 @@ public final class JdbcEconomyStore implements EconomyStore {
             Map<ShopUsageKey, Integer> out = new HashMap<>();
             db.forEach(SELECT_SHOP_USAGE,
                     rs -> new int[] {GuildJdbc.u32(rs, 1), GuildJdbc.u32(rs, 2), GuildJdbc.u32(rs, 3)},
-                    r -> out.put(new ShopUsageKey(r[0], r[1]), r[2]), playerId, COUNTER_SHOP, dayKey, weekKey);
+                    r -> out.put(new ShopUsageKey(r[0], r[1]), r[2]), playerId, COUNTER_SHOP, dayKey, weekKey,
+                    com.game.common.time.GameDay.LIFETIME_PERIOD_KEY);
             return out;
         });
     }

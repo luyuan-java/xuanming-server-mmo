@@ -98,7 +98,8 @@ class GameDayTest {
         assertThat(GameDay.periodKey(GameDay.PERIOD_NONE, now)).as("不限：键为 0，不占计数行").isEqualTo(OptionalInt.of(0));
         assertThat(GameDay.periodKey(GameDay.PERIOD_DAILY, now)).isEqualTo(OptionalInt.of(20260916));
         assertThat(GameDay.periodKey(GameDay.PERIOD_WEEKLY, now)).isEqualTo(OptionalInt.of(202638));
-        assertThat(GameDay.periodKey(3, now)).as("未知周期拒绝").isEmpty();
+        assertThat(GameDay.periodKey(GameDay.PERIOD_LIFETIME, now)).as("终身限购使用固定周期键 1").isEqualTo(OptionalInt.of(GameDay.LIFETIME_PERIOD_KEY));
+        assertThat(GameDay.periodKey(4, now)).as("未知周期拒绝").isEmpty();
         assertThat(GameDay.periodKey(-1, now)).as("uint32 大值按未知拒绝").isEmpty();
     }
 

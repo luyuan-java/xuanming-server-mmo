@@ -203,9 +203,11 @@ public final class EconomyTables {
                 throw fail("GuildShop[%d].required_guild_level=%d 越界,应在 [1,%d](GuildLevel 最高级)", id, required, maxLevel);
             }
             int period = row.getLimitPeriod();
-            if (period != GameDay.PERIOD_NONE && period != GameDay.PERIOD_DAILY && period != GameDay.PERIOD_WEEKLY) {
-                throw fail("GuildShop[%d].limit_period=%d 非法,只允许 %d(不限)/ %d(每日)/ %d(每周)", id,
-                        Integer.toUnsignedLong(period), GameDay.PERIOD_NONE, GameDay.PERIOD_DAILY, GameDay.PERIOD_WEEKLY);
+            if (period != GameDay.PERIOD_NONE && period != GameDay.PERIOD_DAILY
+                    && period != GameDay.PERIOD_WEEKLY && period != GameDay.PERIOD_LIFETIME) {
+                throw fail("GuildShop[%d].limit_period=%d 非法,只允许 %d(不限)/ %d(每日)/ %d(每周)/ %d(终身)", id,
+                        Integer.toUnsignedLong(period), GameDay.PERIOD_NONE, GameDay.PERIOD_DAILY,
+                        GameDay.PERIOD_WEEKLY, GameDay.PERIOD_LIFETIME);
             }
             // 不限购就不占计数行（period_key = 0）；限购却填 0 份等于永远买不了。两者必须同时成立或同时不成立
             if ((period == GameDay.PERIOD_NONE) != (row.getLimitCount() == 0)) {
