@@ -26,6 +26,10 @@ public final class OpsException extends RuntimeException {
     public static final String ZONE_OPEN = "zone_open";
     public static final String ZONE_NOT_FOUND = "zone_not_found";
     public static final String PLAN_TOO_LARGE = "plan_too_large";
+    // 批次 7.2c（批量回收执行与孤儿角色清理，L958）
+    public static final String EMPTY_RECALL_PLAN = "empty_recall_plan";
+    public static final String PLAN_DIGEST_MISMATCH = "plan_digest_mismatch";
+    public static final String PLAYER_NOT_ORPHAN = "player_not_orphan";
 
     private final HttpStatus status;
     private final String code;

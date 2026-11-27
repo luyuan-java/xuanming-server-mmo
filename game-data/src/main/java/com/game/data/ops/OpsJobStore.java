@@ -255,6 +255,14 @@ public final class OpsJobStore {
         });
     }
 
+    /** 写入一条已回收的源流水（主键 tx_id 防止重复回收）。 */
+    public void insertRecallSource(RecallSourceRow row) {
+        withConnection("recall_source 插入", c -> {
+            db.insert(c, row);
+            return null;
+        });
+    }
+
     /** 这些源流水里已经被回收过的（{@code recall_source} 主键命中）。 */
     public Set<Long> recalledAmong(Collection<Long> txIds) {
         Set<Long> out = new HashSet<>();

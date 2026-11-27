@@ -107,7 +107,17 @@ class PlayerBundleSqlTest {
         final List<String> deleted = new ArrayList<>();
 
         FakeRedis(String runId) {
+            this(runId, !"prod-run".equals(runId));
+        }
+
+        FakeRedis(String runId, boolean withLocalMarker) {
             this.runId = runId;
+            if (withLocalMarker) {
+                data.put(InstanceIdentity.LOCAL_TARGET_MARKER_KEY, new RawEntry(
+                        InstanceIdentity.LOCAL_TARGET_MARKER_KEY, "string", -1,
+                        InstanceIdentity.LOCAL_TARGET_MARKER_VALUE.getBytes(StandardCharsets.UTF_8),
+                        null, null, null));
+            }
         }
 
         @Override

@@ -45,6 +45,12 @@ final class ViewIndex {
     static final int WEIGHT_SPATIAL_NORMAL = 10;
     /** 空间队友优先权重。 */
     static final int WEIGHT_TEAMMATE = 50;
+    /** 战斗交手显式关注权重（除钉住外最高，L625）。 */
+    static final int WEIGHT_COMBAT = 100;
+    /** 钉住最高权重（L625）。 */
+    static final int WEIGHT_PINNED = 1000;
+    /** 战斗交手显式关注来源 kind。 */
+    static final int KIND_COMBAT = 100;
 
     /** 显式关注来源身份键：{@code kind + instanceId} 唯一确定一份显式来源。 */
     record ExplicitKey(int kind, long instanceId) {
@@ -72,6 +78,7 @@ final class ViewIndex {
     }
 
     private final int capacity;
+    private int effectiveCapacity;
     private final GridIndex<Interest> grid = new GridIndex<>(CELL_SIZE);
     private final Map<ScenePlayer, Interest> interests = new HashMap<>();
     private final List<Interest> pendingRefresh = new ArrayList<>();
@@ -86,6 +93,68 @@ final class ViewIndex {
             throw new IllegalArgumentException("兴趣列表容量必须为正数: " + capacity);
         }
         this.capacity = capacity;
+        this.effectiveCapacity = capacity;
+    }
+
+    int capacity() {
+        return capacity;
+    }
+
+    int effectiveCapacity() {
+        return effectiveCapacity;
+    }
+
+    /**
+     * 服务器压力动态调节有效视野容量（L625）：
+     * 收缩时按有效权重从低到高、同权重先远后近裁表；回升时先补暂隐显式关注再补附近空间候选。
+     */
+    void setEffectiveCapacity(int nextCapacity, ViewChanges out) {
+        int clamped = Math.max(1, Math.min(capacity, nextCapacity));
+        if (clamped == effectiveCapacity) {
+            return;
+        }
+        boolean shrunk = clamped < effectiveCapacity;
+        effectiveCapacity = clamped;
+        if (shrunk) {
+            for (Interest obs : interests.values()) {
+                while (obs.watching.size() > effectiveCapacity) {
+                    ScenePlayer victim = pickTrimVictim(obs);
+                    if (victim == null) {
+                        break;
+                    }
+                    obs.watching.remove(victim);
+                    Interest tgt = interests.get(victim);
+                    if (tgt != null) {
+                        tgt.watchedBy.remove(obs.player);
+                    }
+                    if (out != null) {
+                        out.removed(obs.player, victim);
+                    }
+                }
+            }
+        } else {
+            for (Interest obs : interests.values()) {
+                backfillSuppressedExplicit(obs, out);
+                backfillNearbySpatial(obs, out);
+            }
+        }
+    }
+
+    private static ScenePlayer pickTrimVictim(Interest obs) {
+        Vec3 origin = obs.player.position();
+        ScenePlayer victim = null;
+        int victimWeight = Integer.MAX_VALUE;
+        double victimDistSq = -1.0;
+        for (ScenePlayer target : obs.watching) {
+            int w = effectiveWeight(obs, target);
+            double distSq = target.position().distanceSquared(origin);
+            if (victim == null || w < victimWeight || (w == victimWeight && distSq > victimDistSq)) {
+                victim = target;
+                victimWeight = w;
+                victimDistSq = distSq;
+            }
+        }
+        return victim;
     }
 
     Entered enter(ScenePlayer entrant) {
@@ -173,6 +242,7 @@ final class ViewIndex {
                 Interest watcherState = interests.get(watcher);
                 if (watcherState != null) {
                     backfillSuppressedExplicit(watcherState, backfillOut);
+                    backfillNearbySpatial(watcherState, backfillOut);
                 }
             }
         }
@@ -232,6 +302,7 @@ final class ViewIndex {
                 out.removed(observer, target);
             }
             backfillSuppressedExplicit(obs, out);
+            backfillNearbySpatial(obs, out);
         }
         return true;
     }
@@ -260,6 +331,7 @@ final class ViewIndex {
                         out.removed(watcher, target);
                     }
                     backfillSuppressedExplicit(obs, out);
+                    backfillNearbySpatial(obs, out);
                 }
             }
             return;
@@ -359,6 +431,7 @@ final class ViewIndex {
         }
         if (mineFreed) {
             backfillSuppressedExplicit(mine, out);
+            backfillNearbySpatial(mine, out);
         }
         for (Iterator<ScenePlayer> it = mine.watchedBy.iterator(); it.hasNext(); ) {
             ScenePlayer watcher = it.next();
@@ -371,6 +444,7 @@ final class ViewIndex {
                         obs.watching.remove(mover);
                         out.removed(watcher, mover);
                         backfillSuppressedExplicit(obs, out);
+                        backfillNearbySpatial(obs, out);
                     }
                 } else {
                     it.remove();
@@ -540,12 +614,55 @@ final class ViewIndex {
         }
     }
 
+    /** 名额空出后补回附近 3×3 网格内被拒/被挤掉的空间候选，无需等实体再次移动（L625）。 */
+    private void backfillNearbySpatial(Interest watcher, ViewChanges out) {
+        if (isFull(watcher)) {
+            return;
+        }
+        Vec3 at = watcher.player.position();
+        List<Interest> nearby = new ArrayList<>();
+        grid.collectAround(watcher, nearby);
+        List<Interest> eligible = new ArrayList<>();
+        for (int i = 0; i < nearby.size(); i++) {
+            Interest theirs = nearby.get(i);
+            if (theirs == watcher || theirs.stealthed || watcher.watching.contains(theirs.player)) {
+                continue;
+            }
+            if (!theirs.player.position().within(at, VIEW_RADIUS)) {
+                continue;
+            }
+            watcher.spatialTargets.add(theirs.player);
+            eligible.add(theirs);
+        }
+        if (eligible.isEmpty()) {
+            return;
+        }
+        eligible.sort((a, b) -> {
+            int cmp = Integer.compare(effectiveWeight(watcher, b.player), effectiveWeight(watcher, a.player));
+            if (cmp != 0) {
+                return cmp;
+            }
+            return Double.compare(a.player.position().distanceSquared(at), b.player.position().distanceSquared(at));
+        });
+        for (Interest tgt : eligible) {
+            if (isFull(watcher)) {
+                break;
+            }
+            if (watcher.watching.add(tgt.player)) {
+                tgt.watchedBy.add(watcher.player);
+                if (out != null) {
+                    out.added(watcher.player, tgt.player);
+                }
+            }
+        }
+    }
+
     private static boolean teammates(ScenePlayer first, ScenePlayer second) {
         return first.teamId() != 0 && first.teamId() == second.teamId();
     }
 
     private boolean isFull(Interest interest) {
-        return interest.watching.size() >= capacity;
+        return interest.watching.size() >= effectiveCapacity;
     }
 
     /** 一个玩家在本场景的兴趣状态。两张可见表互为镜像：A ∈ watching(B) ⇔ B ∈ watchedBy(A)。 */

@@ -1,6 +1,7 @@
 package com.game.scenemanager.world;
 
 import com.game.api.proto.WorldChannel;
+import com.game.discovery.LiveViewSanityGate;
 import com.game.discovery.world.WorldChannelStore;
 import com.game.discovery.world.WorldLeaderLock;
 import com.game.discovery.world.WorldPlanSnapshot;
@@ -91,6 +92,7 @@ public final class WorldChannelCoordinator {
     private static final class ZoneState {
         final WorldLeaderLock lock;
         final AbsenceTracker absence = new AbsenceTracker();
+        final LiveViewSanityGate sanityGate = LiveViewSanityGate.forSceneManagerSync();
         /** 本任期是否已初始化（竞选成功后第一拍置真；看到锁已不持有即置假）。 */
         boolean inTerm;
         boolean autoscaleRan;
@@ -107,6 +109,7 @@ public final class WorldChannelCoordinator {
         void newTerm() {
             inTerm = true;
             absence.clear();
+            sanityGate.reset();
             autoscaleRan = false;
             lastRebalanceLive = null;
             lastAnomalies = List.of();
@@ -242,6 +245,13 @@ public final class WorldChannelCoordinator {
         Set<Integer> referenced = new HashSet<>();
         for (WorldChannel channel : snapshot.channels().values()) {
             referenced.add(channel.getNodeId());
+        }
+        LiveViewSanityGate.Decision gateDecision = state.sanityGate.evaluate(referenced, view.nodes().keySet(), now);
+        if (gateDecision.held()) {
+            log.warn("live_view_sanity_gate_held zone={} reason={} baseline={} live={} missing={}",
+                    Integer.toUnsignedString(zoneId), gateDecision.reason(),
+                    gateDecision.baselineSize(), gateDecision.liveSize(), gateDecision.missingCount());
+            return view.nodes().isEmpty() ? TickResult.NO_NODES : TickResult.OK;
         }
         Map<Integer, Long> absent = state.absence.update(referenced, view.nodes().keySet(), now);
         List<DirectoryView.Node> healthyNodes = new ArrayList<>();

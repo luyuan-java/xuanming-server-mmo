@@ -71,4 +71,23 @@ class LocalTargetsTest {
         assertThat(InstanceIdentity.redis(Map.of("redis_version", "7.4"))).isNull();
         assertThat(InstanceIdentity.redis(null)).isNull();
     }
+
+    @Test
+    void Redis目标身份闸_runId不同无标记拒绝_有标记放行_runId相同即使带标记与豁免仍硬拒() {
+        var noMarker = new PlayerBundleSqlTest.FakeRedis("local-run", false);
+        var withMarker = new PlayerBundleSqlTest.FakeRedis("local-run", true);
+        var sameRunWithMarker = new PlayerBundleSqlTest.FakeRedis("prod-run", true);
+
+        assertThat(InstanceIdentity.checkRedisTargetIdentity(noMarker, "run_id:prod-run", false, null))
+                .contains(InstanceIdentity.LOCAL_TARGET_MARKER_KEY);
+        assertThat(InstanceIdentity.checkRedisTargetIdentity(withMarker, "run_id:prod-run", false, null))
+                .isNull();
+        assertThat(InstanceIdentity.checkRedisTargetIdentity(sameRunWithMarker, "run_id:prod-run", true, null))
+                .contains("同一个实例");
+        var warnBuf = new java.io.ByteArrayOutputStream();
+        assertThat(InstanceIdentity.checkRedisTargetIdentity(noMarker, "run_id:prod-run", true,
+                new java.io.PrintStream(warnBuf, true, java.nio.charset.StandardCharsets.UTF_8)))
+                .isNull();
+        assertThat(warnBuf.toString(java.nio.charset.StandardCharsets.UTF_8)).contains("WARNING");
+    }
 }

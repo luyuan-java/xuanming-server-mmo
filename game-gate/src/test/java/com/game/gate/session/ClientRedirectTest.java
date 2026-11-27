@@ -571,7 +571,11 @@ class ClientRedirectTest {
         login.complete(unbindReply());
         c.ch().runPendingTasks();
 
-        assertThat((Object) c.ch().readOutbound()).as("LeaveGame 应答类型是 Empty，不回包").isNull();
+        MessageContent leaveAck = c.ch().readOutbound();
+        assertThat(leaveAck).as("L741：在途 LeaveGame 请求号非 0 回空体包，指令被忽略").isNotNull();
+        assertThat(leaveAck.getMessageId()).isEqualTo(LEAVE_MSG);
+        assertThat(leaveAck.getId()).isEqualTo(2);
+        assertThat(leaveAck.hasErrorMessage()).isFalse();
         assertThat(sentSince(framesBefore)).as("UnbindPlayer 被忽略：不发 PlayerLeave").isEmpty();
         ClientSession s = registry.get(c.sid());
         assertThat(s.playerId).as("不改会话").isEqualTo(PLAYER);

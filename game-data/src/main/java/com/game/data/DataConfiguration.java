@@ -18,6 +18,7 @@ import com.game.data.ops.fence.AdminOwnership;
 import com.game.data.ops.fence.RedisTakeoverRequests;
 import com.game.data.ops.fence.StrictClock;
 import com.game.data.query.TransactionLogQueryService;
+import com.game.data.recall.RecallExecutor;
 import com.game.data.recall.RecallPlanner;
 import com.game.data.rollback.BattleLockGate;
 import com.game.data.rollback.DubboGuildInternalClient;
@@ -202,6 +203,14 @@ public class DataConfiguration {
                                        Clock clock, DataProperties props) {
         return new RecallPlanner(txlog, players, jobs, opsIds, new TransactionTemplate(transactionManager), json, clock,
                 props.recall().maxRows(), runnerId());
+    }
+
+    @Bean
+    public RecallExecutor recallExecutor(DataSource dataSource, TransactionLogQueryService txlog, OpsJobStore jobs,
+                                         OpsIds opsIds, PlatformTransactionManager transactionManager,
+                                         ObjectMapper json, Clock clock, DataProperties props) {
+        return new RecallExecutor(dataSource, txlog, jobs, opsIds, new TransactionTemplate(transactionManager), json,
+                clock, props.recall().maxRows(), runnerId());
     }
 
     // ================================================================ 作业框架、栅栏与回档（批次 7.2b）

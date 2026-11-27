@@ -2,6 +2,7 @@ package com.game.data.merge;
 
 import com.game.common.player.PlayerRouteAuthority;
 import com.game.data.merge.pb.ZoneMergeEntityOriginal;
+import com.game.data.merge.pb.ZoneMergeHistoryRow;
 import com.game.data.merge.pb.ZoneMergeRunRow;
 import com.game.player.store.RolePendingFence;
 import com.google.protobuf.ByteString;
@@ -89,7 +90,7 @@ public final class ZoneMergeStore {
         var columns=new LinkedHashMap<String,String>();
         columns.put("route_meta","id,generation,writable,fence_shards,writer_epoch,catalog_revision,freeze_run_id");columns.put("zone_merge_fence","zone_id,shard,run_id,revision");columns.put("zone_merged_into","zone_id,target_zone,run_id,revision");
         columns.put("zone_merge_run","run_id,mode,source_zone,target_zone,generation,original_run_id,state,phase,cursor_id,item_count,plan_hash,requested_by,approved_by,released_by,created_ms,updated_ms,expected_players,initial_hash");
-        columns.put("zone_merge_item","run_id,kind,entity_id,original_proto,state,after_digest,after_epoch");columns.put("zone_config","zone_id,manual_status,maintenance_msg,updated_at");
+        columns.put("zone_merge_item","run_id,kind,entity_id,original_proto,state,after_digest,after_epoch");columns.put("zone_merge_history","run_id,action,source_zone,target_zone,original_run_id,operator_name,recorded_ms");columns.put("zone_config","zone_id,manual_status,maintenance_msg,updated_at");
         columns.put("player","player_id,account,zone_id,owner_revision,owner_epoch,owner_released,owner_lease_until,trade_listing_id");columns.put("player_final_save","player_id,status");
         columns.put("guild","guild_id,leader_id,zone_id");columns.put("trade_listing","listing_id,seller_player_id,market_zone,status");
         columns.put("team_member_authority","player_id,team_id");columns.put("team_launch_role","player_id,state");columns.put("team_invite_authority","invitee_id,initiator_player_id,expires_ms");columns.put("team_application_authority","player_id,recipient_player_id,expires_ms");
@@ -311,13 +312,57 @@ public final class ZoneMergeStore {
     });}
     /** 全部实体已提交才建立/撤销精确marker。仍保留meta0与围栏，等待独立显式Release。 */
     public ZoneMergeRunRow finish(String key,String hash)throws SQLException{uuid(key);return tx(sql->{held(sql,key);var r=run(sql,key,true);approvedHash(r,hash);require(r.getState()==4||r.getState()==5,"原run尚未执行");if(r.getState()==5)return r;require(sql.count("SELECT COUNT(*) FROM zone_merge_item WHERE run_id=? AND (state IS NULL OR state<>2)",key)==0,"清单尚未完成，必须续跑同一批次");
-        verifyItems(sql,r);if(r.getMode()==1){require(sql.count("SELECT COUNT(*) FROM player WHERE zone_id=?",Integer.toUnsignedLong(r.getSourceZone()))==0&&sql.count("SELECT COUNT(*) FROM guild WHERE zone_id=?",Integer.toUnsignedLong(r.getSourceZone()))==0&&sql.count("SELECT COUNT(*) FROM trade_listing WHERE market_zone=?",Integer.toUnsignedLong(r.getSourceZone()))==0,"源区出现清单外实体，不能静默补抓");
+        verifyItems(sql,r);long recordedMs=sql.now();String dbPrincipal=sql.one("SELECT CURRENT_USER()",row->row.getString(1));String historyOp=(dbPrincipal==null||dbPrincipal.isBlank())?r.getRequestedBy():dbPrincipal;
+        if(r.getMode()==1){require(sql.count("SELECT COUNT(*) FROM player WHERE zone_id=?",Integer.toUnsignedLong(r.getSourceZone()))==0&&sql.count("SELECT COUNT(*) FROM guild WHERE zone_id=?",Integer.toUnsignedLong(r.getSourceZone()))==0&&sql.count("SELECT COUNT(*) FROM trade_listing WHERE market_zone=?",Integer.toUnsignedLong(r.getSourceZone()))==0,"源区出现清单外实体，不能静默补抓");
             sql.update("INSERT INTO zone_merged_into(zone_id,target_zone,run_id,revision) VALUES(?,?,?,1)",Integer.toUnsignedLong(r.getSourceZone()),Integer.toUnsignedLong(r.getTargetZone()),key);
-            require(sql.update("UPDATE zone_config SET manual_status=2,maintenance_msg=?,updated_at=? WHERE zone_id=? AND manual_status IN(1,2)","本区已合并至 "+Integer.toUnsignedString(r.getTargetZone())+" 区，请选择目标区登录",sql.now(),Integer.toUnsignedLong(r.getSourceZone()))==1,"源区目录退役CAS失败");
+            sql.update("INSERT INTO zone_merge_history(run_id,action,source_zone,target_zone,original_run_id,operator_name,recorded_ms) VALUES(?,1,?,?,'',?,?)",key,Integer.toUnsignedLong(r.getSourceZone()),Integer.toUnsignedLong(r.getTargetZone()),historyOp,recordedMs);
+            require(sql.update("UPDATE zone_config SET manual_status=2,maintenance_msg=?,updated_at=? WHERE zone_id=? AND manual_status IN(1,2)","本区已合并至 "+Integer.toUnsignedString(r.getTargetZone())+" 区，请选择目标区登录",recordedMs,Integer.toUnsignedLong(r.getSourceZone()))==1,"源区目录退役CAS失败");
         }else{require(sql.update("DELETE FROM zone_merged_into WHERE zone_id=? AND target_zone=? AND run_id=?",Integer.toUnsignedLong(r.getTargetZone()),Integer.toUnsignedLong(r.getSourceZone()),r.getOriginalRunId())==1,"撤销marker原件不符");
-            require(sql.update("UPDATE zone_config SET manual_status=1,maintenance_msg='',updated_at=? WHERE zone_id=? AND manual_status IN(1,2)",sql.now(),Integer.toUnsignedLong(r.getTargetZone()))==1,"撤销后源目录必须仍处维护，不能自动开服");}
-        sql.update("UPDATE zone_merge_run SET state=5,updated_ms=? WHERE run_id=?",sql.now(),key);return run(sql,key,false);
+            sql.update("INSERT INTO zone_merge_history(run_id,action,source_zone,target_zone,original_run_id,operator_name,recorded_ms) VALUES(?,2,?,?,?,?,?)",key,Integer.toUnsignedLong(r.getTargetZone()),Integer.toUnsignedLong(r.getSourceZone()),r.getOriginalRunId(),historyOp,recordedMs);
+            require(sql.update("UPDATE zone_config SET manual_status=1,maintenance_msg='',updated_at=? WHERE zone_id=? AND manual_status IN(1,2)",recordedMs,Integer.toUnsignedLong(r.getTargetZone()))==1,"撤销后源目录必须仍处维护，不能自动开服");}
+        sql.update("UPDATE zone_merge_run SET state=5,updated_ms=? WHERE run_id=?",recordedMs,key);return run(sql,key,false);
     });}
+
+    /** 只增不改合服历史：同事务追加一行（1=MERGE, 2=ROLLBACK），由调用方持有事务连接（运维账号只授 SELECT/INSERT）。 */
+    public static void appendMergeHistory(Connection c,String runId,int action,int sourceZone,int targetZone,String originalRunId,long recordedMs)throws SQLException{
+        uuid(runId);if(action!=1&&action!=2)throw new IllegalArgumentException("action 必须为 1(MERGE) 或 2(ROLLBACK)");zones(sourceZone,targetZone);
+        String dbUser="";
+        try(var ps=c.prepareStatement("SELECT CURRENT_USER()");var rs=ps.executeQuery()){if(rs.next()&&rs.getString(1)!=null)dbUser=rs.getString(1);}
+        try(var ps=c.prepareStatement("INSERT INTO zone_merge_history(run_id,action,source_zone,target_zone,original_run_id,operator_name,recorded_ms) VALUES(?,?,?,?,?,?,?)")){
+            ps.setString(1,runId);ps.setInt(2,action);ps.setLong(3,Integer.toUnsignedLong(sourceZone));ps.setLong(4,Integer.toUnsignedLong(targetZone));
+            ps.setString(5,originalRunId==null?"":originalRunId);ps.setString(6,dbUser);ps.setLong(7,recordedMs);
+            ps.executeUpdate();
+        }
+    }
+
+    /** 审计列出全部只增合服历史（按记录时间升序）。 */
+    public static List<ZoneMergeHistoryRow> listMergeHistory(Connection c)throws SQLException{
+        var out=new ArrayList<ZoneMergeHistoryRow>();
+        try(var ps=c.prepareStatement("SELECT run_id,action,source_zone,target_zone,original_run_id,operator_name,recorded_ms FROM zone_merge_history ORDER BY recorded_ms ASC, run_id ASC, action ASC");
+            var rs=ps.executeQuery()){
+            while(rs.next()){
+                out.add(ZoneMergeHistoryRow.newBuilder()
+                        .setRunId(rs.getString(1)).setAction(rs.getInt(2))
+                        .setSourceZone(zone(rs,"source_zone")).setTargetZone(zone(rs,"target_zone"))
+                        .setOriginalRunId(rs.getString(5)==null?"":rs.getString(5))
+                        .setOperatorName(rs.getString(6)==null?"":rs.getString(6))
+                        .setRecordedMs(unsigned(rs,"recorded_ms")).build());
+            }
+        }
+        return out;
+    }
+
+    /** 审计识别缺少对应 MERGE 历史记录的 zone_merged_into 映射（L956：发现绕过只增历史的改写）。 */
+    public static List<Integer> findMappingsWithoutHistory(Connection c)throws SQLException{
+        var out=new ArrayList<Integer>();
+        try(var ps=c.prepareStatement("SELECT m.zone_id FROM zone_merged_into m LEFT JOIN zone_merge_history h "
+                + "ON h.run_id=m.run_id AND h.action=1 AND h.source_zone=m.zone_id AND h.target_zone=m.target_zone "
+                + "WHERE h.run_id IS NULL ORDER BY m.zone_id ASC");
+            var rs=ps.executeQuery()){
+            while(rs.next())out.add(zone(rs,"zone_id"));
+        }
+        return out;
+    }
     // finish/release使用聚合联表复核，不无界攒实体；所有语句及提交共用30秒预算，超时保留冻结。
     private static void verifyItems(Sql sql,ZoneMergeRunRow r)throws SQLException{
         require(sql.count("SELECT COUNT(*) FROM zone_merge_item WHERE run_id=?",r.getRunId())==r.getItemCount(),"清单数量不符");

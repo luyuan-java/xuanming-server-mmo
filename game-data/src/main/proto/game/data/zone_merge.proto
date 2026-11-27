@@ -34,3 +34,16 @@ message ZoneMergeItemRow {
   bytes original_proto=4; uint32 state=5; // 1计划/2已核并提交，永不物理清理。
   bytes after_digest=6; uint64 after_epoch=7;
 }
+// 只增不改的合服/撤销审计历史（2026-11-11 L956：改映射同事务写入，运维账号只授 SELECT/INSERT）。
+message ZoneMergeHistoryRow {
+  option (proto2mysql.table_name) = "zone_merge_history";
+  option (proto2mysql.primary_key) = "run_id,action";
+  option (proto2mysql.index) = "source_zone,recorded_ms;target_zone,recorded_ms";
+  string run_id = 1;
+  uint32 action = 2;          // 1=MERGE, 2=ROLLBACK
+  uint32 source_zone = 3;
+  uint32 target_zone = 4;
+  string original_run_id = 5;
+  string operator_name = 6;
+  uint64 recorded_ms = 7;
+}

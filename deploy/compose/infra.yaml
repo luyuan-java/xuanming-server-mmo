@@ -58,8 +58,8 @@ services:
 
   redis:
     image: redis:8.10.2@sha256:6f81e8915c60b065a524e6967e0ad1c639ba6efa84d669f823683ea04d9150ee
-    # 开 AOF：<ns>:node-id-epoch:* 不得回退（architecture.md 节点号租约）。不设口令：端口只发布到 127.0.0.1
-    command: ["redis-server", "--appendonly", "yes"]
+    # 开 AOF：<ns>:node-id-epoch:* 不得回退（architecture.md 节点号租约）。固定 maxclients 40000 防默认 10000 撞顶。
+    command: ["redis-server", "--appendonly", "yes", "--maxclients", "40000"]
     ports:
       - "127.0.0.1:${GAME_REDIS_HOST_PORT:-6379}:6379"
     volumes:

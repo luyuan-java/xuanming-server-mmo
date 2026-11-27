@@ -621,7 +621,7 @@ public final class ClientDispatcher {
             // 重定向之后的准入（kRejectedRedirected）一致：mmorpg client-request-ordering.md O4「每个请求恰好一个回执」、O6「gate 级失败
             // 一律带请求 id」、O9。2026-11-11 起，原为静默丢弃（zone-travel-spec §5.7 已同步）。合规客户端此刻正在换连接，几秒内自己关闭。
             MessageRoute redirectedRoute = routes.clientRoute(request.getMessageId());
-            if (redirectedRoute == null || redirectedRoute.serverOnly()) {
+            if (redirectedRoute == null || redirectedRoute.clientForbidden()) {
                 countRequest(null, RequestResult.REDIRECTED);
                 return;
             }
@@ -643,16 +643,13 @@ public final class ClientDispatcher {
             registerIllegal(s, "unknown_message_id", request.getMessageId());
             return;
         }
-        if (route.serverOnly()) {
-            // CLIENT_RPC_SERVER_ONLY 方法（如 RetractWorldChat 434、UpdateGuildScore 8、Disconnect/Migration/RenewSession）
-            // 绝不转发给后端；按 O6 对有应答方法回带请求 id 的信封 1003 并计非法包（持续探测将触发踢线）。
-            log.debug("拒绝客户端发起的 SERVER_ONLY 方法 session={} message_id={} method={}",
-                    sid(s), request.getMessageId(), route.method());
-            if (route.hasResponse()) {
-                s.send(envelopeError(request, TIP_SERVICE_UNAVAILABLE));
-            }
+        if (route.clientForbidden()) {
+            // L743（client-rpc-callback R4）：CLIENT_RPC_PUSH 与 CLIENT_RPC_SERVER_ONLY 均非客户端可发起方法，
+            // 绝不转发给后端，计非法包后静默丢弃、不回包（与 mmorpg gate 上行白名单同口径）。
+            log.debug("拒绝客户端发起的非上行方法 session={} message_id={} method={} serverOnly={} pushOnly={}",
+                    sid(s), request.getMessageId(), route.method(), route.serverOnly(), route.pushOnly());
             countRequest(route, RequestResult.UNKNOWN_MESSAGE);
-            registerIllegal(s, "server_only", request.getMessageId());
+            registerIllegal(s, route.pushOnly() ? "push_only" : "server_only", request.getMessageId());
             return;
         }
         if (request.getSerializedSize() > MAX_REQUEST_BYTES) {
@@ -1106,11 +1103,11 @@ public final class ClientDispatcher {
     }
 
     private void replyToClient(ClientSession s, ClientRequest request, ClientReply reply) {
-        // 是否回包由契约决定，不能看 body 是否为空：proto3 全默认值的应答序列化后就是 0 字节
-        // （新账号的 LoginResponse 即如此），吞掉它客户端会一直等到超时。
+        // L741（client-rpc-callback R6）：请求号非 0 的客户端请求（含应答类型为 Empty 的 148 CancelQueue）
+        // 成功时恰好回一个空体包，消除 Unity 15s rpc timeout；请求号为 0 且应答为 Empty 的单向通知仍不回包。
         MessageRoute route = routes.clientRoute(request.getMessageId());
         boolean hasResponse = route == null || route.hasResponse();
-        if (!hasResponse && reply.getTipId() == 0) {
+        if (!hasResponse && reply.getTipId() == 0 && request.getId() == 0L) {
             return;
         }
         MessageContent.Builder out = MessageContent.newBuilder()

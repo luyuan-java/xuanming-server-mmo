@@ -23,9 +23,9 @@ spring:
     timeout-per-shutdown-phase: 30s
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    # connect / socket 超时给阻塞 I/O 设上界（与 game-login 同口径）：数据库卡死时存储线程不会被无限挂住，
-    # 写回在重试预算内失败并记 ERROR，停服也不会卡在等写回上。
-    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000"
+    # connect / socket 超时与会话锁等待（L738：8s < socketTimeout 10s，等锁由库端 1205 中止而非客户端先断连接）：
+    # 数据库卡死时存储线程不会被无限挂住，写回在重试预算内失败并记 ERROR，停服也不会卡在等写回上。
+    url: "jdbc:mysql://127.0.0.1:3306/${game.namespace:game}?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=3000&socketTimeout=10000&sessionVariables=innodb_lock_wait_timeout=8,lock_wait_timeout=8"
     username: ${GAME_MYSQL_USER:root}
     password: ${GAME_MYSQL_PASSWORD:}
     druid:

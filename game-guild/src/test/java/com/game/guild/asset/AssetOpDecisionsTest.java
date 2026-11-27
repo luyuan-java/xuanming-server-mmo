@@ -364,4 +364,20 @@ class AssetOpDecisionsTest {
         String emoji64 = "😀".repeat(GuildLimits.RESOLVED_BY_MAX_CHARS);
         assertThat(new ManualResolution(1, AssetOpStatus.APPLIED, emoji64, "r").validate()).isNull();
     }
+
+    @Test
+    void 超180天待办判放弃并退还帮会计数_唤醒频道命名稳定() {
+        long created = 1_700_000_000_000L;
+        long window = AssetOpDecisions.ABANDON_PENDING_AFTER_MS;
+        assertThat(window).isEqualTo(180L * 86_400_000L);
+        assertThat(AssetOpDecisions.isAbandonedByAge(0L, created + window)).isFalse();
+        assertThat(AssetOpDecisions.isAbandonedByAge(created, created + window - 1L)).isFalse();
+        assertThat(AssetOpDecisions.isAbandonedByAge(created, created + window)).isTrue();
+        assertThat(AssetOpDecisions.abandonedStatus()).isEqualTo(AssetOpStatus.ABORTED);
+        assertThat(AssetOpDecisions.counterRefund(GuildAssetOpKind.GUILD_ASSET_OP_KIND_SHOP, 2, 20261127,
+                AssetOpDecisions.abandonedStatus()))
+                .contains(new CounterRefund(GuildDailyCounterKind.GUILD_DAILY_COUNTER_KIND_SHOP, 2));
+        assertThat(new com.game.discovery.RedisKeys(new com.game.common.GameNamespace("game")).assetOpWakeChannel())
+                .isEqualTo("game:assetop:wake");
+    }
 }

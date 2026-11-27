@@ -1,5 +1,7 @@
 package com.game.data.tools.playerbundle;
 
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -24,6 +26,10 @@ import java.util.Map;
  * 取不到身份返回 null；导入端对 null 一律拒绝（无法证明「不是导出来源」就不写）。
  */
 final class InstanceIdentity {
+
+    /** 本地 debug 导入目标 Redis 必须显式置好的身份标记键与值（对齐主仓 debug_import）。 */
+    static final String LOCAL_TARGET_MARKER_KEY = "debug_import:local_target";
+    static final String LOCAL_TARGET_MARKER_VALUE = "local-debug-import-target";
 
     private InstanceIdentity() {
     }
@@ -90,6 +96,41 @@ final class InstanceIdentity {
             return what + " 与导出来源是同一个实例（身份 " + target + "）：导入只写隔离环境，检查是不是把线上 port-forward 当成了本地";
         }
         return null;
+    }
+
+    /**
+     * 闸门二（Redis 加强版，2026-10-22 评审修正 L948）：
+     * <ol>
+     *   <li>{@code run_id} 相同仍硬拒（即使带本地标记或 {@code --allow-unverified-target-identity}）；</li>
+     *   <li>{@code run_id} 不同不足以证明不是导出来源（线上 Redis HA 切主/重启会换 run_id），必须读取目标 Redis 的
+     *       {@code GET debug_import:local_target == "local-debug-import-target"}，缺失则拒绝，或显式传
+     *       {@code --allow-unverified-target-identity} 并打印 WARNING。</li>
+     * </ol>
+     */
+    static String checkRedisTargetIdentity(PlayerRedis redis, String exportedRedis,
+                                           boolean allowUnverifiedTargetIdentity, PrintStream warnOut) {
+        String targetRunId = redis(redis.infoServer());
+        String runIdProblem = checkNotExportSource("Redis", targetRunId, exportedRedis);
+        if (runIdProblem != null) {
+            return runIdProblem;
+        }
+        List<PlayerRedis.RawEntry> entries = redis.read(List.of(LOCAL_TARGET_MARKER_KEY));
+        PlayerRedis.RawEntry marker = entries.isEmpty() ? null : entries.getFirst();
+        boolean markerMatched = marker != null && marker.error() == null && "string".equals(marker.type())
+                && marker.string() != null
+                && LOCAL_TARGET_MARKER_VALUE.equals(new String(marker.string(), StandardCharsets.UTF_8).strip());
+        if (markerMatched) {
+            return null;
+        }
+        if (allowUnverifiedTargetIdentity) {
+            if (warnOut != null) {
+                warnOut.println("[WARNING] 目标 Redis 缺少本地标记键 " + LOCAL_TARGET_MARKER_KEY + "=" + LOCAL_TARGET_MARKER_VALUE
+                        + "，已按 --allow-unverified-target-identity 显式放行");
+            }
+            return null;
+        }
+        return "目标 Redis 缺少本地标记键 " + LOCAL_TARGET_MARKER_KEY + "=" + LOCAL_TARGET_MARKER_VALUE
+                + "（run_id 不同不能证明不是重启/切主后的线上实例）：请在本地 Redis 写入该标记，或确认无误后显式加 --allow-unverified-target-identity";
     }
 
     private static String single(Connection connection, String sql) throws SQLException {

@@ -75,6 +75,8 @@ class ClientDispatcherTest {
     private static final int TRADE_MSG = 196;
     /** 仅服务端方法（CLIENT_RPC_SERVER_ONLY，如 434 RetractWorldChat / 8 UpdateGuildScore）：绝不转发给后端。 */
     private static final int SERVER_ONLY_MSG = 434;
+    /** 纯推送方法（CLIENT_RPC_PUSH，如 156 NotifyChallengeInvite）：绝不转发给后端。 */
+    private static final int PUSH_ONLY_MSG = 156;
     private static final int SCENE_NODE = 7;
     private static final long PLAYER = 42L;
 
@@ -94,6 +96,8 @@ class ClientDispatcherTest {
                 "/trade.ClientPlayerJubaozhai/BrowseListings");
         case SERVER_ONLY_MSG -> new MessageRoute(id, "friend", true, "ClientPlayerChat.RetractWorldChat", false,
                 "/chatpb.ClientPlayerChat/RetractWorldChat", false, true);
+        case PUSH_ONLY_MSG -> new MessageRoute(id, "friend", false, "MatchService.NotifyChallengeInvite", false,
+                "/match.MatchService/NotifyChallengeInvite", false, false, true);
         default -> null;
     };
 
@@ -251,12 +255,24 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void 应答类型为Empty的方法且tip为0时不回包() {
+    void 应答类型为Empty的方法_请求号为0不回包_请求号非0回空体包() {
         EmbeddedChannel ch = verified();
-        ch.writeInbound(request(9, LEAVE_MSG, "x"));
+        // id == 0 单向通知不回包
+        ch.writeInbound(request(0, LEAVE_MSG, "x"));
         login.complete(ClientReply.getDefaultInstance());
         ch.runPendingTasks();
         assertThat((Object) ch.readOutbound()).isNull();
+
+        // L741：id != 0 恰好回一个空体包
+        ch.writeInbound(request(9, LEAVE_MSG, "x"));
+        login.complete(ClientReply.getDefaultInstance());
+        ch.runPendingTasks();
+        MessageContent reply = ch.readOutbound();
+        assertThat(reply).isNotNull();
+        assertThat(reply.getMessageId()).isEqualTo(LEAVE_MSG);
+        assertThat(reply.getId()).isEqualTo(9);
+        assertThat(reply.getSerializedMessage()).isEmpty();
+        assertThat(reply.hasErrorMessage()).isFalse();
     }
 
     @Test
@@ -434,7 +450,12 @@ class ClientDispatcherTest {
         login.complete(unbindReply());
         ch.runPendingTasks();
 
-        assertThat((Object) ch.readOutbound()).as("LeaveGame 应答类型是 Empty，不回包").isNull();
+        MessageContent leaveAck = ch.readOutbound();
+        assertThat(leaveAck).as("L741：LeaveGame 请求号非 0 时回一个空体包").isNotNull();
+        assertThat(leaveAck.getMessageId()).isEqualTo(LEAVE_MSG);
+        assertThat(leaveAck.getId()).isEqualTo(2);
+        assertThat(leaveAck.getSerializedMessage()).isEmpty();
+        assertThat(leaveAck.hasErrorMessage()).isFalse();
         assertThat(links.last().sceneNodeId()).isEqualTo(SCENE_NODE);
         assertThat(links.last().frame().getPlayerLeave())
                 .isEqualTo(PlayerLeave.newBuilder().setSessionId(sid).setPlayerId(PLAYER).setVoluntary(true)
@@ -849,16 +870,17 @@ class ClientDispatcherTest {
     }
 
     @Test
-    void 客户端发起SERVER_ONLY方法被gate拦截回信封1003且计非法包_绝不转发后端() {
+    void 客户端发起SERVER_ONLY或PUSH方法被gate按非法包静默丢弃不回包_绝不转发后端() {
         EmbeddedChannel ch = verified();
         ch.writeInbound(request(99, SERVER_ONLY_MSG, "spoof-retract"));
         assertThat(friend.calls).as("SERVER_ONLY 绝不能到达后端").isEmpty();
-        MessageContent reply = ch.readOutbound();
-        assertThat(reply).isNotNull();
-        assertThat(reply.getId()).isEqualTo(99);
-        assertThat(reply.getMessageId()).isEqualTo(SERVER_ONLY_MSG);
-        assertThat(reply.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
+        assertThat((Object) ch.readOutbound()).as("L743：SERVER_ONLY 丢弃不回包").isNull();
         assertThat(session().illegalPackets).isEqualTo(1);
+
+        ch.writeInbound(request(100, PUSH_ONLY_MSG, "spoof-push"));
+        assertThat(friend.calls).as("PUSH 绝不能到达后端").isEmpty();
+        assertThat((Object) ch.readOutbound()).as("L743：PUSH 丢弃不回包").isNull();
+        assertThat(session().illegalPackets).isEqualTo(2);
     }
 
     @Test
@@ -930,10 +952,10 @@ class ClientDispatcherTest {
         assertThat(reply.getErrorMessage().getId()).isEqualTo(ClientDispatcher.TIP_SERVICE_UNAVAILABLE);
         assertThat(reply.getSerializedMessage()).as("没有业务回包").isEmpty();
 
-        ch.writeInbound(request(8, GUILD_NOTIFY_MSG, "uplink"));
+        ch.writeInbound(request(0, GUILD_NOTIFY_MSG, "uplink"));
         guild.complete(ClientReply.getDefaultInstance());
         ch.runPendingTasks();
-        assertThat((Object) ch.readOutbound()).as("Empty 应答且 tip 为 0 不回包").isNull();
+        assertThat((Object) ch.readOutbound()).as("Empty 应答且请求号为 0、tip 为 0 不回包").isNull();
     }
 
     @Test
@@ -1561,6 +1583,7 @@ class ClientDispatcherTest {
         ch.writeInbound(request(2, LEAVE_MSG, ""));
         login.complete(unbindReply());
         ch.runPendingTasks();
+        assertThat(((MessageContent) ch.readOutbound()).getMessageId()).isEqualTo(LEAVE_MSG);
         ch.writeInbound(request(3, ENTER_GAME_MSG, "again"));
         login.complete(ClientReply.newBuilder()
                 .setBody(ByteString.copyFromUtf8("enter-resp"))

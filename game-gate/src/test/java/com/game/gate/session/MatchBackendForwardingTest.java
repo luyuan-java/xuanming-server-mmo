@@ -103,15 +103,27 @@ class MatchBackendForwardingTest {
         EmbeddedChannel ch = verified(Map.of(DubboGroups.MATCH, match, DubboGroups.FRIEND, friend));
         enterGame(ch);
         assertThat(matchMethods).extracting(MessageMethod::messageId)
-                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392, 448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 506, 507, 508, 511, 512, 513, 514, 534, 535, 548, 549, 550, 551, 552, 553, 554);
+                .containsExactly(148, 151, 152, 153, 154, 156, 157, 163, 164, 179, 265, 275, 379, 380, 389, 390, 391, 392, 448, 449, 450, 451, 465, 466, 467, 468, 469, 470, 471, 472, 473, 474, 475, 507, 508, 511, 512, 513, 514, 534, 535, 548, 549, 550, 551, 552, 553, 554, 570, 571, 572, 575, 576, 577, 578, 579, 580, 581, 587, 588);
 
         long requestId = 100;
+        int forwardedCount = 0;
+        int pushDroppedCount = 0;
         for (MessageMethod method : matchMethods) {
             int id = method.messageId();
             requestId++;
+            MessageRoute route = routes.clientRoute(id);
             ch.writeInbound(request(requestId, id, "req-" + id));
 
-            assertThat(match.calls).as(method.key() + " 转给 match 后端").hasSize((int) (requestId - 100));
+            if (route.pushOnly()) {
+                // L743：CLIENT_RPC_PUSH 仅服务端推送，客户端发起在 gate 入口静默丢弃并计非法包、绝不转发后端
+                pushDroppedCount++;
+                assertThat(match.calls).as(method.key() + " PUSH 不转给后端").hasSize(forwardedCount);
+                assertThat((Object) ch.readOutbound()).as(method.key() + " PUSH 不回包").isNull();
+                continue;
+            }
+
+            forwardedCount++;
+            assertThat(match.calls).as(method.key() + " 转给 match 后端").hasSize(forwardedCount);
             ClientCall call = match.calls.get(match.calls.size() - 1);
             assertThat(call.getMessageId()).as(method.key()).isEqualTo(id);
             assertThat(call.getRequestId()).as(method.key() + " 请求号").isEqualTo(requestId);
@@ -125,28 +137,24 @@ class MatchBackendForwardingTest {
             match.complete(ClientReply.newBuilder().setBody(ByteString.copyFromUtf8("resp-" + id)).build());
             ch.runPendingTasks();
 
-            boolean replied = routes.clientRoute(id).hasResponse();
-            assertThat(replied).as(method.key() + " 是否回包").isEqualTo(id != 148 && id != 154 && id != 156 && id != 553 && id != 554);
+            // L741：请求号非 0 的请求（含 148 CancelQueue 应答为 Empty）均恰好回一帧
             MessageContent out = ch.readOutbound();
-            if (replied) {
-                assertThat(out).as(method.key() + " 回包").isNotNull();
-                assertThat(out.getMessageId()).as(method.key()).isEqualTo(id);
-                assertThat(out.getId()).as(method.key() + " 带请求号").isEqualTo(requestId);
-                assertThat(out.getSerializedMessage().toStringUtf8()).as(method.key() + " 应答体原样").isEqualTo("resp-" + id);
-                assertThat(out.hasErrorMessage()).as(method.key() + " 成功应答不带信封错误（客户端见到它就判失败）").isFalse();
-                assertThat((Object) ch.readOutbound()).as(method.key() + "：只有一帧").isNull();
-            } else {
-                assertThat(out).as(method.key() + " 应答类型是 Empty、tip 为 0：不回包").isNull();
-            }
+            assertThat(out).as(method.key() + " 回包").isNotNull();
+            assertThat(out.getMessageId()).as(method.key()).isEqualTo(id);
+            assertThat(out.getId()).as(method.key() + " 带请求号").isEqualTo(requestId);
+            assertThat(out.getSerializedMessage().toStringUtf8()).as(method.key() + " 应答体原样").isEqualTo("resp-" + id);
+            assertThat(out.hasErrorMessage()).as(method.key() + " 成功应答不带信封错误（客户端见到它就判失败）").isFalse();
+            assertThat((Object) ch.readOutbound()).as(method.key() + "：只有一帧").isNull();
         }
 
-        assertThat(match.calls).hasSize(matchMethods.size());
+        assertThat(pushDroppedCount).as("154/156/553/554 四个 PUSH 号被 gate 丢弃").isEqualTo(4);
+        assertThat(match.calls).hasSize(forwardedCount);
         assertThat(friend.calls).as("不串到别的后端").isEmpty();
         assertThat(login.calls).as("只有进游戏那一次").hasSize(1);
         assertThat(links.sent).as("不转给 scene（只有进场帧）").hasSize(1);
-        assertThat(session().illegalPackets).isZero();
+        assertThat(session().illegalPackets).isEqualTo(pushDroppedCount);
         assertThat(ch.isOpen()).isTrue();
-        assertThat(forwarded()).as("14 个号各计一次 route=match、result=forwarded").hasSize(matchMethods.size())
+        assertThat(forwarded()).as("非 PUSH 号各计一次 route=match、result=forwarded").hasSize(forwardedCount)
                 .allSatisfy(c -> {
                     assertThat(c.count()).isEqualTo(1.0);
                     assertThat(c.getId().getTag("method")).startsWith("MatchService.");
@@ -189,13 +197,18 @@ class MatchBackendForwardingTest {
         enterGame(ch);
 
         long requestId = 200;
+        int expectedCalls = 0;
         for (MessageMethod method : matchMethods) {
+            if (routes.clientRoute(method.messageId()).pushOnly()) {
+                continue;
+            }
             requestId++;
+            expectedCalls++;
             ch.writeInbound(request(requestId, method.messageId(), "x"));
             ch.runPendingTasks();
             expectEnvelope1003(ch, method, requestId);
         }
-        assertThat(down.calls).as("每个号都试过一次，没有重试").isEqualTo(matchMethods.size());
+        assertThat(down.calls).as("每个非 PUSH 号都试过一次，没有重试").isEqualTo(expectedCalls);
 
         // future 异常完成的形态：换一条连接、用可控的后端
         EmbeddedChannel ch2 = verified(Map.of(DubboGroups.MATCH, match));
@@ -240,7 +253,7 @@ class MatchBackendForwardingTest {
         // §8.1「请求体解析失败 → 信封 1003」一列：后端经 ClientReply.tip_id 回的传输层失败，不受「Empty 不回包」影响
         EmbeddedChannel ch = verified(Map.of(DubboGroups.MATCH, match));
         long requestId = 300;
-        for (int id : new int[] {148, 154, 156, 157}) {
+        for (int id : new int[] {148, 157}) {
             requestId++;
             ch.writeInbound(request(requestId, id, "garbage"));
             match.complete(ClientReply.newBuilder().setTipId(1003).addTipParameters("bad-" + id).build());

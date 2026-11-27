@@ -237,8 +237,23 @@ public final class AssetOpDecisions {
         return random.nextLong() | 1L;
     }
 
+    /** L746：资产待办超 180 天仍未决时按放弃终结（客户端视图映射为 ABORTED，并退还帮会限购/捐献计数）。 */
+    public static final long ABANDON_PENDING_AFTER_MS = 180L * 86_400_000L;
+
     /** 结局是否是 scene 的终结结局（APPLIED / REJECTED；isSceneTerminal，caller.go:232-235），不看 durable。 */
     public static boolean isSceneTerminal(AssetOutcome outcome) {
         return outcome == AssetOutcome.ASSET_OUTCOME_APPLIED || outcome == AssetOutcome.ASSET_OUTCOME_REJECTED;
+    }
+
+    /** L746：判断 PENDING 待办是否已超过 180 天放弃窗口（无符号时间戳比较；createdMs == 0 不判超窗）。 */
+    public static boolean isAbandonedByAge(long createdMs, long nowMs) {
+        return createdMs != 0L
+                && Long.compareUnsigned(nowMs, createdMs) >= 0
+                && Long.compareUnsigned(nowMs - createdMs, ABANDON_PENDING_AFTER_MS) >= 0;
+    }
+
+    /** 超 180 天放弃终结落库的统一终态（映射到既有 ABORTED，对侧账退还帮会限购/捐献计数）。 */
+    public static AssetOpStatus abandonedStatus() {
+        return AssetOpStatus.ABORTED;
     }
 }

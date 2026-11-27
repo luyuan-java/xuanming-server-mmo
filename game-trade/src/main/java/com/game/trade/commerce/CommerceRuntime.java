@@ -24,6 +24,41 @@ import org.slf4j.LoggerFactory;
 /** 有界恢复循环；关闭时先取消并等工作线程，再由Spring关闭RPC客户端/计时器/数据源。 */
 public final class CommerceRuntime implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(CommerceRuntime.class);
+    /** 2026-10-22 评审修正（L947）：单行推进预算必须从整轮截止推出并预留推迟与 ACK 余量。 */
+    static final long RESERVE_ACK_MS = 500L;
+    static final long RESERVE_DEFER_MS = 300L;
+    static final long MIN_STEP_BUDGET_MS = 200L;
+    static final long MAX_STEP_BUDGET_MS = 5_000L;
+
+    /** 按整轮剩余预算计算单行合同推进子预算（预留 ACK 500ms + 推迟 300ms、取剩余一半、上限 5s、不足 200ms 不开新行）。 */
+    static long stepBudgetMs(long remainingMillis) {
+        long available = remainingMillis - RESERVE_ACK_MS - RESERVE_DEFER_MS;
+        if (available < MIN_STEP_BUDGET_MS) {
+            return 0L;
+        }
+        return Math.min(MAX_STEP_BUDGET_MS, Math.max(MIN_STEP_BUDGET_MS, available / 2L));
+    }
+
+    /** 将合同推进异常归为五类（conflict / role_conflict / owner_changed / corrupt / too_many_pending / retry）。 */
+    static String classifyContractFailure(TradeCommerceRow row, Throwable failure) {
+        if (failure instanceof CommerceEngine.OwnerChangedContract) {
+            return row.getKind() == 6 ? "retry" : "owner_changed";
+        }
+        if (failure instanceof CommerceEngine.CorruptContract) {
+            return "corrupt";
+        }
+        if (failure instanceof CommerceStore.PendingBackpressure) {
+            return "too_many_pending";
+        }
+        if (failure instanceof CommerceRules.Refusal ref && ref.tip() == CommerceRules.CONFLICT) {
+            return "role_conflict";
+        }
+        if (failure instanceof java.util.ConcurrentModificationException
+                || (failure instanceof SQLException sqlEx && "40001".equals(sqlEx.getSQLState()))) {
+            return "conflict";
+        }
+        return "retry";
+    }
     private final CommerceEngine e;
     private final CommerceMatching matching;
     private final ReliableAssetDelivery delivery;
@@ -155,14 +190,19 @@ public final class CommerceRuntime implements AutoCloseable {
                 ? e.store.due(e.clock.getAsLong(), 100)
                 : e.store.due(e.clock.getAsLong(), 100, commerceFilter);
         for (var row : dueRows) {
-            if (budget.remainingMillis() < 500)
+            long rowBudgetMs = stepBudgetMs(budget.remainingMillis());
+            if (rowBudgetMs < MIN_STEP_BUDGET_MS) {
                 break;
+            }
             try {
-                step(row, Deadline.after(Math.min(5000, budget.remainingMillis())));
+                step(row, Deadline.after(rowBudgetMs));
             } catch (SQLException | RuntimeException failure) {
-                if (budget.expired() || Thread.currentThread().isInterrupted())
+                if (Thread.currentThread().isInterrupted()) {
                     break;
-                deferContract(row, failure, budget);
+                }
+                // 即使单行子预算耗尽，只要整轮仍留有预留余量就必须执行分类/推迟，防止卡住的队头行反复饥饿后续合同与 ACK。
+                long deferBudgetMs = Math.min(RESERVE_DEFER_MS, Math.max(100L, budget.remainingMillis()));
+                deferContract(row, failure, Deadline.after(deferBudgetMs));
             }
         }
         var acks = ackFilter.isAll()
@@ -254,14 +294,16 @@ public final class CommerceRuntime implements AutoCloseable {
         });
     }
     private void deferContract(TradeCommerceRow row, Exception failure, Deadline budget) {
-        // 人民币寄售(kind=6)的归属变化不走 owner_changed 自动隔离（由商城订单与过户流程处理）。
-        boolean ownerChanged = failure instanceof CommerceEngine.OwnerChangedContract && row.getKind() != 6;
-        String category = ownerChanged ? "owner_changed"
-            : failure instanceof CommerceEngine.CorruptContract ? "corrupt"
-            : failure instanceof CommerceStore.PendingBackpressure ? "too_many_pending" : "retry";
-        if (category.equals("owner_changed") || category.equals("corrupt"))
+        String category = classifyContractFailure(row, failure);
+        // 观察值并发变化（conflict）不推迟，留待下一轮立即重试。
+        if ("conflict".equals(category)) {
+            log.info("交易合同并发冲突不推迟、下一拍立即重试 class=conflict commerce_id={} version={}",
+                    Long.toUnsignedString(row.getCommerceId()), row.getVersion());
+            return;
+        }
+        if ("owner_changed".equals(category) || "corrupt".equals(category))
             try {
-                boolean quarantined = category.equals("owner_changed")
+                boolean quarantined = "owner_changed".equals(category)
                         ? e.store.quarantine(row, CommerceRules.MANUAL_REASON_OWNER_CHANGED, failure.getMessage(),
                                 e.clock.getAsLong(), budget)
                         : e.store.quarantine(row, budget);
@@ -273,14 +315,17 @@ public final class CommerceRuntime implements AutoCloseable {
             } catch (SQLException | RuntimeException quarantineFailure) {
                 log.error("交易合同隔离失败 commerce_id={}", Long.toUnsignedString(row.getCommerceId()), quarantineFailure);
             }
-        // 角色冻结/投票中暂态冲突（CONFLICT）推迟 5 分钟复查（jubaozhai-market.md §15.7.1）。
-        long base = (failure instanceof CommerceRules.Refusal ref && ref.tip() == CommerceRules.CONFLICT) ? 300_000L
-            : category.equals("too_many_pending") ? 60_000L : 10_000L;
+        // 角色冻结/投票中暂态冲突（role_conflict）分钟级退避（5 分钟）并单独告警。
+        long base = "role_conflict".equals(category) ? 300_000L
+            : "too_many_pending".equals(category) ? 60_000L : 10_000L;
         long until = e.clock.getAsLong() + (long) (base * ThreadLocalRandom.current().nextDouble(0.8, 1.2));
         try {
             boolean deferred = e.store.defer(row, until, budget);
-            if (category.equals("too_many_pending"))
+            if ("too_many_pending".equals(category))
                 log.info("交易合同背压推迟 class={} commerce_id={} deferred={} until_ms={}", category,
+                    Long.toUnsignedString(row.getCommerceId()), deferred, until);
+            else if ("role_conflict".equals(category))
+                log.warn("交易合同角色冲突分钟级退避 class={} commerce_id={} deferred={} until_ms={}", category,
                     Long.toUnsignedString(row.getCommerceId()), deferred, until);
             else
                 log.error("交易合同单行失败 class={} commerce_id={} deferred={} until_ms={}", category,
@@ -289,6 +334,17 @@ public final class CommerceRuntime implements AutoCloseable {
             failure.addSuppressed(deferFailure);
             log.error("交易合同推迟失败 class={} commerce_id={}", category, Long.toUnsignedString(row.getCommerceId()), failure);
         }
+    }
+
+    /** 玩家落地唤醒：将指定玩家名下尚未到期的 PENDING 交易资产待办立即拉回可投递时刻（assetop:wake）。 */
+    public int wakePlayer(long playerId, Deadline budget) throws SQLException {
+        if (playerId == 0L) {
+            return 0;
+        }
+        long now = e.clock.getAsLong();
+        return e.store.transaction(budget, c -> CommerceStore.execute(c,
+                "UPDATE trade_asset_op SET next_attempt_ms=?,updated_ms=? WHERE player_id=? AND status=1 AND next_attempt_ms>?",
+                now, now, playerId, now));
     }
     private TradeAssetOpRow claim(long id, Deadline d) throws SQLException {
         return e.store.transaction(d, c -> {

@@ -324,6 +324,9 @@ class MessageRoutesTest {
                     .contains("match.MatchService/" + method.methodName(), "match.MatchService/*");
         }
         assertThat(routes.clientRoute(148).hasResponse()).as("148 CancelQueue 应答是 Empty").isFalse();
+        assertThat(routes.clientRoute(148).pushOnly()).as("148 CancelQueue 是客户端上行请求，非 PUSH").isFalse();
+        assertThat(routes.clientRoute(154).pushOnly()).as("154 NotifyChallengeResult 是 PUSH").isTrue();
+        assertThat(routes.clientRoute(156).pushOnly()).as("156 NotifyChallengeInvite 是 PUSH").isTrue();
         assertThat(routes.clientRoute(157).hasResponse()).as("157 JoinQueue 应答是 JoinQueueResponse").isTrue();
         assertThat(routes.clientRoute(179).hasResponse()).as("179 应答消息定义在 battle 包，照样回包").isTrue();
         // match 域里只有这 42 个号：别的服务（尤其是战斗服务）没有被带进来。

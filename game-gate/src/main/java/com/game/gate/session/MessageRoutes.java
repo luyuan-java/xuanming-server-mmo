@@ -124,7 +124,9 @@ public interface MessageRoutes {
             String domain = domainOf(e);
             table.put(e.messageId(), new MessageRoute(
                     e.messageId(), domain, e.hasResponse(), e.qualifiedMethod(), e.gmCommand(),
-                    e.fullMethod(), e.directOnly(), e.rpcKind() == ContractClientRpcKind.SERVER_ONLY));
+                    e.fullMethod(), e.directOnly(),
+                    e.rpcKind() == ContractClientRpcKind.SERVER_ONLY,
+                    e.rpcKind() == ContractClientRpcKind.PUSH));
         }
         Map<Integer, MessageRoute> frozen = Map.copyOf(table);
         List<MessageRoute> all = frozen.values().stream().sorted(Comparator.comparingInt(MessageRoute::messageId)).toList();
@@ -162,7 +164,7 @@ public interface MessageRoutes {
                 table.put(method.messageId(), new MessageRoute(method.messageId(), backendOf(method), hasResponse(method),
                         method.serviceName() + "." + method.methodName(), method.gmCommand(),
                         "/" + method.method().getService().getFullName() + "/" + method.methodName(),
-                        directOnly(method), method.serverOnly()));
+                        directOnly(method), method.serverOnly(), isPushOnly(method)));
             }
         }
         Map<Integer, MessageRoute> frozen = Map.copyOf(table);
@@ -184,6 +186,17 @@ public interface MessageRoutes {
     static boolean hasResponse(MessageMethod method) {
         String type = method.responsePrototype().getDescriptorForType().getFullName();
         return !type.equals("Empty") && !type.equals("google.protobuf.Empty");
+    }
+
+    /** 判断方法是否标了 {@code OptionClientRpcKind = CLIENT_RPC_PUSH}（纯服务端推送，客户端不得上行，L743）。 */
+    static boolean isPushOnly(MessageMethod method) {
+        for (var e : method.method().getOptions().getAllFields().entrySet()) {
+            if (e.getKey().isExtension() && "OptionClientRpcKind".equals(e.getKey().getName())
+                    && e.getValue() instanceof com.google.protobuf.Descriptors.EnumValueDescriptor ev) {
+                return "CLIENT_RPC_PUSH".equals(ev.getName());
+            }
+        }
+        return false;
     }
 
     /** 这个方法是不是只走客户端直连（见 {@link #DIRECT_ONLY_SERVICES}）。 */

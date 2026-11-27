@@ -242,6 +242,14 @@ public final class AssetOpLoop implements AssetOpProcessor {
         return running;
     }
 
+    /** L746：收到 scene 进场 {@code assetop:wake} 广播后立即触发一次到期重投扫描，缩短离线恢复首跳延迟。 */
+    public int wakePlayer(long playerId) {
+        if (!running || playerId == 0L) {
+            return 0;
+        }
+        return tick();
+    }
+
     /** 每一轮各自兜底：某一轮炸掉只丢那一轮，循环继续（一个补偿循环静默停摆比单轮出错危险得多，reconcile.go:364-384）。 */
     private static void guarded(String what, Runnable task) {
         try {

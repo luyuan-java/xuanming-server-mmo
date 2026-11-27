@@ -827,6 +827,11 @@ public final class RedisKeys {
         return prefix + "workshard:" + Objects.requireNonNull(service, "service") + ":" + zoneId;
     }
 
+    /** 场景落地唤醒资产通道重投的 Redis pub/sub 频道：{@code <ns>:assetop:wake}。 */
+    public String assetOpWakeChannel() {
+        return prefix + "assetop:wake";
+    }
+
     private static String queueSuffix(int mode, int config) {
         if (mode < 0) {
             throw new IllegalArgumentException("匹配模式不能为负: " + mode);

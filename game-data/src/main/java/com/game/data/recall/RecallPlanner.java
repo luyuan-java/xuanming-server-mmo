@@ -61,9 +61,20 @@ public final class RecallPlanner {
     public record Plan(List<Long> players, int kind, Integer currencyType, Integer itemConfigId, long sinceMs, long untilMs,
                        List<Integer> reasons, String reason) {
 
-        String canonical() {
+        public String canonical() {
             return "players=" + players + "\nkind=" + kind + "\ncurrencyType=" + currencyType + "\nitemConfigId="
                     + itemConfigId + "\nsinceMs=" + sinceMs + "\nuntilMs=" + untilMs + "\nreasons=" + reasons;
+        }
+    }
+
+    /** 计划的确定性 SHA-256 摘要（先预览后执行时校验，防执行偏离预览范围）。 */
+    public static String planDigest(Plan plan) {
+        try {
+            byte[] hash = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(plan.canonical().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(hash);
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
         }
     }
 
@@ -246,6 +257,7 @@ public final class RecallPlanner {
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("dryRun", true);
+        out.put("planDigest", planDigest(plan));
         out.put("kind", plan.kind() == AssetKind.ASSET_CURRENCY_VALUE ? "currency" : "item");
         out.put("currencyType", plan.currencyType() == null ? null : Integer.toUnsignedLong(plan.currencyType()));
         out.put("itemConfigId", plan.itemConfigId() == null ? null : Integer.toUnsignedLong(plan.itemConfigId()));

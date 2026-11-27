@@ -48,7 +48,7 @@ public final class PlayerBundleImport {
     private static final int TIMEOUT_SECONDS = 10;
 
     record Args(Path file, String localAccount, Long zone, String name, boolean replace, boolean execute, Set<String> allowHosts,
-                String redis, int redisDatabase, String expectDatabase) {
+                String redis, int redisDatabase, String expectDatabase, boolean allowUnverifiedTargetIdentity) {
     }
 
     private PlayerBundleImport() {
@@ -129,9 +129,10 @@ public final class PlayerBundleImport {
                 err.println(mismatch);
                 return 2;
             }
-            // 闸门二：目标实例不能就是导出来源（port-forward 之后线上实例也在 127.0.0.1，只看地址拦不住）
+            // 闸门二：目标实例不能就是导出来源，且目标 Redis 须具备本地标记键 debug_import:local_target（或显式豁免）。
             String mysqlProblem = InstanceIdentity.checkNotExportSource("MySQL", connections.mysqlIdentity(conn), exportedMysql);
-            String redisProblem = InstanceIdentity.checkNotExportSource("Redis", InstanceIdentity.redis(redis.infoServer()), exportedRedis);
+            String redisProblem = InstanceIdentity.checkRedisTargetIdentity(
+                    redis, exportedRedis, args.allowUnverifiedTargetIdentity(), err);
             for (String problem : new String[] {mysqlProblem, redisProblem}) {
                 if (problem != null) {
                     err.println(problem);
@@ -218,11 +219,13 @@ public final class PlayerBundleImport {
         String redis = "redis://127.0.0.1:6379";
         int redisDatabase = 12;
         String expectDatabase = null;
+        boolean allowUnverifiedTargetIdentity = false;
         for (int i = 0; i < argv.size(); i++) {
             String arg = argv.get(i);
             switch (arg) {
                 case "--replace" -> replace = true;
                 case "--execute" -> execute = true;
+                case "--allow-unverified-target-identity" -> allowUnverifiedTargetIdentity = true;
                 case "--file", "--local-account", "--zone", "--name", "--allow-target-host", "--redis", "--redis-database",
                      "--expect-database" -> {
                     if (i + 1 >= argv.size()) {
@@ -246,6 +249,7 @@ public final class PlayerBundleImport {
         if (file == null || localAccount == null) {
             throw new IllegalArgumentException("--file 与 --local-account 都必须给");
         }
-        return new Args(file, localAccount, zone, name, replace, execute, Set.copyOf(allowHosts), redis, redisDatabase, expectDatabase);
+        return new Args(file, localAccount, zone, name, replace, execute, Set.copyOf(allowHosts), redis, redisDatabase,
+                expectDatabase, allowUnverifiedTargetIdentity);
     }
 }
