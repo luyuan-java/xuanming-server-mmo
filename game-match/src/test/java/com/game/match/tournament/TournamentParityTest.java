@@ -187,7 +187,10 @@ class TournamentParityTest {
             AtomicLong idGen = new AtomicLong(900_000L);
             AtomicLong battleIdGen = new AtomicLong(700_000L);
             TournamentStore store = new TournamentStore(db.dataSource, tables, now::get);
-            TournamentService service = new TournamentService(store, idGen::incrementAndGet, spec -> battleIdGen.incrementAndGet());
+            AtomicLong mailIdGen = new AtomicLong(600_000L);
+            TournamentService service = new TournamentService(store, idGen::incrementAndGet,
+                    spec -> battleIdGen.incrementAndGet(), null,
+                    (pid, reward, title, body) -> mailIdGen.incrementAndGet());
             MatchMetrics metrics = new MatchMetrics(new SimpleMeterRegistry(), new com.game.match.metrics.MetricLabels(id -> true));
             RatingStore ratingStore = new RatingStore(RatingStore.connections(db.dataSource), cfg -> 20, metrics, now::get)
                     .withTournamentStore(store);
@@ -733,6 +736,86 @@ class TournamentParityTest {
                     .setSeasonId(1).setPage(0x1000_0000).setPageSize(16).build());
             assertThat(hugePage.getErrorMessage().getId()).isZero();
             assertThat(hugePage.getStandingsList()).isEmpty();
+        }
+    }
+
+    @Test
+    void 批W领奖守卫_未装配发件拒领带附件奖_纯荣誉直领_冻结文案与单条失败不阻断其余() throws Exception {
+        TournamentTables tables = TournamentTables.from(config);
+        try (RatingTestDatabase db = RatingTestDatabase.h2()) {
+            AtomicLong now = new AtomicLong(1_860_000_000_000L);
+            AtomicLong idGen = new AtomicLong(970_000L);
+            TournamentStore store = new TournamentStore(db.dataSource, tables, now::get);
+            // 插入三条待领奖：#1 带附件（tierKind=1 冠军）、#2 纯荣誉零附件（tierKind=8 季军模拟无附件）、#3 带附件（tierKind=7 助威）
+            byte[] withAtt = TournamentTables.buildMailAttachments(tables.rewardForPlacement(1, 0).orElseThrow()).toByteArray();
+            try (Connection c = db.dataSource.getConnection();
+                 var ps = c.prepareStatement(
+                         "INSERT INTO match_tournament_reward "
+                                 + "(season_id,player_id,tier_kind,reward_id,squad_id,final_rank,tier_id,gold_amount,"
+                                 + "attachments,title_code,badge_code,delivery_state,mail_id,claimed_ms,updated_ms,mail_title,mail_body) "
+                                 + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,?)")) {
+                // #1 带附件
+                ps.setInt(1, 1); ps.setLong(2, 501L); ps.setInt(3, 1); ps.setLong(4, 970_001L);
+                ps.setLong(5, 10L); ps.setInt(6, 1); ps.setInt(7, 1); ps.setLong(8, 5000L);
+                ps.setBytes(9, withAtt); ps.setString(10, "t1"); ps.setString(11, "b1");
+                ps.setInt(12, 1); ps.setLong(13, now.get());
+                ps.setString(14, "冻结标题#1"); ps.setString(15, "冻结正文#1");
+                ps.executeUpdate();
+                // #2 纯荣誉（零附件）
+                ps.setInt(1, 1); ps.setLong(2, 501L); ps.setInt(3, 2); ps.setLong(4, 970_002L);
+                ps.setLong(5, 10L); ps.setInt(6, 2); ps.setInt(7, 2); ps.setLong(8, 0L);
+                ps.setBytes(9, new byte[0]); ps.setString(10, "t2"); ps.setString(11, "b2");
+                ps.setInt(12, 1); ps.setLong(13, now.get());
+                ps.setString(14, ""); ps.setString(15, "");
+                ps.executeUpdate();
+                // #3 带附件
+                ps.setInt(1, 1); ps.setLong(2, 501L); ps.setInt(3, 7); ps.setLong(4, 970_003L);
+                ps.setLong(5, 0L); ps.setInt(6, 0); ps.setInt(7, 7); ps.setLong(8, 1000L);
+                ps.setBytes(9, withAtt); ps.setString(10, ""); ps.setString(11, "");
+                ps.setInt(12, 1); ps.setLong(13, now.get());
+                ps.setString(14, "冻结标题#3"); ps.setString(15, "冻结正文#3");
+                ps.executeUpdate();
+            }
+
+            // 1. 发件通道未装配：#2 纯荣誉直接落 CLAIMED，#1/#3 带附件保持 CLAIMABLE 且返回可重试内部错误
+            TournamentService noMailSvc = new TournamentService(store, idGen::incrementAndGet, null, null, null);
+            var noMailResp = noMailSvc.claimReward(501L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build());
+            assertThat(noMailResp.getErrorMessage().getId()).isEqualTo(MatchErrorTip.match_error.kMatchInternal_VALUE);
+            assertThat(noMailResp.getClaimedRewardsList()).hasSize(1);
+            assertThat(noMailResp.getClaimedRewards(0).getTierKindValue()).isEqualTo(2);
+            assertThat(store.claimableRewards(501L, 1)).hasSize(2);
+
+            // 2. 装配发件后：#1 失败不阻断 #3；且收到的是结算时冻结在行内的标题与正文（非实时配表）
+            java.util.List<String> sentTitles = new java.util.ArrayList<>();
+            java.util.List<String> sentBodies = new java.util.ArrayList<>();
+            java.util.concurrent.atomic.AtomicBoolean failFirst = new java.util.concurrent.atomic.AtomicBoolean(true);
+            TournamentService mailSvc = new TournamentService(store, idGen::incrementAndGet, null, null,
+                    (pid, reward, title, body) -> {
+                        sentTitles.add(title);
+                        sentBodies.add(body);
+                        if (reward.rewardId() == 970_001L && failFirst.get()) {
+                            throw new IllegalStateException("transient mail failure on #1");
+                        }
+                        return 770_000L + reward.tierKind();
+                    });
+            var partial = mailSvc.claimReward(501L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build());
+            assertThat(partial.getErrorMessage().getId()).isEqualTo(MatchErrorTip.match_error.kMatchInternal_VALUE);
+            assertThat(partial.getClaimedRewardsList()).hasSize(1);
+            assertThat(partial.getClaimedRewards(0).getTierKindValue()).isEqualTo(7);
+            assertThat(partial.getClaimedRewards(0).getMailId()).isEqualTo(770_007L);
+            assertThat(sentTitles).containsExactly("冻结标题#1", "冻结标题#3");
+            assertThat(sentBodies).containsExactly("冻结正文#1", "冻结正文#3");
+
+            // 3. 恢复后重领 #1：仍使用逐字节相同的冻结标题与正文，全部领完
+            failFirst.set(false);
+            var retry = mailSvc.claimReward(501L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build());
+            assertThat(retry.getErrorMessage().getId()).isZero();
+            assertThat(retry.getClaimedRewardsList()).hasSize(1);
+            assertThat(retry.getClaimedRewards(0).getTierKindValue()).isEqualTo(1);
+            assertThat(retry.getClaimedRewards(0).getMailId()).isEqualTo(770_001L);
+            assertThat(sentTitles.get(2)).isEqualTo("冻结标题#1");
+            assertThat(sentBodies.get(2)).isEqualTo("冻结正文#1");
+            assertThat(store.claimableRewards(501L, 1)).isEmpty();
         }
     }
 

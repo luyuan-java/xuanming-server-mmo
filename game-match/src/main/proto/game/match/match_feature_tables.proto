@@ -423,6 +423,9 @@ message MatchTournamentRewardRow {
   uint64 mail_id = 13;
   uint64 claimed_ms = 14;
   uint64 updated_ms = 15;
+  // 结算时从 TournamentReward 配表冻结下来的邮件标题与正文，避免重领跨配表热更破坏 mail 幂等摘要（批 W / r2-tn#2）。
+  string mail_title = 16;
+  string mail_body = 17;
 }
 
 message MatchTournamentPredictionRow {

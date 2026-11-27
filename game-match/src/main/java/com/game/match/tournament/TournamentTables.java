@@ -24,6 +24,10 @@ public final class TournamentTables {
     // 锦标赛名次/助威/竞猜银两奖励一律发放不可交易绑定银两（3），严禁误发付费灵石（1）。
     public static final int GOLD_CURRENCY_TYPE = CurrencyType.CURRENCY_TYPE_BIND_GOLD_VALUE;
     public static final int DEFAULT_RULE_ID = 1;
+    public static final int MAX_MAIL_TITLE_CHARS = 128;
+    public static final int MAX_MAIL_BODY_CHARS = 4096;
+    public static final String DEFAULT_MAIL_TITLE = "群仙问道赛赛季奖励";
+    public static final String DEFAULT_MAIL_BODY = "本赛季群仙问道赛奖励已结算，请查收附件。";
 
     private final TournamentRuleTable rule;
     private final Map<Integer, TournamentRewardTable> rewardsById;
@@ -51,10 +55,28 @@ public final class TournamentTables {
         Map<Integer, TournamentRewardTable> byId = new LinkedHashMap<>(sorted.size() * 2);
         List<TournamentRewardTierView> views = new ArrayList<>(sorted.size());
         for (TournamentRewardTable row : sorted) {
+            validateRewardRow(row);
             byId.put(row.getId(), row);
             views.add(toTierView(row));
         }
         return new TournamentTables(rule, Map.copyOf(byId), List.copyOf(sorted), List.copyOf(views));
+    }
+
+    private static void validateRewardRow(TournamentRewardTable row) {
+        if (row.getMailTitle().length() > MAX_MAIL_TITLE_CHARS) {
+            throw new IllegalStateException("TournamentReward.mail_title 超长(" + MAX_MAIL_TITLE_CHARS + "): id=" + row.getId());
+        }
+        if (row.getMailBody().length() > MAX_MAIL_BODY_CHARS) {
+            throw new IllegalStateException("TournamentReward.mail_body 超长(" + MAX_MAIL_BODY_CHARS + "): id=" + row.getId());
+        }
+    }
+
+    public static String resolvedMailTitle(TournamentRewardTable row) {
+        return (row != null && !row.getMailTitle().isEmpty()) ? row.getMailTitle() : DEFAULT_MAIL_TITLE;
+    }
+
+    public static String resolvedMailBody(TournamentRewardTable row) {
+        return (row != null && !row.getMailBody().isEmpty()) ? row.getMailBody() : DEFAULT_MAIL_BODY;
     }
 
     private static void validateRule(TournamentRuleTable rule) {

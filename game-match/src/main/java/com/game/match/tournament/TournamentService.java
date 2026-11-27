@@ -338,14 +338,8 @@ public final class TournamentService {
             return ClaimTournamentRewardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
         }
         try {
-            if (mailSender == null) {
-                List<TournamentPlayerRewardView> claimed = store.claimRewards(playerId, req.getSeasonId());
-                return ClaimTournamentRewardResponse.newBuilder()
-                        .setErrorMessage(tip(0))
-                        .addAllClaimedRewards(claimed)
-                        .build();
-            }
-            // 事务外逐条以 reward_id 为幂等键发个人邮件，成功拿到 mail_id 后再落账 CLAIMED（与 Go 版逐条对齐）。
+            // 事务外逐条以 reward_id 为幂等键发个人邮件，成功拿到 mail_id 后再落账 CLAIMED（与 Go 批 W 逐条对齐）：
+            // 有附件而发件通道未装配一律 fail-closed 保留 CLAIMABLE（绝不空领吞奖励）；文案取结算时冻结在行里的值；单条失败不挡其余。
             List<TournamentStore.ClaimableReward> pending = store.claimableRewards(playerId, req.getSeasonId());
             if (pending.isEmpty()) {
                 return ClaimTournamentRewardResponse.newBuilder()
@@ -353,35 +347,60 @@ public final class TournamentService {
                         .build();
             }
             List<TournamentPlayerRewardView> claimed = new java.util.ArrayList<>(pending.size());
+            int failedTip = 0;
             for (TournamentStore.ClaimableReward r : pending) {
-                String title = "群仙问道赛赛季奖励";
-                String body = "本赛季群仙问道赛奖励已结算，请查收附件。";
-                var tierOpt = store.tables().rewardById(r.tierId());
-                if (tierOpt.isPresent()) {
-                    if (!tierOpt.get().getMailTitle().isEmpty()) {
-                        title = tierOpt.get().getMailTitle();
-                    }
-                    if (!tierOpt.get().getMailBody().isEmpty()) {
-                        body = tierOpt.get().getMailBody();
-                    }
-                }
-                long mailId;
+                com.game.proto.mail.MailAttachments atts;
                 try {
-                    mailId = mailSender.send(playerId, r, title, body);
-                } catch (Exception mailErr) {
-                    log.error("[tournament] send reward mail failed player={} reward={}: {}",
-                            Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()), mailErr.getMessage());
-                    return ClaimTournamentRewardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+                    atts = r.attachments().length > 0
+                            ? com.game.proto.mail.MailAttachments.parseFrom(r.attachments())
+                            : com.game.proto.mail.MailAttachments.getDefaultInstance();
+                } catch (InvalidProtocolBufferException parseErr) {
+                    log.error("[tournament] corrupt attachments player={} reward={}: {}",
+                            Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()), parseErr.getMessage());
+                    if (failedTip == 0) failedTip = ERR_INTERNAL;
+                    continue;
                 }
-                if (mailId == 0L) {
-                    log.error("[tournament] send reward mail returned empty mail_id player={} reward={}",
-                            Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()));
-                    return ClaimTournamentRewardResponse.newBuilder().setErrorMessage(tip(ERR_INTERNAL)).build();
+                boolean hasAttachments = atts.getCurrenciesCount() + atts.getItemsCount() > 0;
+                long mailId = 0L;
+                if (hasAttachments) {
+                    if (mailSender == null) {
+                        log.error("[tournament] mail delivery not configured; reward stays CLAIMABLE player={} reward={}",
+                                Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()));
+                        if (failedTip == 0) failedTip = ERR_INTERNAL;
+                        continue;
+                    }
+                    String title = (r.mailTitle() != null && !r.mailTitle().isEmpty())
+                            ? r.mailTitle() : TournamentTables.DEFAULT_MAIL_TITLE;
+                    String body = (r.mailBody() != null && !r.mailBody().isEmpty())
+                            ? r.mailBody() : TournamentTables.DEFAULT_MAIL_BODY;
+                    try {
+                        mailId = mailSender.send(playerId, r, title, body);
+                    } catch (Exception mailErr) {
+                        log.error("[tournament] send reward mail failed player={} reward={}: {}",
+                                Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()), mailErr.getMessage());
+                        if (failedTip == 0) failedTip = ERR_INTERNAL;
+                        continue;
+                    }
+                    if (mailId == 0L) {
+                        log.error("[tournament] send reward mail returned empty mail_id player={} reward={}",
+                                Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()));
+                        if (failedTip == 0) failedTip = ERR_INTERNAL;
+                        continue;
+                    }
                 }
-                claimed.add(store.markRewardClaimed(r.seasonId(), playerId, r.tierKind(), mailId));
+                try {
+                    claimed.add(store.markRewardClaimed(r.seasonId(), playerId, r.tierKind(), mailId));
+                } catch (TournamentStore.DomainException domErr) {
+                    if (failedTip == 0) failedTip = domErr.tipId();
+                } catch (SQLException sqlErr) {
+                    log.error("[tournament] markRewardClaimed failed player={} reward={} mail={}: {}",
+                            Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()),
+                            Long.toUnsignedString(mailId), sqlErr.getMessage());
+                    if (failedTip == 0) failedTip = ERR_INTERNAL;
+                }
             }
             return ClaimTournamentRewardResponse.newBuilder()
-                    .setErrorMessage(tip(0))
+                    .setErrorMessage(tip(failedTip))
                     .addAllClaimedRewards(claimed)
                     .build();
         } catch (TournamentStore.DomainException e) {

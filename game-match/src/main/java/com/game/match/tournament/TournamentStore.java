@@ -114,7 +114,8 @@ public final class TournamentStore {
     public record PrepareMatchOutcome(TournamentMatchView match, LaunchSpec launch) {
     }
 
-    public record ClaimableReward(long rewardId, int seasonId, int tierKind, int tierId, byte[] attachments) {
+    public record ClaimableReward(long rewardId, int seasonId, int tierKind, int tierId, byte[] attachments,
+                                  String mailTitle, String mailBody) {
     }
 
     public record PredictOutcome(int countA, int countB) {
@@ -1364,9 +1365,9 @@ public final class TournamentStore {
     public List<ClaimableReward> claimableRewards(long playerId, int seasonId) throws SQLException {
         return inTx(c -> {
             String sql = seasonId == 0
-                    ? "SELECT reward_id,season_id,tier_kind,tier_id,attachments FROM " + MatchFeatureTables.TOURNAMENT_REWARD
+                    ? "SELECT reward_id,season_id,tier_kind,tier_id,attachments,mail_title,mail_body FROM " + MatchFeatureTables.TOURNAMENT_REWARD
                     + " WHERE player_id=? AND delivery_state=? ORDER BY season_id DESC, tier_kind ASC"
-                    : "SELECT reward_id,season_id,tier_kind,tier_id,attachments FROM " + MatchFeatureTables.TOURNAMENT_REWARD
+                    : "SELECT reward_id,season_id,tier_kind,tier_id,attachments,mail_title,mail_body FROM " + MatchFeatureTables.TOURNAMENT_REWARD
                     + " WHERE player_id=? AND season_id=? AND delivery_state=? ORDER BY tier_kind ASC";
             List<ClaimableReward> list = new ArrayList<>();
             try (PreparedStatement ps = c.prepareStatement(sql)) {
@@ -1380,8 +1381,12 @@ public final class TournamentStore {
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
                         byte[] raw = rs.getBytes(5);
+                        String title = rs.getString(6);
+                        String body = rs.getString(7);
                         list.add(new ClaimableReward(rs.getLong(1), rs.getInt(2), rs.getInt(3), rs.getInt(4),
-                                raw == null ? new byte[0] : raw));
+                                raw == null ? new byte[0] : raw,
+                                title == null ? "" : title,
+                                body == null ? "" : body));
                     }
                 }
             }
@@ -2113,8 +2118,8 @@ public final class TournamentStore {
         try (PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO " + MatchFeatureTables.TOURNAMENT_REWARD
                         + "(season_id,player_id,tier_kind,reward_id,squad_id,final_rank,tier_id,gold_amount,"
-                        + "attachments,title_code,badge_code,delivery_state,mail_id,claimed_ms,updated_ms) "
-                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,?)")) {
+                        + "attachments,title_code,badge_code,delivery_state,mail_id,claimed_ms,updated_ms,mail_title,mail_body) "
+                        + "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,?)")) {
             ps.setInt(1, seasonId);
             ps.setLong(2, playerId);
             ps.setInt(3, tier.getTierKind());
@@ -2128,6 +2133,8 @@ public final class TournamentStore {
             ps.setString(11, tier.getBadgeCode());
             ps.setInt(12, TournamentRewardDeliveryState.TOURNAMENT_REWARD_DELIVERY_CLAIMABLE_VALUE);
             ps.setLong(13, now);
+            ps.setString(14, TournamentTables.resolvedMailTitle(tier));
+            ps.setString(15, TournamentTables.resolvedMailBody(tier));
             ps.executeUpdate();
         }
     }
