@@ -67,6 +67,7 @@ public final class RankRewardWorker implements SmartLifecycle, AutoCloseable {
         if (reward == null)
             return;
         long mailId = 0;
+        boolean recipientDeleted = false;
         try {
             var request = SendMailRequest.newBuilder()
                                   .setSenderKind(3)
@@ -79,14 +80,23 @@ public final class RankRewardWorker implements SmartLifecycle, AutoCloseable {
                                   .build();
             var signed = ServiceCallSignatures.sign(MailAdminService.PERSONAL_METHOD, request, "rank", secret, System.currentTimeMillis());
             var response = mail.sendPersonalMail(signed).get(2200, TimeUnit.MILLISECONDS);
-            if (response.getErrorMessage().getId() == 0)
+            int errorId = response.getErrorMessage().getId();
+            if (errorId == 0)
                 mailId = response.getMailId();
+            else if (errorId == com.game.table.MailErrorTip.mail_error.kMailRecipientDeleted_VALUE)
+                recipientDeleted = true;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             LOG.warn("榜奖发信被中断，保留原幂等键下次重投 rewardId={}", id);
             return;
         } catch (Exception unknown) {
             LOG.warn("榜奖发信未确认，将保持原幂等键重投，类型={}", unknown.getClass().getSimpleName());
+        }
+        if (recipientDeleted) {
+            LOG.info("[rank] mail reward abandoned because recipient role is deleted reward_id={} settlement_id={}",
+                    reward.id(), reward.settlement());
+            store.abandon(Deadline.after(1500), reward);
+            return;
         }
         store.settle(Deadline.after(1500), reward, mailId);
     }

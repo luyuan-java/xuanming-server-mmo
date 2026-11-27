@@ -37,17 +37,19 @@ message RankBoardRow {
   uint64 created_ms = 15;
   uint64 sealed_ms = 16;
   uint64 deleted_ms = 17;
+  uint64 entries = 18;
 }
 message RankScoreRow {
   option (proto2mysql.table_name) = "rank_score";
   option (proto2mysql.primary_key) = "board_id,generation,entity_id";
-  option (proto2mysql.index) = "board_id,generation,score,achieved_ms,entity_id";
+  option (proto2mysql.index) = "board_id,generation,score,achieved_ms,entity_id;board_id,generation,order_key,achieved_ms,entity_id";
   uint64 board_id = 1;
   uint64 generation = 2;
   uint64 entity_id = 3;
   int64 score = 4;
   uint64 achieved_ms = 5;
   uint64 source_cursor = 6;
+  int64 order_key = 7;
 }
 // 每一游标的完整请求摘要保留至本代保留窗结束，晚重试不能冒充新一批。
 message RankInputReceiptRow {
