@@ -495,7 +495,7 @@ public class SceneNode implements SmartLifecycle {
         AssetAudit assetAudit = AssetAudit.withAssetSaveTrigger(
                 startAudit(zoneId, nodeId, settings, guids),
                 playerId -> {
-                    SceneWorld w = this.sceneWorld;
+                    SceneWorld w = this.world;
                     if (w != null) {
                         w.requestCoalescedAssetSave(playerId);
                     }

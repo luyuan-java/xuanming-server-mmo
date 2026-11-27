@@ -1418,21 +1418,13 @@ Java 版待做：
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-06 审计流水链路水平扩展(主仓已落码未编译,Java 待做)
+### 2026-11-06 审计流水链路水平扩展（Java 已对齐）
 
-主仓缺口清单(`docs/handoff/server-gap-audit-20261101.md`)第 15 条,设计见主仓 `docs/design/audit-pipeline-horizontal-scale-20261106.md`,验证步骤见主仓 `docs/PROGRESS.md` 2026-11-06「审计流水链路水平扩展」。主仓 commit:未提交。服务端内部,不涉及客户端契约。本表「审计快照管道扩容」一行的「Java 待评估」并入本条。
-
-- **主仓做了什么**:
-  - 两个审计 topic 只许加分区、可以原地加(两张表按主键 / 唯一键去重,落库不依赖顺序);减分区仍换代。
-  - 流水消费者每个分区一个 worker 并行攒批落库,实例级落库并发上限 = 池连接数 − 1。
-  - 两张审计表加分桶列 `shard`(id % 16),按时间的索引都在时间列前插 `shard`,避免 TiDB 上全服追加写压在索引末尾同一个 Region。
-  - 过期清理按 (表, 桶) 取 `GET_LOCK`,几个副本各删各的桶,不再一起删同一批最老的行。
-- **Java 要核对**(只读,未做):
-  - game-data 的 `ConsumerLoop` 一个 topic 一条线程、一次 poll 整批一个事务落库:分到几个分区时吞吐是否也只有一条线;`game-transaction-log-g<N>` / `game-player-snapshot-g<N>` 的分区数能否同样改成「只许加」。前提是 Java 两张表落库也不依赖分区内顺序:流水的幂等键、快照按快照号主键。
-  - Java 的 `transaction_log` / `player_snapshot` 表上按时间的索引是否也是单调前缀,上 TiDB 之前要不要同样分桶。
-  - Java 有没有审计表过期清理;有的话是否每个副本删同一批最老的行。
-- **验证口径**:加分区后不停服,新分区被消费、旧分区照常;同一实例几个分区同时落库时无死锁、无重复行;清理时两个实例不会同删一个桶。
-- 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-audit` / `game-data` 完整对齐（缺口清单第 15 条，设计见主仓 `docs/design/audit-pipeline-horizontal-scale-20261106.md`）：
+- **审计 topic 只许原地扩容**：`game-audit` `AuditTopicInitializer` / `AuditTopicDurability` 对两个审计 topic 允许 `actual >= spec.partitions()` 原地扩分区（仍拒缩分区；战斗结果 topic 维持严格等值）。
+- **单实例多分区并行落库与分桶索引**：`game-data` `game-data-schema.sql` 为 `transaction_log` / `player_snapshot` 增加 `shard TINYINT UNSIGNED NOT NULL DEFAULT 0`（`unsignedId % 16`）并将按时间索引改为 `(shard, time_ms)` 前缀，消除 TiDB 单调尾热点；`AuditTopicScalingPolicy` 固定 16 桶、校验只增不减并计算实例级落库并发上限 `max(1, poolSize - 1)`；`ConsumerLoop` 新增有界池 + 信号量控制的分区并行落库（按分区独立提交位点、跳过被撤销分区、瞬态失败安全退回串行重试）。
+- **分桶非阻塞过期清理**：新增 `BucketedRetentionPurger` 按 `(table, shard)` 取非阻塞 `GET_LOCK`（timeout=0）分桶清理旧记录并接入 `DataNode.withHorizontalScaling`，多副本各删各桶互不冲突。
+- **验证**：`game-audit` **31/31 PASS**（含 `AuditTopicInitializerTest` 原地扩分区用例）；`game-data` `AuditPipelineHorizontalScaleTest`（3/3）+ `ConsumerLoopTest`（7/7）= **10/10 PASS**。
 
 ### 2026-11-06 后台分片归属哈希修复与收件箱对账分工（Java 已对齐）
 
@@ -1521,13 +1513,11 @@ Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`
 - **评级来源停写不卡消费**：`RatingRankOutbox.append` / `appendRanked` 遇到 `guard.getStopped()` 时不再抛异常回滚评分事务，而是放行 `RatingStore.apply` 正常提交玩家评分与 `match_rating_applied` 入账标记、不写 `match_global_rank_outbox` 且不推进 `produced_cursor`，并递增 `game_match_rating_unpublished_total{mode}`（`deploy/k8s/match-alerts.yaml` 同步纳入告警）；停写后已入账局的重放仍命中 `match_rating_applied` 主键返回 `DUPLICATE`。
 - **验证**：`game-match` `GlobalMatchShardingAndStopSourceTest`（2/2）+ `BattleCompletionShardingTest`（1/1）+ `MatchOutboxShardingAndLivenessTest`（1/1）+ `RatingStoreTest` + `BattleCompletionReplayMetricsTest` + `MatchMetricsTest`（共 **68/68 PASS**），`game-team` `TeamLaunchRecoveryShardingTest`（1/1）+ `TeamConfigurationTest`（8/8，共 **9/9 PASS**）。
 
-### 2026-11-10 存档库和区脱钩：每地域固定 K 个存档库，建号按 player_id 取模选库（主仓 A17a、A17b 已落码未编译，Java 待做）
+### 2026-11-10 存档库和区脱钩：每地域固定 K 个存档库，建号按 player_id 取模选库（Java 已对齐）
 
-主仓 commit：A17a 已随 11-06 的整批保存提交进主仓 main，A17b 未提交；Java 版本 `0.1.0-SNAPSHOT`，待做。服务端内部改动，不涉及客户端契约。说明见主仓 `docs/PROGRESS.md` 2026-11-06「A17a」与 2026-11-10「A17b」两条，设计见主仓 `docs/design/player-data-tidb-scaling-plan.md` §7.2。
-
-- **主仓的口径**：区（home_zone）只是玩法分组、会别名合服；存档库是物理落点、会整库搬集群，两者不再互相推导。每个地域上线前定一个固定的存档库数 K（上线后不改，开发 1、生产初值 64），库名 `player_store_<1000000 + 地域码×1000 + 片号>_db`；建号时按 `player_id % K` 选库并写进目录，之后读写只认目录。部署侧的库名清单必须恰好是本地域的 K 个库，少一个多一个都在写之前拒绝；每库的连接池按 K 摊开（每库至少 2 条）。
-- **Java 要核对**：Java 版的玩家存档是不是也按区分库、或者只有一个库。是的话按同一口径改成每地域 K 个存档逻辑库、建号取模选库记进目录；清单与连接池预算按 Java 的部署方式落，不照抄 PowerShell。项目未上线，切换时清库，不做迁移。
-- 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-player-store` 对齐（A17a/A17b/A17c 完整收口，设计见主仓 `docs/design/player-data-tidb-scaling-plan.md` §7.2）：
+- 新增 `RegionalSaveDbRouter`：每地域固定 K 个逻辑存档库，落点编号 `1_000_000 + regionCode * 1_000 + shardIndex`（拒绝任何 `< 1_000_000` 或旧 `zone_<n>_db` 命名），库名 `player_store_<storeId>_db`；建号按无符号 `Long.remainderUnsigned(playerId, K)` 确定性选库写入目录；严格 `validateManifest` 在写前拦截少库、多库与区库名；连接池预算按 K 均分（每库至少 2 条）且按需单飞延迟打开（`openLazy`），附每连接池独立读并发名额 `ReadConcurrencyQuota = max(1, pool/2)`。
+- **验证**：`game-player-store` `RegionalSaveDbRouterTest` **1/1 PASS**。
 
 ### 2026-11-10 商城付款金额或币种不符：落异常付款记录与退款待办（Java 已对齐）
 
@@ -1765,16 +1755,13 @@ C++ 版设计见 C++ 仓 `docs/design/gate-client-heartbeat.md` §14。
 - `game-api` 新增 `GateSessionPayload` 并接入 `DubboAuthConsumerFilter` / `DubboAuthProviderFilter`：对 `ClientMessageService`（`handle`/`sessionClosed`/`abandonEnter`）的完整 `SessionContext`（`gate_node_id`/`gate_instance_id`/`session_id`/`zone_id`/`account`/`player_id`/`owner_revision` 等）及时间戳附加并强验 Ed25519 签名（`x-gate-id-ts` / `x-gate-id-sig`，支持 `GAME_GATE_IDENTITY_REQUIRED=true` 生产强制 fail-closed）；`game-gate` `GateConfiguration.gateSessionIdentityKeyCheck` 在启动阶段执行密钥配对自检。
 - **验证**：`game-common` `GateSessionIdentityAuthTest` 2/2 PASS；`game-api` `GateSessionIdentityFilterTest` + `DubboAuthFilterTest` + `KillSwitchProviderFilterTest` **11/11 PASS**；`game-gate` `GateConfigurationTest` + `ClientDispatcherTest` **115/115 PASS**。
 
-### 2026-11-11 缺口清单第 17、20、25 条不等压测直接定案(主仓已落码未编译,Java 待做)
+### 2026-11-11 缺口清单第 17、20、25 条不等压测直接定案（Java 已对齐）
 
-主仓说明见 `docs/PROGRESS.md` 2026-11-11「缺口清单第 17、20、25 条不等压测直接定案落码」。都是服务端内部改动,没有客户端契约。
-
-| 功能 | 主仓 | Java | 待做内容 |
-|---|---|---|---|
-| 排行榜同榜写入按来源片并行(第 17 条) | 已落码未编译 | 待做 | 核对 `game-rank` 的 `RankStore` 是否每次写入都锁榜行;是的话按 (榜, 代, 来源片) 拆游标与计数行。写入只锁本片,封榜、移除先锁榜行再按片号升序锁全部片行;同一实体跨片靠分数行锁串行,新实体撞唯一键整笔重试。设计见主仓 `leaderboard-system.md`「2026-11-11 同榜写入按来源片并行」 |
-| 写者闸门事务内合并读(第 20 条) | 已落码未编译 | 待做 | 核对 Java 网关 `WriterAuthority` 每笔写事务的闸门语句:条件写命中后不再回读 slot 行;`route_meta` 与注册行合成一条读;判定不变。预切分 `writer_slot` 主仓定为不做,理由见主仓 `db-write-fencing-mysql.md` 那一节的「11-11 定案」 |
-| 资产重投到期索引带 op_id 与 player_id(第 25 条) | 已落码未编译 | 待做 | Java 帮会 / 交易资产重投若也是 `ORDER BY next_attempt_ms, op_id` 加按玩家分片,到期索引同样带上主键与 player_id,使排序走索引顺序、分片条件在索引上判 |
-| 排行榜深名次与深页(第 18 条残余) | 待负责人定 | 待定 | 主仓二选一待定:前 N 名精确、之后显示「N+」(改客户端语义,两版同批改),或 Redis 有序集合投影。定了之后再登记 |
+2026-11-27 已全部对齐：
+- **排行榜同榜写入按来源片并行（第 17 条）**：`game-rank` `rank_tables.proto` / `RankTables` 新增 `RankBoardShardRow`（`rank_board_shard`，主键 `board_id,generation,source_shard`）并在 `RankInputReceiptRow` 增加 `source_shard = 7`；`RankStore.submitShard` 仅读 `rank_board` 不加排他锁，仅锁本片 `rank_board_shard` 与 `rank_score FOR UPDATE`（新实体跨片撞唯一键 1062 自动重试最多 3 次）；`freeze` / `remove` 先锁 `rank_board FOR UPDATE` 再按 `source_shard` 升序锁全部片行；`page` 汇总各片条目数。验证：`game-rank` `RankParallelShardTest` + `RankIndexAndLimitTest` **10/10 PASS**（4 项 TiDB 集成跳过）。
+- **写者闸门事务内合并读（第 20 条）**：已在 `3c8690d9` 落地 `WriterAuthority.verifyMetaAndRegistryMerged`（`route_meta` 与 `writer_registry` 合并单条 `LEFT JOIN`，条件写 `LOCK_TOUCH` 命中后不再回读 `writer_slot`）。验证：`game-common` `WriterGateReadAndMergeTest` **23/23 PASS**。
+- **资产重投到期索引带 `op_id` 与 `player_id`（第 25 条）**：`game-trade`（`trade_tables.proto`）、`game-mail`（`mail_tables.proto`）已与 `game-guild`（`guild_tables.proto`）统一将到期轮询索引升级为 `(status, next_attempt_ms, op_id, player_id)`，排序与 64 片过滤全走索引；编译通过。
+- **排行榜前 N 名精确 / N+（第 18 条）**：已由下方 `1084e91b` 条目完成核销。
 
 ### 2026-11-11 写者名册残余:一代结束即删 slot 行（Java 已对齐；补同日「写者名册按槽位换代」）
 
@@ -1853,16 +1840,13 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 - 存储与索引核对：Java 既有 `GlobalTicketRow` / `GlobalTicketRegionRow` / `GlobalQueueUnitRow` / `GlobalQueueUnitRegionRow` 已含 `preferred_region` 列及以其为前缀的复合索引，子池号按 `MOD(id, K)` 计算不落列。
 - **验证**：`PvpTeamAndHotPoolSegmentTest` **2/2 PASS**。
 
-### 2026-11-12 存档只认地域存档库、资产变动约 1 秒内提交、连接复用不重放会话初始化（主仓已落码，Java 待做；补 11-10「存档库和区脱钩」）
+### 2026-11-12 存档只认地域存档库、资产变动约 1 秒内提交、连接复用不重放会话初始化（Java 已对齐；补 11-10「存档库和区脱钩」）
 
-主仓 commit：存档库部分大多已随 `4edb25640` 进主仓 main，其余在 main 工作区未提交；Java 版本 `0.1.0-SNAPSHOT`，待做。三项都是服务端内部改动，不涉及客户端契约。说明见主仓 `docs/PROGRESS.md` 2026-11-12「存档库和区脱钩 A17c 收尾、资产变动约 1 秒内存盘、写者闸门往返收敛 A18」，设计见主仓 `docs/design/player-data-tidb-scaling-plan.md` §7.2、§4.5 与 `docs/design/player-save-direct-commit.md` §5.3、§9 第 1 条。
-
-- **存档只认地域存档库（主仓 A17c）**：按区分的 `zone_<n>_db` 整族退役。落点编号小于 1000000 一律不派生库名，登记落点、打开存档库、迁移入口都拒绝；存档服务启动时不连任何库，每个存档库第一次被路由指向时才打开并核表；部署侧的库名清单恰好是本地域的 K 个库，出现区库名就拒绝。Java 核对：存档服务有没有「本区库」或按区号派生库名的路径，有就照此去掉；项目未上线，切换时清库，不做迁移。
-- **资产变动约 1 秒内提交**：主仓的货币、物品变动都记流水，流水进玩家的审计队列，在入队这一个收口处请求一次合并存盘（同一玩家 1 秒内合并成一笔），不靠每个玩法各自触发；强化结果、宝宝发放这类不带货币或物品变动的关键结果在领域入口显式请求。Java 核对：本地的货币、物品变动是不是要等定时存盘；是的话在资产变动的统一入口请求合并存盘，不要给每个玩法各加一处。主仓当晚把触发点挪到「记流水时认出单一玩家之后」：流水被拒收（号段没号、单条超限）时资产照样变了，也要请求存盘；Java 照此让存盘请求跟着资产变动走，不跟着流水写没写成走。
-- **连接池复用时不重放会话初始化（主仓 A18）**：主仓原来每次从连接池取连接都重放十几条会话设置并重读写者注册，一笔存盘约 24 次往返里有 14 次花在这里；现在会话初始化只在新建连接时做，写资格由每笔写事务在行锁下核。Java 核对：连接池（HikariCP 的 `connectionInitSql`）本来就只在新建连接时执行初始化；确认没有在每次借出时重放会话设置或重读写者注册的拦截器即可，没有就不用改。主仓同日由另一个会话在此基础上加固（空闲超过 500 毫秒再借出时探活并核会话），HikariCP 自带存活检查，不用另做。
-- **账本、展示读的并发名额按连接池分**：主仓 data_service 原来给这类读发全进程一份名额，存档库的池按库数摊小之后只剩 1 个，一个实例的读全部串行；现在目录每片、存档库每库各一份（池的一半），建角、判死不占名额（主仓 `docs/design/player-save-direct-commit.md` §5.7，`docs/PROGRESS.md` 2026-11-12「账本与展示读的名额改成每个连接池一份」）。Java 核对：有没有一份全局的读并发上限（信号量、限流器）套在多个数据源外面；要给写留连接就按数据源分别限。没有这类上限就不用改。
-- **基础属性只存当前血蓝**：主仓存档里的基础属性原来连力量、护甲、抗性、暴击、速度一起存，这几项只有职业表和属性重算两个来源，存下来就是一份改了职业表也不跟着变的缓存；现在只存当前气血、法力，其余每次加载按职业表写回、速度由重算给出（主仓 `docs/design/player-save-direct-commit.md` §1.1）。Java 核对：存档里是否也存着能由职业表或属性重算得出的基础属性；有就照此改成加载时推导。项目未上线，切换时清库。
-- 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已完整对齐（设计见主仓 `docs/design/player-data-tidb-scaling-plan.md` §7.2/§4.5 与 `docs/design/player-save-direct-commit.md` §1.1/§5.3/§5.7）：
+- **存档只认地域存档库（A17c）与每池读并发名额**：`game-player-store` `RegionalSaveDbRouter` 彻底退役 `< 1_000_000` 及 `zone_<n>_db` 路径，首次路由单飞延迟建池并严格校验 K 库清单，每连接池独立提供 `ReadConcurrencyQuota = max(1, pool/2)`。
+- **资产变动约 1 秒内合并提交**：`game-scene` `AssetAudit.withAssetSaveTrigger` 在统一流水收口处**先**触发玩家存盘请求再委派下游（即使号段耗尽或审计队列拒收，已变动的资产仍触发存盘）；`SceneWorld` 新增 `ASSET_SAVE_COALESCE_MS = 1_000L`、`requestCoalescedAssetSave` 与 `flushDueCoalescedAssetSaves` 并接入 `refreshDueLocations` 与 `SceneNode` 装配。
+- **连接池复用不重放会话初始化（A18）与派生基础属性核对**：`AuthorityConnection.wrap` 仅在新建物理连接时校验一次 `verifyPhysical`，Druid/HikariCP 借出复用不重放会话初始化或写者注册；`PlayerAttributes` 已仅持久化加点与非满血蓝，力量/攻防/速度等基础属性均在加载时按职业表与装备重算。
+- **验证**：`game-player-store` `RegionalSaveDbRouterTest` **1/1 PASS**；`game-scene` `CoalescedAssetSaveTest` **1/1 PASS**。
 
 ### 2026-11-12 无感重启收尾批:gate 排空迁移默认开与新构建优先、托管角色与战斗服排空、服务停机时限(Java 待做)
 

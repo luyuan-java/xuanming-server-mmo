@@ -39,7 +39,7 @@ class CoalescedAssetSaveTest {
         // 1 秒内同一玩家多次资产变动合并成一笔在线存盘，满 1 秒冲刷后提交
         BattleFixture f = new BattleFixture();
         ScenePlayer player = f.enter(11, 1001L);
-        player.wallet().credit(Wallet.GOLD, 100L);
+        player.wallet().add(Wallet.GOLD, 100L);
         f.world.requestCoalescedAssetSave(1001L);
         f.world.requestCoalescedAssetSave(1001L);
         f.world.requestCoalescedAssetSave(1001L);
