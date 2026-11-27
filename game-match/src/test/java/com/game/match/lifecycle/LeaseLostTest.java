@@ -277,7 +277,11 @@ class LeaseLostTest {
                 MatchMethods.DISMISS_JIANGHU_GRUDGE, MatchMethods.NOTIFY_JIANGHU_DUEL_INVITE,
                 MatchMethods.NOTIFY_JIANGHU_DUEL_STATUS,
                 MatchMethods.CREATE_TRIAL_CHALLENGE_CARD, MatchMethods.GET_TRIAL_CHALLENGE_CARD,
-                MatchMethods.GET_SHARED_TRIAL_REPLAY);
+                MatchMethods.GET_SHARED_TRIAL_REPLAY,
+                MatchMethods.LIST_TACTICAL_PUZZLES, MatchMethods.GET_TACTICAL_PUZZLE,
+                MatchMethods.SAVE_TACTICAL_PUZZLE_DRAFT, MatchMethods.DELETE_TACTICAL_PUZZLE,
+                MatchMethods.START_TACTICAL_PUZZLE_BATTLE, MatchMethods.LIKE_TACTICAL_PUZZLE,
+                MatchMethods.GET_TACTICAL_PUZZLE_SOLUTION_REPLAY);
 
         for (String method : unaffected) {
             ClientReply reply = reply(dispatcher.dispatch(call(method, ByteString.EMPTY, 1001)));

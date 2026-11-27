@@ -1201,6 +1201,12 @@ public class PlayerStore {
      */
     @Transactional
     public boolean saveStateHeld(PlayerRow row, PlayerState state) {
+        return saveStateHeld(row, state.toByteArray());
+    }
+
+    /** 在线存盘（已预先序列化状态字节，避免在事务内重复序列化并支持分段耗时统计）。 */
+    @Transactional
+    public boolean saveStateHeld(PlayerRow row, byte[] serializedState) {
         OwnerState owner=lockedOwner(row.getPlayerId());
         if(owner==null || owner.ownerEpoch()!=row.getOwnerEpoch() || owner.released()
                 || mapper.selectBlockingFinalEpoch(row.getPlayerId())!=null) return false;
@@ -1208,7 +1214,7 @@ public class PlayerStore {
         if (mapper.updateStateHeld(row) != 1) {
             return false;
         }
-        mapper.upsertState(row.getPlayerId(), state.toByteArray(), row.getOwnerEpoch(), row.getUpdatedAt());
+        mapper.upsertState(row.getPlayerId(), serializedState, row.getOwnerEpoch(), row.getUpdatedAt());
         return true;
     }
 

@@ -32,7 +32,8 @@ import org.slf4j.LoggerFactory;
 public final class TeamFollowService implements TeamFollow {
 
     private static final Logger log = LoggerFactory.getLogger(TeamFollowService.class);
-    static final double REGROUP_DISTANCE = 8.0;
+    /** 2026-11-19 对齐主仓定案：同场景归队瞬移阈值 24.0 m（原 8.0 m）。 */
+    static final double REGROUP_DISTANCE = 24.0;
 
     /** 生产读取 SQL 权威成员索引与队伍投影；不得阻塞逻辑线程。 */
     @FunctionalInterface
@@ -182,7 +183,8 @@ public final class TeamFollowService implements TeamFollow {
                     return;
                 }
             }
-            if (!world.applyTeamMembership(player, membership.teamId(), membership.epoch())) {
+            boolean isLeader = membership.inTeam() && info.getLeaderId() == player.playerId();
+            if (!world.applyTeamMembership(player, membership.teamId(), membership.epoch(), isLeader)) {
                 metrics.teamFollow(TeamFollowResult.STALE);
                 finish(player, state, false);
                 return;

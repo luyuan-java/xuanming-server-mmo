@@ -731,11 +731,22 @@ public final class GlobalMatchService implements AutoCloseable {
             }
             var fingerprint=FingerprintCheck.check(props.tableFingerprintMode(),fingerprints);
             if(!fingerprint.proceed()){abort(f);return GatherResult.failed(GatherOutcome.FINGERPRINT_MISMATCH,f.getBattleId());}
+            com.game.proto.TacticalPuzzleBattleContext tacticalPuzzleCtx = null;
+            if (!f.getTacticalPuzzleContext().isEmpty()) {
+                tacticalPuzzleCtx = com.game.proto.TacticalPuzzleBattleContext.parseFrom(f.getTacticalPuzzleContext());
+            }
+            long seed = (tacticalPuzzleCtx != null && tacticalPuzzleCtx.getPuzzleId() != 0L)
+                    ? com.game.match.puzzle.TacticalPuzzleSpecValidator.deterministicSeed(
+                            tacticalPuzzleCtx.getPuzzleId(), tacticalPuzzleCtx.getSpecRevision())
+                    : seeds.nextLong();
             var request=CreateBattleRequest.newBuilder().setBattleId(f.getBattleId()).setBattleConfigId(f.getConfigId()).setMatchMode(f.getMode())
-                    .setCreatedAtMs(store.now()).setDeadlineMs(f.getDeadlineMs()).setSeed(seeds.nextLong()).addAllPlayers(snapshots)
+                    .setCreatedAtMs(store.now()).setDeadlineMs(f.getDeadlineMs()).setSeed(seed).addAllPlayers(snapshots)
                     .setTableFingerprint(fingerprint.passThrough()).setRequiredPhysicalRegion(f.getRegion()).setPlacementOperationId(f.getOperationId())
                     .setTargetInstanceId(f.getInstanceId()).setAdmitBeforeMs(Math.min(f.getCreatedMs()+120_000,f.getRetryMs()-1000))
                     .setOutcomeProtocolVersion(1);
+            if (tacticalPuzzleCtx != null) {
+                request.setTacticalPuzzleContext(tacticalPuzzleCtx);
+            }
             if (f.getAiDefenderSnapshotsCount() > 0) {
                 for (var rawAi : f.getAiDefenderSnapshotsList()) {
                     request.addPlayers(BattlePlayerSnapshot.parseFrom(rawAi).toBuilder()
@@ -778,7 +789,9 @@ public final class GlobalMatchService implements AutoCloseable {
                     request.hasCustomDuelRules() ? request.getCustomDuelRules() : null,
                     rankedContext));
             request.setRecordReplay(com.game.match.report.BattleReplayPolicy.decideForBattle(
-                    mode, request.hasTrialContext() ? request.getTrialContext() : null));
+                    mode,
+                    request.hasTrialContext() ? request.getTrialContext() : null,
+                    tacticalPuzzleCtx));
             if(scriptResolver!=null && (rankedContext == null || !rankedContext.getUseFreePreset())) {
                 request.addAllTeamScripts(scriptResolver.resolveForBattle(f.getBattleId(),f.getMode(),f.getConfigId(),snapshots));
             }

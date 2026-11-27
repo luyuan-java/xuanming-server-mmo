@@ -539,7 +539,18 @@ public final class StoragePlayerRepository implements PlayerRepository {
             return switch (kind) {
                 case RELEASE -> admission == null ? store.releaseOwnership(playerId, ownerEpoch)
                         : store.releaseSceneAdmission(admission, expectedAccount, Duration.ofSeconds(3));
-                case PROGRESS -> store.saveStateHeld(toRow(save), save.state());
+                case PROGRESS -> {
+                    long serStart = nanoClock.getAsLong();
+                    PlayerRow row = toRow(save);
+                    byte[] serialized = save.state().toByteArray();
+                    long dbStart = nanoClock.getAsLong();
+                    metrics.saveStage(SceneMetrics.SaveStage.SERIALIZE, dbStart - serStart);
+                    try {
+                        yield store.saveStateHeld(row, serialized);
+                    } finally {
+                        metrics.saveStage(SceneMetrics.SaveStage.DB_WRITE, nanoClock.getAsLong() - dbStart);
+                    }
+                }
             };
         }
 

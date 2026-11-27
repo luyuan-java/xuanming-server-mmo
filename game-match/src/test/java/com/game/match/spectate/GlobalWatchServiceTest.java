@@ -512,6 +512,38 @@ class GlobalWatchServiceTest {
     }
 
     @Test
+    void 大厅档_重放LOBBY结案_Redis已是中继档时直接签票不发battleRPC() {
+        relayOn();
+        tiers.raise(X, com.game.proto.eSpectateTier.SPECTATE_TIER_RELAY, budget());
+        GlobalWatchRequestRow history = GlobalWatchRequestRow.newBuilder().setPlayerId(PLAYER).setRequestId(requestId).setBattleId(X)
+                .setResponsePayload(storedLobby().toByteString()).build();
+        when(authority.begin(any(), any(), any())).thenReturn(new GlobalWatchAuthority.Request(history, true));
+        when(authority.entry(any(), anyLong(), any())).thenReturn(new SpectateStore.Entry(false, Optional.empty()));
+        when(store.read(eq(X), any())).thenReturn(formation(eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC));
+
+        GlobalWatchService.Verdict verdict = service.watch(session(PLAYER), request(), budget());
+
+        assertLobbyTicket(verdict.response(), "inst-a");
+        assertThat(verdict.outcome()).isEqualTo(WatchOutcome.LOBBY);
+        verify(relayDialer, never()).attach(any(), any(), any());
+        verify(authority, never()).respond(any(), anyString(), any(), any());
+        verify(authority, never()).reserve(any(), anyLong(), anyString(), any());
+    }
+
+    @Test
+    void 预算不足不写占用行且不持久化16004回执_同UUID重试可恢复() {
+        admissible();
+        Deadline tight = Deadline.after(com.game.api.match.MatchBudgets.WATCH_ADD_MIN_BUDGET_MS);
+
+        GlobalWatchService.Verdict verdict = service.watch(session(PLAYER), request(), tight);
+
+        assertThat(verdict.response()).isEqualTo(MatchTips.watchRejected(MatchTip.BUSY));
+        verify(authority, never()).reserve(any(), anyLong(), anyString(), any());
+        verify(authority, never()).respond(any(), anyString(), any(), any());
+        assertThat(observers.adds()).isEmpty();
+    }
+
+    @Test
     void 大厅档_重放时已被顶替或已排队或已开战_回当前结论_不签新凭证_不改持久回执() {
         relayOn();
         GlobalWatchRequestRow history = GlobalWatchRequestRow.newBuilder().setPlayerId(PLAYER).setRequestId(requestId).setBattleId(X)

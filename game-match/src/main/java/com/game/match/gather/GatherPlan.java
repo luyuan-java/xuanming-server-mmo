@@ -5,6 +5,8 @@ import com.game.match.ticket.QueueRef;
 import com.game.match.ticket.TicketRef;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.BattlePlayerSnapshot;
+import com.game.proto.RankedMatchContext;
+import com.game.proto.TacticalPuzzleBattleContext;
 import com.game.proto.TournamentBattleContext;
 import com.game.proto.match.MatchMode;
 import java.util.ArrayList;
@@ -35,17 +37,19 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
                          TournamentBattleContext tournamentContext,
                          Map<Long, Integer> memberTeams,
                          List<BattlePlayerSnapshot> aiDefenderSnapshots,
-                         int trialVowMask) {
+                         int trialVowMask,
+                         TacticalPuzzleBattleContext tacticalPuzzleContext,
+                         RankedMatchContext freePresetContext) {
 
     public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
                       FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext) {
-        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, null, Map.of(), List.of(), 0);
+        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, null, Map.of(), List.of(), 0, null, null);
     }
 
     public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
                       FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext,
                       TournamentBattleContext tournamentContext) {
-        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext, Map.of(), List.of(), 0);
+        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext, Map.of(), List.of(), 0, null, null);
     }
 
     public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
@@ -54,7 +58,17 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
                       Map<Long, Integer> memberTeams,
                       List<BattlePlayerSnapshot> aiDefenderSnapshots) {
         this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext,
-                memberTeams, aiDefenderSnapshots, 0);
+                memberTeams, aiDefenderSnapshots, 0, null, null);
+    }
+
+    public GatherPlan(MatchMode mode, int battleConfigId, List<Long> members, Map<Long, String> tickets,
+                      FailPolicy onFail, long presetBattleId, BattleActivityContext activityContext,
+                      TournamentBattleContext tournamentContext,
+                      Map<Long, Integer> memberTeams,
+                      List<BattlePlayerSnapshot> aiDefenderSnapshots,
+                      int trialVowMask) {
+        this(mode, battleConfigId, members, tickets, onFail, presetBattleId, activityContext, tournamentContext,
+                memberTeams, aiDefenderSnapshots, trialVowMask, null, null);
     }
 
     public GatherPlan {
@@ -126,7 +140,18 @@ public record GatherPlan(MatchMode mode, int battleConfigId, List<Long> members,
 
     public static GatherPlan soloPve(int battleConfigId, long playerId, String ticketId, int trialVowMask) {
         return new GatherPlan(MatchMode.MATCH_MODE_PVE_SOLO, battleConfigId, List.of(playerId), Map.of(playerId, ticketId),
-                FailPolicy.DELETE_ALL, 0, null, null, Map.of(), List.of(), trialVowMask);
+                FailPolicy.DELETE_ALL, 0, null, null, Map.of(), List.of(), trialVowMask, null, null);
+    }
+
+    /** 万象残局坊 V1 单人开战：免费公平预设 + 固定种子 + 可选作者自证录播。 */
+    public static GatherPlan tacticalPuzzle(int battleConfigId, long playerId, long presetBattleId,
+                                            TacticalPuzzleBattleContext puzzleContext,
+                                            RankedMatchContext freePresetContext) {
+        Objects.requireNonNull(puzzleContext, "puzzleContext");
+        Objects.requireNonNull(freePresetContext, "freePresetContext");
+        return new GatherPlan(MatchMode.MATCH_MODE_PVE_SOLO, battleConfigId, List.of(playerId), Map.of(),
+                FailPolicy.NO_TICKETS, presetBattleId, null, null, Map.of(), List.of(), 0,
+                puzzleContext, freePresetContext);
     }
 
     /** 切磋：名单 [发起者, 应战者]，不带票据（也不检查两人有没有别的排队票，照搬基线）。 */

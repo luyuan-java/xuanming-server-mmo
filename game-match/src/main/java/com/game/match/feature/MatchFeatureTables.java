@@ -21,6 +21,8 @@ import com.game.match.feature.pb.MatchTournamentPredictionRow;
 import com.game.match.feature.pb.MatchTournamentRewardRow;
 import com.game.match.feature.pb.MatchTournamentSeasonRow;
 import com.game.match.feature.pb.MatchTournamentSquadRow;
+import com.game.match.feature.pb.MatchTacticalPuzzleClearRow;
+import com.game.match.feature.pb.MatchTacticalPuzzleRow;
 import com.game.match.feature.pb.MatchTrialChallengeCardRow;
 import com.game.pbmysql.PbMysql;
 import com.google.protobuf.Message;
@@ -36,6 +38,8 @@ public final class MatchFeatureTables {
     public static final String BATTLE_REPORT = "match_battle_report";
     public static final String PLAYER_BATTLE_REPORT = "match_player_battle_report";
     public static final String TRIAL_CHALLENGE_CARD = "match_trial_challenge_card";
+    public static final String TACTICAL_PUZZLE = "match_tactical_puzzle";
+    public static final String TACTICAL_PUZZLE_CLEAR = "match_tactical_puzzle_clear";
     public static final String BATTLE_SCRIPT = "match_battle_script";
     public static final String BATTLE_SCRIPT_REVIEW = "match_battle_script_review";
     public static final String BATTLE_SCRIPT_LOADOUT = "match_battle_script_loadout";
@@ -60,6 +64,8 @@ public final class MatchFeatureTables {
             MatchBattleReportRow.getDefaultInstance(),
             MatchPlayerBattleReportRow.getDefaultInstance(),
             MatchTrialChallengeCardRow.getDefaultInstance(),
+            MatchTacticalPuzzleRow.getDefaultInstance(),
+            MatchTacticalPuzzleClearRow.getDefaultInstance(),
             MatchBattleScriptRow.getDefaultInstance(),
             MatchBattleScriptReviewRow.getDefaultInstance(),
             MatchBattleScriptLoadoutRow.getDefaultInstance(),

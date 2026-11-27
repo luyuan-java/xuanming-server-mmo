@@ -253,6 +253,8 @@ message GlobalFormationRow {
   repeated bytes ai_defender_snapshots = 21;
   // 五行试炼志 V3：开局冻结的自选限制誓约位掩码（bit0 禁控 bit1 单宝 bit2 无宠 bit3 紧缩回合）。
   uint32 trial_vow_mask = 22;
+  // 万象残局坊 V1：开局冻结的 TacticalPuzzleBattleContext 字节载荷（非残局坊为空）。
+  bytes tactical_puzzle_context = 23;
 }
 message GlobalPreparedEndpoint {
   uint64 player_id = 1;

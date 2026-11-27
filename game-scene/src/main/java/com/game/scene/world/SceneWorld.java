@@ -1820,6 +1820,7 @@ public final class SceneWorld {
             afkPassService.onPlayerLoaded(player);
         }
         syncAccountStage1Tradable(player, clock.epochMillis());
+        teamFollowCoordinator.resendStateAfterEntry(this, player);
         teamFollow.onEnteredScene(this, player);
         // 进场恢复（scene-battle-spec §7.8）：组队跟随之后（同基线组队 3.5 步在战斗 6 步之前）；同 epoch 接替旧实例时沿用它的冻结
         battle.onEntered(this, player, previous != null && previous.ownerEpoch() == epoch ? previous : null);
@@ -1987,6 +1988,7 @@ public final class SceneWorld {
         locations.entered(player);
         log.info("玩家换场景 player={} {} -> {}", Long.toUnsignedString(player.playerId()),
                 Long.toUnsignedString(from.sceneId()), Long.toUnsignedString(target.sceneId()));
+        teamFollowCoordinator.resendStateAfterEntry(this, player);
         teamFollow.onEnteredScene(this, player);
     }
 
@@ -3072,8 +3074,12 @@ public final class SceneWorld {
 
     /** 应用本次进场实例的权威成员关系提示。epoch 只允许前进，同 epoch 不能换队。 */
     public boolean applyTeamMembership(ScenePlayer player, long teamId, long epoch) {
+        return applyTeamMembership(player, teamId, epoch, false);
+    }
+
+    public boolean applyTeamMembership(ScenePlayer player, long teamId, long epoch, boolean isLeader) {
         if (stepping) throw new IllegalStateException("场景帧内不能刷新组队关系");
-        if (playerById(player.playerId()) != player || !player.applyTeamMembership(teamId, epoch)) return false;
+        if (playerById(player.playerId()) != player || !player.applyTeamMembership(teamId, epoch, isLeader)) return false;
         ViewChanges changed = new ViewChanges();
         player.scene().refreshTeamView(player, changed);
         emitViewChanges(changed);
@@ -3454,6 +3460,7 @@ public final class SceneWorld {
         if (intervalSeconds <= 0) {
             throw new IllegalArgumentException("存盘周期必须为正: " + intervalSeconds);
         }
+        long cbStart = clock.nanoTime();
         long slot = saveSecond++ % intervalSeconds;
         if (periodicSaveStopped) {
             return 0;
@@ -3476,6 +3483,7 @@ public final class SceneWorld {
                 }
             }
         }
+        metrics.periodicSaveCallback(clock.nanoTime() - cbStart);
         return submitted;
     }
 
@@ -3539,8 +3547,13 @@ public final class SceneWorld {
             // 冻结中：交出事务写的就是冻结快照，同一玩家不再提交第二笔写
             return SaveRequest.IN_FLIGHT;
         }
+        long t0 = clock.nanoTime();
         PlayerSave snapshot = player.toSave();
-        if (snapshot.equals(player.lastPersisted())) {
+        long t1 = clock.nanoTime();
+        metrics.saveStage(SceneMetrics.SaveStage.ASSEMBLE, t1 - t0);
+        boolean unchanged = snapshot.equals(player.lastPersisted());
+        metrics.saveStage(SceneMetrics.SaveStage.DIRTY_CHECK, clock.nanoTime() - t1);
+        if (unchanged) {
             return SaveRequest.UNCHANGED;
         }
         if (!repository.acceptsProgress()) {
@@ -4000,6 +4013,54 @@ public final class SceneWorld {
         broadcast(recipients, push(ids.notifyActorMove(), follower.toActorMove(clock.epochMillis())));
     }
 
+    /**
+     * 同一队形同一 tick 的移动合并广播（对齐主仓 2026-11-12 组队跟随收尾）：
+     * 按每个接收者需要收到的队员子集分组，1 人发 133 {@code ActorMoveS2C}，多人按队形顺序合并为 1 条 135 {@code ActorMoveListS2C}；
+     * 离线托管无活会话的接收者静默跳过。
+     */
+    public void broadcastTeamFollowMoves(List<ScenePlayer> followers) {
+        if (followers.isEmpty()) {
+            return;
+        }
+        if (followers.size() == 1) {
+            broadcastTeamFollowMove(followers.getFirst());
+            return;
+        }
+        long nowMs = clock.epochMillis();
+        List<com.game.proto.ActorMoveS2C> moves = new ArrayList<>(followers.size());
+        Map<ScenePlayer, List<Integer>> byRecipient = new LinkedHashMap<>();
+        for (int i = 0; i < followers.size(); i++) {
+            ScenePlayer f = followers.get(i);
+            moves.add(f.toActorMove(nowMs));
+            if (f.session() != null) {
+                byRecipient.computeIfAbsent(f, k -> new ArrayList<>(followers.size())).add(i);
+            }
+            for (ScenePlayer watcher : f.scene().watchers(f)) {
+                if (watcher.session() != null) {
+                    byRecipient.computeIfAbsent(watcher, k -> new ArrayList<>(followers.size())).add(i);
+                }
+            }
+        }
+        if (byRecipient.isEmpty()) {
+            return;
+        }
+        // 按接收到的下标子集再归并链路广播，同一组观众共享一次编码与发帧
+        Map<List<Integer>, List<ScenePlayer>> groups = new LinkedHashMap<>();
+        byRecipient.forEach((recipient, indices) ->
+                groups.computeIfAbsent(indices, k -> new ArrayList<>()).add(recipient));
+        groups.forEach((indices, recipients) -> {
+            if (indices.size() == 1) {
+                broadcast(recipients, push(ids.notifyActorMove(), moves.get(indices.getFirst())));
+            } else {
+                ActorMoveListS2C.Builder batch = ActorMoveListS2C.newBuilder();
+                for (int idx : indices) {
+                    batch.addMoves(moves.get(idx));
+                }
+                broadcast(recipients, push(ids.notifyActorMoveList(), batch.build()));
+            }
+        });
+    }
+
     private void enterConnectionLostHold(ScenePlayer player, SessionKey lostSession) {
         long nowSec = Math.floorDiv(clock.epochMillis(), 1000L);
         if (lostSession != null) {
@@ -4086,7 +4147,8 @@ public final class SceneWorld {
                     hold.setLastProjectionRefreshSec(nowSec);
                     afkPassService.refreshProjection(player);
                 }
-                if (!teamFollowCoordinator.isDriven(player)
+                if (!player.confirmedTeamLeader()
+                        && !teamFollowCoordinator.isDriven(player)
                         && teamFollowCoordinator.wantsFollow(player.playerId())
                         && ConnectionLostHold.isHostedFollowRecheckDue(player.playerId(), nowSec)) {
                     teamFollow.onRefresh(this, player, true);

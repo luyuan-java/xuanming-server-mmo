@@ -47,15 +47,14 @@ import java.util.Set;
  */
 final class ViewIndex {
 
-    /** 视野半径（基线 {@code ViewRadius.radius = 10}，进场后写死，不来自配置表）。三维距离，含等号。 */
-    static final double VIEW_RADIUS = 10.0;
-    /** 离开半径：距离超过它才出视野（滞回带下沿，契约文档 §9「进 ≤ 10 m，出 ≥ 20 m」）。 */
-    static final double LEAVE_RADIUS = 20.0;
+    /** 视野半径（2026-11-19 对齐主仓 {@code view.h}：50 m，原 10 m；三维距离，含等号）。 */
+    static final double VIEW_RADIUS = 50.0;
+    /** 离开半径：距离超过它才出视野（滞回带 = 视野半径 × 2，100 m，原 20 m）。 */
+    static final double LEAVE_RADIUS = 2 * VIEW_RADIUS;
     /**
-     * 格子边长。必须不小于 {@link #VIEW_RADIUS}，3×3 邻域才一定覆盖视野圆；取 2 倍而不是恰好相等，是为了远离
-     * 「两人恰好相距 10 m、除法舍入把其中一人分到隔一格」的浮点边界。与基线六边形格同尺度（size = 20 m）。
+     * 格子边长（50 m，原 20 m）：不小于 {@link #VIEW_RADIUS}，3×3 邻域覆盖任意三维距离 ≤ 50 m 的点。
      */
-    static final double CELL_SIZE = 2 * VIEW_RADIUS;
+    static final double CELL_SIZE = VIEW_RADIUS;
     /** 兴趣列表容量（基线 {@code kAoiListCapacityDefault}；生产数据里没人挂容量 / 压力组件，实际就是 100）。 */
     static final int DEFAULT_CAPACITY = 100;
     /** 移动中的人相对上次重判的位置累计位移（米，三维）达到它才重判（见类注释「重判」）。 */

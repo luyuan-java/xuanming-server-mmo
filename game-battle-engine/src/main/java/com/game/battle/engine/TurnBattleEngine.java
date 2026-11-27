@@ -26,6 +26,9 @@ import com.game.proto.BattleTacticalPing;
 import com.game.proto.CreateBattleRequest;
 import com.game.proto.FestivalBeastBattleContext;
 import com.game.proto.SeasonSealEffect;
+import com.game.proto.TacticalPuzzleBattleContext;
+import com.game.proto.TacticalPuzzleEnemySpec;
+import com.game.proto.TacticalPuzzleSpec;
 import com.game.proto.TurnResultS2C;
 import com.game.proto.eBattleActionType;
 import com.game.proto.eBattleActivityKind;
@@ -123,13 +126,17 @@ public final class TurnBattleEngine {
             new TreeMap<Long, BattleTacticalPing>(Long::compareUnsigned)
     };
     private final NavigableMap<Long, Integer> roundPingCountByPlayer = new TreeMap<>(Long::compareUnsigned);
-    /** 论剑 V3 战前明牌变阵（及每队 3 禁招）状态（纯确定性，零墙钟）。 */
+    /** 论剑 V3 战前明牌变阵（及每队 3 禁招 + V2 1 护招）状态（纯确定性，零墙钟）。 */
     private boolean prepActive;
     private int prepSkillBanSlotsPerTeam;
+    private int prepSkillProtectSlotsPerTeam;
     private final List<Integer> banCandidateSkillIds = new ArrayList<>();
     private final TreeSet<Integer> banCandidateSkillSet = new TreeSet<>(Integer::compareUnsigned);
     private final List<Integer> teamABannedSkillIds = new ArrayList<>();
     private final List<Integer> teamBBannedSkillIds = new ArrayList<>();
+    private int teamAProtectedSkillId;
+    private int teamBProtectedSkillId;
+    private final List<Integer> counteredBanSkillIds = new ArrayList<>();
     private final List<Integer> bannedSkillIds = new ArrayList<>();
     private long nextPetActorIndex;
     private final NavigableMap<Long, PrepPlayerOptions> prepOptionsByPlayer = new TreeMap<>(Long::compareUnsigned);
@@ -137,6 +144,8 @@ public final class TurnBattleEngine {
     private final NavigableMap<Long, List<BattlePetSnapshot>> validatedPetsByPlayer = new TreeMap<>(Long::compareUnsigned);
     private final NavigableMap<Long, List<BattlePetSnapshot>> standbyPetPoolByPlayer = new TreeMap<>(Long::compareUnsigned);
     private final NavigableMap<Long, Integer> summonPetRemainingByPlayer = new TreeMap<>(Long::compareUnsigned);
+    /** 万象残局坊 V1：开局冻结的残局上下文（非残局坊为 null）。 */
+    private TacticalPuzzleBattleContext tacticalPuzzleContext;
 
     private static final class PrepPlayerOptions {
         int teamIndex;
@@ -149,6 +158,7 @@ public final class TurnBattleEngine {
         final List<SeasonSealEffect> availableSeals = new ArrayList<>();
         final List<BattlePetSnapshot> availablePets = new ArrayList<>();
         final List<Integer> nominatedBanSkillIds = new ArrayList<>();
+        int nominatedProtectSkillId;
     }
 
     public record SurrenderVoteResult(int errorTip, BattleSurrenderVoteState voteState) {
@@ -346,6 +356,29 @@ public final class TurnBattleEngine {
             }
         }
 
+        // 万象残局坊（Dungeon 314）开局门禁：必须携带合法 TacticalPuzzleBattleContext 且为单人免费公平预设局。
+        boolean isWorkshopDungeon = request.getBattleConfigId() == TacticalPuzzleRules.WORKSHOP_DUNGEON_ID;
+        if (request.hasTacticalPuzzleContext() || isWorkshopDungeon) {
+            boolean hasTowerReq = request.getPlayersList().stream()
+                    .anyMatch(p -> p.hasTowerContext() && p.getTowerContext().getFloor() != 0);
+            if (!request.hasTacticalPuzzleContext()
+                    || !isWorkshopDungeon
+                    || request.getMatchMode() != BattleConstants.MATCH_MODE_PVE_SOLO
+                    || request.getPlayersCount() != 1
+                    || bossTrialKind != BattleConstants.BOSS_TRIAL_KIND_TACTICAL_PUZZLE
+                    || !engine.usesFreePreset()
+                    || hasTowerReq
+                    || request.hasCustomDuelRules()
+                    || requestedVowMask != 0
+                    || !TacticalPuzzleRules.isValidContext(request.getTacticalPuzzleContext())) {
+                return new BattleStart.Rejected(InitRejection.INVALID_PLAYER,
+                        "万象残局坊开局上下文非法: battle_id=" + Long.toUnsignedString(request.getBattleId())
+                                + " config_id=" + Integer.toUnsignedString(request.getBattleConfigId()));
+            }
+            engine.tacticalPuzzleContext = request.getTacticalPuzzleContext();
+            engine.maxRounds = engine.tacticalPuzzleContext.getSpec().getRoundLimit();
+        }
+
         engine.ctx.setMaxRounds(engine.maxRounds);
         engine.ctx.encounter.configure(bossTrialKind, battleDifficulty);
         int weeklyAffixId = BossTrialWeeklyAffixRules.resolveForBattle(
@@ -407,6 +440,9 @@ public final class TurnBattleEngine {
         }
         engine.bindDungeonMonsterAis(monsterAiProfiles);
         engine.ctx.encounter.initSpecialState(request.getMatchMode(), engine.maxRounds);
+        if (engine.tacticalPuzzleContext != null) {
+            engine.applyTacticalPuzzleSetup();
+        }
         // 锦标赛 V2 五行灵脉初始化：设置生效灵脉；土厚灵脉 8% 护盾在非变阵期立刻赋予，变阵期延后到 finalizePrepPhase 锁阵后统一赋予。
         if (request.hasTournamentContext()) {
             var leyline = request.getTournamentContext().getLeylineElement();
@@ -415,13 +451,14 @@ public final class TurnBattleEngine {
                 engine.applyTournamentEarthShieldIfActive();
             }
         }
-        // 赛季全员对称周环境词缀：未启用锦标赛五行灵脉、非瑞兽迎春/五行幻境爬塔且全体玩家快照一致携带 1..4 时激活，分歧 fail-closed 退回 0。
+        // 赛季全员对称周环境词缀：未启用锦标赛五行灵脉、非瑞兽迎春/五行幻境爬塔/万象残局坊且全体玩家快照一致携带 1..4 时激活，分歧 fail-closed 退回 0。
         boolean hasFestival = request.hasActivityContext()
                 && request.getActivityContext().getKind() == eBattleActivityKind.BATTLE_ACTIVITY_KIND_FESTIVAL_BEAST;
         boolean hasTower = request.getPlayersList().stream()
                 .anyMatch(p -> p.hasTowerContext() && p.getTowerContext().getFloor() != 0);
         if (engine.ctx.activeTournamentLeyline() == com.game.proto.TournamentLeylineElement.TOURNAMENT_LEYLINE_UNSPECIFIED
                 && !hasFestival && !hasTower && !request.hasCustomDuelRules()
+                && engine.tacticalPuzzleContext == null
                 && request.getPlayersCount() > 0) {
             int unanimous = SeasonRules.WEEKLY_AFFIX_NONE;
             boolean consistent = true;
@@ -674,10 +711,14 @@ public final class TurnBattleEngine {
     private BattleStart.Rejected initTacticalPrep() {
         prepActive = false;
         prepSkillBanSlotsPerTeam = 0;
+        prepSkillProtectSlotsPerTeam = 0;
         banCandidateSkillIds.clear();
         banCandidateSkillSet.clear();
         teamABannedSkillIds.clear();
         teamBBannedSkillIds.clear();
+        teamAProtectedSkillId = 0;
+        teamBProtectedSkillId = 0;
+        counteredBanSkillIds.clear();
         bannedSkillIds.clear();
         ctx.setBannedSkills(List.of());
         prepOptionsByPlayer.clear();
@@ -755,6 +796,7 @@ public final class TurnBattleEngine {
             banCandidateSkillIds.sort(Integer::compareUnsigned);
             if (!banCandidateSkillIds.isEmpty()) {
                 prepSkillBanSlotsPerTeam = requestedBanSlots;
+                prepSkillProtectSlotsPerTeam = BattleConstants.PREP_SKILL_PROTECT_SLOTS_PER_TEAM;
             }
         }
 
@@ -851,6 +893,7 @@ public final class TurnBattleEngine {
             prepActive = true;
         } else {
             prepSkillBanSlotsPerTeam = 0;
+            prepSkillProtectSlotsPerTeam = 0;
             banCandidateSkillIds.clear();
             banCandidateSkillSet.clear();
             prepOptionsByPlayer.clear();
@@ -885,6 +928,28 @@ public final class TurnBattleEngine {
             }
         }
         ctx.encounter.setInitialAttackerHumanCount(attackerCount);
+        if (tacticalPuzzleContext != null) {
+            TacticalPuzzleSpec spec = tacticalPuzzleContext.getSpec();
+            int monsterIndex = 0;
+            for (TacticalPuzzleEnemySpec enemy : spec.getEnemiesList()) {
+                appendMonsterActor(enemy.getMonsterTableId(), monsterIndex, referenceLevel);
+                BattleUnit spawned = ctx.units().getLast();
+                long baseMaxHp = spawned.state().getMaxHealth();
+                long initHp = TacticalPuzzleRules.scalePct(baseMaxHp, enemy.getInitialHpPct());
+                if (Long.compareUnsigned(initHp, baseMaxHp) > 0) {
+                    spawned.state().setMaxHealth(initHp);
+                }
+                spawned.state().getAttributesBuilder().setHealth(initHp);
+                long baseSpeed = spawned.state().getAttributes().getSpeed();
+                spawned.state().getAttributesBuilder().setSpeed(
+                        TacticalPuzzleRules.applySpeedDelta(baseSpeed, enemy.getSpeedDeltaPct()));
+                spawned.state().setCapturePetTableId(0);
+                monsterIndex++;
+            }
+            return monsterIndex > 0
+                    ? null
+                    : new BattleStart.Rejected(InitRejection.INVALID_PLAYER, "万象残局坊敌方单位为空");
+        }
         boolean isBossTrialOrRescue = ctx.encounter.isBossTrialOrRescue();
         List<Integer> monsterIds = new ArrayList<>(ctx.data().dungeonMonsterIds(request.getBattleConfigId()));
         if (monsterIds.isEmpty()) {
@@ -1367,6 +1432,45 @@ public final class TurnBattleEngine {
         return out;
     }
 
+    /** 确定性汇总单队有效护招（与 C++ AggregateTeamProtect 一致：票数降序→队长提名→SplitMix64(seed^SALT^sid)→sid）。 */
+    private int aggregateTeamProtect(int teamIndex) {
+        if (prepSkillProtectSlotsPerTeam <= 0) {
+            return 0;
+        }
+        Map<Integer, BanVoteEntry> tally = new java.util.HashMap<>();
+        for (PrepPlayerOptions opt : prepOptionsByPlayer.values()) {
+            if (opt.aiControlled || opt.teamIndex != teamIndex || opt.nominatedProtectSkillId == 0) {
+                continue;
+            }
+            BanVoteEntry entry = tally.computeIfAbsent(opt.nominatedProtectSkillId, BanVoteEntry::new);
+            entry.votes++;
+            if (opt.isTeamCaptain) {
+                entry.nominatedByCaptain = true;
+            }
+        }
+        if (tally.isEmpty()) {
+            return 0;
+        }
+        List<BanVoteEntry> ordered = new ArrayList<>(tally.values());
+        long seed = request.getSeed();
+        ordered.sort((lhs, rhs) -> {
+            if (lhs.votes != rhs.votes) {
+                return Integer.compare(rhs.votes, lhs.votes);
+            }
+            if (lhs.nominatedByCaptain != rhs.nominatedByCaptain) {
+                return lhs.nominatedByCaptain ? -1 : 1;
+            }
+            long lh = splitMix64(seed ^ BattleConstants.PREP_PROTECT_HASH_SALT ^ Integer.toUnsignedLong(lhs.skillId));
+            long rh = splitMix64(seed ^ BattleConstants.PREP_PROTECT_HASH_SALT ^ Integer.toUnsignedLong(rhs.skillId));
+            int hc = Long.compareUnsigned(lh, rh);
+            if (hc != 0) {
+                return hc;
+            }
+            return Integer.compareUnsigned(lhs.skillId, rhs.skillId);
+        });
+        return ordered.get(0).skillId;
+    }
+
     /** 所有真人参战者是否已锁定战前变阵（AI 托管位默认锁定）。 */
     public boolean allPrepPlayersReady() {
         if (!prepActive) {
@@ -1380,14 +1484,21 @@ public final class TurnBattleEngine {
         return true;
     }
 
-    /** 论剑 V3 战前变阵提交兼容重载（不含禁招提名）。 */
+    /** 论剑 V3 战前变阵提交兼容重载（不含禁招与护招提名）。 */
     public UpdatePrepResult updateBattlePrep(long playerId, int selectedSealId, long selectedPetId, boolean ready) {
-        return updateBattlePrep(playerId, selectedSealId, selectedPetId, ready, false, List.of());
+        return updateBattlePrep(playerId, selectedSealId, selectedPetId, ready, false, List.of(), false, 0);
     }
 
-    /** 论剑 V3 战前变阵提交（换赛季印 / 换首发灵宠 / 每队 3 禁招提名 / 锁定），对齐 C++ {@code UpdateBattlePrep}。 */
+    /** 论剑 V3 战前变阵提交兼容重载（不含护招提名）。 */
     public UpdatePrepResult updateBattlePrep(long playerId, int selectedSealId, long selectedPetId, boolean ready,
                                              boolean updateBannedSkills, List<Integer> bannedSkillIdsInput) {
+        return updateBattlePrep(playerId, selectedSealId, selectedPetId, ready, updateBannedSkills, bannedSkillIdsInput, false, 0);
+    }
+
+    /** 论剑 V3+V2 战前变阵提交（换赛季印 / 换首发灵宠 / 每队 3 禁 + 1 保提名 / 锁定），对齐 C++ {@code UpdateBattlePrep}。 */
+    public UpdatePrepResult updateBattlePrep(long playerId, int selectedSealId, long selectedPetId, boolean ready,
+                                             boolean updateBannedSkills, List<Integer> bannedSkillIdsInput,
+                                             boolean updateProtectedSkill, int protectedSkillIdInput) {
         if (outcome != eBattleOutcome.BATTLE_OUTCOME_ONGOING || !prepActive) {
             return new UpdatePrepResult(ActionChecks.FEATURE_UNAVAILABLE, BattlePrepState.getDefaultInstance());
         }
@@ -1400,7 +1511,8 @@ public final class TurnBattleEngine {
             boolean sealChanged = selectedSealId != 0 && selectedSealId != opt.selectedSealId;
             boolean petChanged = selectedPetId != 0L && selectedPetId != opt.selectedPetId;
             boolean banChanged = updateBannedSkills && !banInput.equals(opt.nominatedBanSkillIds);
-            if (sealChanged || petChanged || banChanged) {
+            boolean protectChanged = updateProtectedSkill && protectedSkillIdInput != opt.nominatedProtectSkillId;
+            if (sealChanged || petChanged || banChanged || protectChanged) {
                 return new UpdatePrepResult(ActionChecks.FEATURE_UNAVAILABLE, BattlePrepState.getDefaultInstance());
             }
             return new UpdatePrepResult(0, buildPrepStateForViewer(playerId, 0L));
@@ -1446,6 +1558,20 @@ public final class TurnBattleEngine {
                 }
             }
         }
+        if (updateProtectedSkill) {
+            if (prepSkillProtectSlotsPerTeam == 0) {
+                if (protectedSkillIdInput != 0) {
+                    return new UpdatePrepResult(ActionChecks.FEATURE_UNAVAILABLE, BattlePrepState.getDefaultInstance());
+                }
+            } else if (protectedSkillIdInput != 0 && !banCandidateSkillSet.contains(protectedSkillIdInput)) {
+                return new UpdatePrepResult(ActionChecks.INVALID_PARAMETER, BattlePrepState.getDefaultInstance());
+            }
+        }
+        List<Integer> resultingBans = updateBannedSkills ? banInput : opt.nominatedBanSkillIds;
+        int resultingProtect = updateProtectedSkill ? protectedSkillIdInput : opt.nominatedProtectSkillId;
+        if (resultingProtect != 0 && resultingBans.contains(resultingProtect)) {
+            return new UpdatePrepResult(ActionChecks.INVALID_PARAMETER, BattlePrepState.getDefaultInstance());
+        }
         if (selectedSealId != 0) {
             opt.selectedSealId = selectedSealId;
         }
@@ -1455,6 +1581,9 @@ public final class TurnBattleEngine {
         if (updateBannedSkills) {
             opt.nominatedBanSkillIds.clear();
             opt.nominatedBanSkillIds.addAll(banInput);
+        }
+        if (updateProtectedSkill) {
+            opt.nominatedProtectSkillId = protectedSkillIdInput;
         }
         if (ready) {
             opt.ready = true;
@@ -1549,11 +1678,29 @@ public final class TurnBattleEngine {
             teamABannedSkillIds.addAll(aggregateTeamBans(0));
             teamBBannedSkillIds.clear();
             teamBBannedSkillIds.addAll(aggregateTeamBans(1));
+            teamAProtectedSkillId = prepSkillProtectSlotsPerTeam > 0 ? aggregateTeamProtect(0) : 0;
+            teamBProtectedSkillId = prepSkillProtectSlotsPerTeam > 0 ? aggregateTeamProtect(1) : 0;
             TreeSet<Integer> merged = new TreeSet<>(Integer::compareUnsigned);
-            merged.addAll(teamABannedSkillIds);
-            merged.addAll(teamBBannedSkillIds);
+            TreeSet<Integer> countered = new TreeSet<>(Integer::compareUnsigned);
+            for (int sid : teamABannedSkillIds) {
+                if (teamBProtectedSkillId != 0 && sid == teamBProtectedSkillId) {
+                    countered.add(sid);
+                } else {
+                    merged.add(sid);
+                }
+            }
+            for (int sid : teamBBannedSkillIds) {
+                if (teamAProtectedSkillId != 0 && sid == teamAProtectedSkillId) {
+                    countered.add(sid);
+                } else {
+                    merged.add(sid);
+                }
+            }
+            countered.removeAll(merged);
             bannedSkillIds.clear();
             bannedSkillIds.addAll(merged);
+            counteredBanSkillIds.clear();
+            counteredBanSkillIds.addAll(countered);
             ctx.setBannedSkills(bannedSkillIds);
         }
 
@@ -1849,7 +1996,8 @@ public final class TurnBattleEngine {
                 .setActive(true)
                 .setDeadlineMs(deadlineMs)
                 .setDurationSeconds(prepDurationSeconds())
-                .setSkillBanSlotsPerTeam(prepSkillBanSlotsPerTeam);
+                .setSkillBanSlotsPerTeam(prepSkillBanSlotsPerTeam)
+                .setSkillProtectSlotsPerTeam(prepSkillProtectSlotsPerTeam);
         if (viewerPlayerId == 0L) {
             return out.build();
         }
@@ -1872,20 +2020,31 @@ public final class TurnBattleEngine {
         if (prepSkillBanSlotsPerTeam > 0) {
             out.addAllTeamEffectiveBanSkillIds(aggregateTeamBans(selfOpt.teamIndex));
         }
-        // 同队互见、对手严密盲选：仅投影与收信者同 teamIndex 的成员状态。
+        if (prepSkillProtectSlotsPerTeam > 0) {
+            int effectiveProtect = aggregateTeamProtect(selfOpt.teamIndex);
+            if (effectiveProtect != 0) {
+                out.setTeamEffectiveProtectedSkillId(effectiveProtect);
+            }
+        }
+        // 同队互见、对手严密盲选：仅投影与收信者同 teamIndex 的成员状态与队友携带技能。
+        TreeSet<Integer> teammateEquipped = new TreeSet<>(Integer::compareUnsigned);
         for (Map.Entry<Long, PrepPlayerOptions> entry : prepOptionsByPlayer.entrySet()) {
+            long memberId = entry.getKey();
             PrepPlayerOptions opt = entry.getValue();
             if (opt.teamIndex != selfOpt.teamIndex) {
                 continue;
             }
             BattlePrepPlayerState.Builder ps = out.addTeamStatesBuilder()
-                    .setPlayerId(entry.getKey())
+                    .setPlayerId(memberId)
                     .setTeamIndex(opt.teamIndex)
                     .setSelectedSealId(opt.selectedSealId)
                     .setSelectedPetId(opt.selectedPetId)
                     .setReady(opt.ready);
             if (prepSkillBanSlotsPerTeam > 0) {
                 ps.addAllNominatedBanSkillIds(opt.nominatedBanSkillIds);
+            }
+            if (prepSkillProtectSlotsPerTeam > 0 && opt.nominatedProtectSkillId != 0) {
+                ps.setNominatedProtectSkillId(opt.nominatedProtectSkillId);
             }
             if (opt.selectedPetId != 0L) {
                 for (BattlePetSnapshot pet : opt.availablePets) {
@@ -1896,6 +2055,44 @@ public final class TurnBattleEngine {
                     }
                 }
             }
+            if (memberId != viewerPlayerId && !banCandidateSkillSet.isEmpty()) {
+                BattleUnit memberActor = ctx.findActor(memberId);
+                if (memberActor != null) {
+                    for (int sid : memberActor.state().getSkillTableIdsList()) {
+                        if (banCandidateSkillSet.contains(sid)) {
+                            teammateEquipped.add(sid);
+                        }
+                    }
+                }
+                boolean petHandled = false;
+                if (opt.selectedPetId != 0L) {
+                    for (BattlePetSnapshot pet : opt.availablePets) {
+                        if (pet.getPetId() == opt.selectedPetId) {
+                            for (int sid : pet.getSkillTableIdsList()) {
+                                if (banCandidateSkillSet.contains(sid)) {
+                                    teammateEquipped.add(sid);
+                                }
+                            }
+                            petHandled = true;
+                            break;
+                        }
+                    }
+                }
+                if (!petHandled) {
+                    for (BattleUnit unit : ctx.units()) {
+                        if (unit.isPet() && unit.ownerPlayerId() == memberId) {
+                            for (int sid : unit.state().getSkillTableIdsList()) {
+                                if (banCandidateSkillSet.contains(sid)) {
+                                    teammateEquipped.add(sid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (!teammateEquipped.isEmpty()) {
+            out.addAllTeammateEquippedSkillIds(teammateEquipped);
         }
         // 论剑 V6 宿敌交手提示：仅投影本人视角的敌方宿敌，观众与第三方清空。
         for (com.game.proto.RankedRivalryEncounter enc : request.getRankedContext().getRivalryEncountersList()) {
@@ -2985,12 +3182,16 @@ public final class TurnBattleEngine {
         } else if (sideBWiped) {
             outcome = eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN;
         } else if (Integer.compareUnsigned(ctx.roundIndex(), maxRounds) >= 0) {
-            boolean drawOnCap = isRankedBattle()
-                    || BattleConstants.isGuildWarMatchMode(request.getMatchMode())
-                    || isJianghuDuelBattle()
-                    || ctx.encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_POLARITY_5V5
-                    || request.getMatchMode() == BattleConstants.MATCH_MODE_POLARITY_5V5;
-            outcome = drawOnCap ? eBattleOutcome.BATTLE_OUTCOME_DRAW : eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
+            if (tacticalPuzzleContext != null) {
+                outcome = eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
+            } else {
+                boolean drawOnCap = isRankedBattle()
+                        || BattleConstants.isGuildWarMatchMode(request.getMatchMode())
+                        || isJianghuDuelBattle()
+                        || ctx.encounter.bossTrialKind() == BattleConstants.BOSS_TRIAL_KIND_POLARITY_5V5
+                        || request.getMatchMode() == BattleConstants.MATCH_MODE_POLARITY_5V5;
+                outcome = drawOnCap ? eBattleOutcome.BATTLE_OUTCOME_DRAW : eBattleOutcome.BATTLE_OUTCOME_SIDE_B_WIN;
+            }
         }
     }
 
@@ -3004,7 +3205,7 @@ public final class TurnBattleEngine {
      */
     private void rollDrops() {
         if (outcome != eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN || ctx.defeatedMonsters().isEmpty()
-                || isFestivalBeastBattle()) {
+                || isFestivalBeastBattle() || tacticalPuzzleContext != null) {
             return;
         }
         for (Map.Entry<Long, BattleSettlementData.Builder> playerSettlement : ctx.settlements().entrySet()) {
@@ -3251,6 +3452,9 @@ public final class TurnBattleEngine {
             settlement.setExpGain(expSum).setGoldGain(goldSum);
         }
         ctx.encounter.populateTrialFacts(request, actor, playerId, outcome, usesFreePreset(), settlement);
+        if (tacticalPuzzleContext != null) {
+            settlement.setTacticalPuzzleContext(tacticalPuzzleContext);
+        }
         return settlement.build();
     }
 
@@ -3281,6 +3485,13 @@ public final class TurnBattleEngine {
         if (request.hasTournamentContext() && request.getTournamentContext().getMatchId() != 0L) {
             state.setTournamentContext(request.getTournamentContext());
         }
+        if (tacticalPuzzleContext != null) {
+            state.setTacticalPuzzleContext(tacticalPuzzleContext);
+            int puzzleFormationId = tacticalPuzzleContext.getSpec().getFormationId();
+            if (puzzleFormationId != 0) {
+                state.setTeamAFormationId(puzzleFormationId);
+            }
+        }
         if (ctx.activeSeasonWeeklyAffixId() != SeasonRules.WEEKLY_AFFIX_NONE) {
             state.setSeasonWeeklyAffixId(ctx.activeSeasonWeeklyAffixId());
         }
@@ -3298,12 +3509,22 @@ public final class TurnBattleEngine {
         if (!teamBBannedSkillIds.isEmpty()) {
             state.addAllTeamBBannedSkillIds(teamBBannedSkillIds);
         }
+        if (teamAProtectedSkillId != 0) {
+            state.setTeamAProtectedSkillId(teamAProtectedSkillId);
+        }
+        if (teamBProtectedSkillId != 0) {
+            state.setTeamBProtectedSkillId(teamBProtectedSkillId);
+        }
+        if (!counteredBanSkillIds.isEmpty()) {
+            state.addAllCounteredBanSkillIds(counteredBanSkillIds);
+        }
         if (outcome == eBattleOutcome.BATTLE_OUTCOME_ONGOING) {
             if (prepActive) {
                 state.getPrepStateBuilder()
                         .setActive(true)
                         .setDurationSeconds(prepDurationSeconds())
-                        .setSkillBanSlotsPerTeam(prepSkillBanSlotsPerTeam);
+                        .setSkillBanSlotsPerTeam(prepSkillBanSlotsPerTeam)
+                        .setSkillProtectSlotsPerTeam(prepSkillProtectSlotsPerTeam);
             } else {
                 for (BattleUnit unit : ctx.units()) {
                     if ((!unit.isPlayer() && !unit.isPet()) || !unit.isActive()) {
@@ -3343,6 +3564,83 @@ public final class TurnBattleEngine {
     /** 本局冻结的首领试炼周常五行词缀（0=无/非首领试炼，1金/2木/3水/4火/5土）。 */
     public int bossWeeklyAffixId() {
         return ctx.encounter.bossWeeklyAffixId();
+    }
+
+    /** 万象残局坊 V1：按冻结题面缩放我方血蓝并挂载开局护盾、负面状态及敌方护盾/增益。 */
+    private void applyTacticalPuzzleSetup() {
+        TacticalPuzzleSpec spec = tacticalPuzzleContext.getSpec();
+        long firstEnemyId = 0L;
+        for (BattleUnit unit : ctx.units()) {
+            if (unit.teamIndex() == 1 && unit.isMonster()) {
+                firstEnemyId = unit.actorId();
+                break;
+            }
+        }
+        int enemyIdx = 0;
+        for (BattleUnit unit : ctx.units()) {
+            if (unit.teamIndex() == 0 && (unit.isPlayer() || unit.isPet())) {
+                long hp = TacticalPuzzleRules.scalePct(unit.maxHealth(), spec.getPlayerInitialHpPct());
+                unit.state().getAttributesBuilder().setHealth(hp);
+                if (Long.compareUnsigned(unit.state().getMaxMana(), 0L) > 0) {
+                    long mp = TacticalPuzzleRules.scalePct(unit.state().getMaxMana(), spec.getPlayerInitialMpPct());
+                    unit.state().getAttributesBuilder().setMana(mp);
+                }
+                if (unit.isPlayer()) {
+                    if (spec.getPlayerInitialShieldPct() > 0) {
+                        long cap = TacticalPuzzleRules.scalePct(unit.maxHealth(), spec.getPlayerInitialShieldPct());
+                        attachTacticalPuzzleInitialBuff(unit, TacticalPuzzleRules.SHIELD_BUFF_ID, unit.actorId(), cap, 0L);
+                    }
+                    int debuffId = TacticalPuzzleRules.playerDebuffTableId(spec.getPlayerInitialDebuffKind());
+                    if (debuffId != 0) {
+                        long dot = TacticalPuzzleRules.scalePct(unit.maxHealth(), TacticalPuzzleRules.POISON_MAX_HP_PCT);
+                        attachTacticalPuzzleInitialBuff(unit, debuffId, firstEnemyId != 0L ? firstEnemyId : unit.actorId(), 0L, dot);
+                    }
+                }
+            } else if (unit.teamIndex() == 1 && unit.isMonster()) {
+                if (enemyIdx < spec.getEnemiesCount()) {
+                    TacticalPuzzleEnemySpec enemySpec = spec.getEnemies(enemyIdx);
+                    if (enemySpec.getInitialShieldPct() > 0) {
+                        long cap = TacticalPuzzleRules.scalePct(unit.maxHealth(), enemySpec.getInitialShieldPct());
+                        attachTacticalPuzzleInitialBuff(unit, TacticalPuzzleRules.SHIELD_BUFF_ID, unit.actorId(), cap, 0L);
+                    }
+                    int buffId = TacticalPuzzleRules.enemyBuffTableId(enemySpec.getInitialBuffKind());
+                    if (buffId != 0) {
+                        attachTacticalPuzzleInitialBuff(unit, buffId, unit.actorId(), 0L, 0L);
+                    }
+                }
+                enemyIdx++;
+            }
+        }
+    }
+
+    private void attachTacticalPuzzleInitialBuff(BattleUnit target, int buffTableId, long casterId,
+                                                 long shieldCapacity, long periodicDamage) {
+        if (buffTableId == 0) {
+            return;
+        }
+        Optional<BuffTable> opt = ctx.data().buff(buffTableId);
+        if (opt.isEmpty()) {
+            return;
+        }
+        BuffTable row = opt.get();
+        BattleBuffEntry.Builder entry = target.state().addBuffsBuilder()
+                .setBuffId(buffs.nextInstance())
+                .setBuffTableId(row.getId())
+                .setCasterId(casterId)
+                .setLayer(1)
+                .setRemainingHits(row.getHitLimit())
+                .setAppliedRound(1)
+                .setTickRound(row.getTickOnApply() != 0 ? 1 : 2);
+        int op = row.getBattleOp();
+        if (op == BattleEffect.SHIELD) {
+            entry.setRemainingCapacity(shieldCapacity).setRemainRounds(maxRounds);
+        } else if (op == BattleEffect.PERIODIC) {
+            int ticks = row.getTickCount() > 0 ? row.getTickCount() : maxRounds;
+            entry.setSnapshotValue(periodicDamage).setRemainingTicks(ticks).setRemainRounds(ticks);
+        } else {
+            int dur = row.getDurationRounds() > 0 ? row.getDurationRounds() : maxRounds;
+            entry.setRemainRounds(dur);
+        }
     }
 
     // =====================================================================================================

@@ -375,6 +375,17 @@ public final class RankedPresetRules {
                                                                           RankedPresetSelection selection,
                                                                           BattleRouting routing,
                                                                           long nowEpochSec) {
+        return buildCompetitiveSnapshot(player, battleTables, rankedCtx, selection, routing, nowEpochSec, false);
+    }
+
+    /** 同 {@link #buildCompetitiveSnapshot}，可选允许万象残局坊无宠单挑（pet_preset_id=0）。 */
+    public static Optional<BattlePlayerSnapshot> buildCompetitiveSnapshot(ScenePlayer player,
+                                                                          SceneBattleTables battleTables,
+                                                                          RankedMatchContext rankedCtx,
+                                                                          RankedPresetSelection selection,
+                                                                          BattleRouting routing,
+                                                                          long nowEpochSec,
+                                                                          boolean allowEmptyPet) {
         Tables tables = battleTables.ranked();
         if (tables == null || !tables.isValid() || rankedCtx == null || !rankedCtx.getUseFreePreset()) {
             return Optional.empty();
@@ -389,12 +400,15 @@ public final class RankedPresetRules {
         }
         int charPresetId = (selection != null && selection.getCharacterPresetId() != 0)
                 ? selection.getCharacterPresetId() : rule.getDefaultCharacterPresetId();
-        int petPresetId = (selection != null && selection.getPetPresetId() != 0)
-                ? selection.getPetPresetId() : rule.getDefaultPetPresetId();
+        boolean skipPet = allowEmptyPet && selection != null && selection.getPetPresetId() == 0;
+        int petPresetId = skipPet
+                ? 0
+                : ((selection != null && selection.getPetPresetId() != 0)
+                        ? selection.getPetPresetId() : rule.getDefaultPetPresetId());
         RankedPresetTable charPreset = tables.preset(charPresetId);
-        RankedPresetTable petPreset = tables.preset(petPresetId);
+        RankedPresetTable petPreset = skipPet ? null : tables.preset(petPresetId);
         if (charPreset == null || charPreset.getRoleKind() != ROLE_KIND_CHARACTER
-                || petPreset == null || petPreset.getRoleKind() != ROLE_KIND_PET) {
+                || (!skipPet && (petPreset == null || petPreset.getRoleKind() != ROLE_KIND_PET))) {
             return Optional.empty();
         }
 
@@ -496,20 +510,22 @@ public final class RankedPresetRules {
                 .setSpeed(speed)
                 .build();
 
-        // 零宠物账号默认使用预设种类的外观与名字；有出战宝宝时仅借用其外观种类与名称，数值与词条完全来自 petPreset。
-        int cosmeticPetTableId = 0;
-        String cosmeticPetName = "";
-        if (player.pets().activePetId() != 0L) {
-            Pet active = player.pets().find(player.pets().activePetId());
-            if (active != null) {
-                cosmeticPetTableId = active.petTableId();
-                cosmeticPetName = active.name();
+        BattlePetSnapshot petSnapshot = null;
+        if (!skipPet) {
+            int cosmeticPetTableId = 0;
+            String cosmeticPetName = "";
+            if (player.pets().activePetId() != 0L) {
+                Pet active = player.pets().find(player.pets().activePetId());
+                if (active != null) {
+                    cosmeticPetTableId = active.petTableId();
+                    cosmeticPetName = active.name();
+                }
             }
-        }
-        BattlePetSnapshot petSnapshot = buildCompetitivePetSnapshot(
-                tables, rule, petPreset, player.playerId(), cosmeticPetTableId, cosmeticPetName);
-        if (petSnapshot == null) {
-            return Optional.empty();
+            petSnapshot = buildCompetitivePetSnapshot(
+                    tables, rule, petPreset, player.playerId(), cosmeticPetTableId, cosmeticPetName);
+            if (petSnapshot == null) {
+                return Optional.empty();
+            }
         }
 
         BattlePlayerSnapshot.Builder snap = BattlePlayerSnapshot.newBuilder()
@@ -528,8 +544,10 @@ public final class RankedPresetRules {
                 .setRouting(routing)
                 .setTeamIndex(0)
                 .setTableFingerprint(battleTables.fingerprint())
-                .setPetCaptureSlots(0)
-                .addPets(petSnapshot);
+                .setPetCaptureSlots(0);
+        if (petSnapshot != null) {
+            snap.addPets(petSnapshot);
+        }
         for (int skillId : charPreset.getSkillIdsList()) {
             SkillTable skill = tables.skillsById.get(skillId);
             if (skill == null) {

@@ -15,7 +15,8 @@ import java.util.OptionalInt;
 public final class TeamFollowFormation {
 
     public static final int MAX_MEMBERS = 4;
-    public static final double DEFAULT_SPACING = 1.8;
+    /** 2026-11-19 对齐主仓定案：沿路槽位间距 3.0 m（原 1.4/1.8 m），与 50 m 视野匹配。 */
+    public static final double DEFAULT_SPACING = 3.0;
     public static final double CATCH_UP_SPEED = 7.5;
     public static final double MAX_LAG = 24.0;
     /** 20 FPS 下 5 帧 = 250ms 周期校正广播。 */

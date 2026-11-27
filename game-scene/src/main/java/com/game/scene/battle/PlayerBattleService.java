@@ -286,7 +286,8 @@ public final class PlayerBattleService implements BattleHooks {
         boolean isGuardRescue = bossTrialKind == 5;
         boolean isNpcIsolatedEncounter = com.game.battle.engine.BattleConstants.isNpcIsolatedEncounterKind(bossTrialKind);
         if (isNpcIsolatedEncounter && dungeonRow != null) {
-            if (dungeonRow.getSceneId() != 0) {
+            if (dungeonRow.getSceneId() != 0
+                    && request.getBattleConfigId() != com.game.battle.engine.TacticalPuzzleRules.WORKSHOP_DUNGEON_ID) {
                 int currentSceneConfigId = player.scene() != null ? player.scene().configId() : 0;
                 if (currentSceneConfigId != dungeonRow.getSceneId()) {
                     log.warn("备战被拒：归元城NPC玩法场景不匹配 player={} battle_id={} battle_config_id={} required_scene={} current_scene={}",
@@ -374,7 +375,8 @@ public final class PlayerBattleService implements BattleHooks {
             var rankedSnap = RankedPresetRules.buildCompetitiveSnapshot(
                     player, tables, request.getRankedContext(),
                     playerPresets,
-                    route, clock.epochMillis() / 1000L);
+                    route, clock.epochMillis() / 1000L,
+                    bossTrialKind == com.game.battle.engine.BattleConstants.BOSS_TRIAL_KIND_TACTICAL_PUZZLE);
             if (rankedSnap.isEmpty()) {
                 log.warn("备战被拒：免费预设娱乐场规则指纹或预设校验失败 player={} battle_id={} rule_version={}",
                         Long.toUnsignedString(playerId), Long.toUnsignedString(battleId),

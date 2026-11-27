@@ -72,6 +72,7 @@ public final class ScenePlayer {
     private boolean teamMembershipKnown;
     private long teamId;
     private long teamMembershipEpoch;
+    private boolean confirmedTeamLeader;
     /** 位置记录的写序号（本次进场内单调递增，见 PlayerLocationDirectory；只在逻辑线程上读写）。 */
     private long locationSeq;
     private Vec3 position;
@@ -281,13 +282,21 @@ public final class ScenePlayer {
 
     public boolean teamMembershipKnown() { return teamMembershipKnown; }
 
+    /** 最近一次权威组队快照已确认本角色是队长（离线托管跳过 15s 周期跟随重查，但保留跟随意图应对惰性转让）。 */
+    public boolean confirmedTeamLeader() { return teamMembershipKnown && teamId != 0 && confirmedTeamLeader; }
+
     /** 只接受单调的成员关系；相同 epoch 不能换队，缺失快照不能覆盖已经见过的永久版本。 */
     boolean applyTeamMembership(long id, long epoch) {
+        return applyTeamMembership(id, epoch, false);
+    }
+
+    boolean applyTeamMembership(long id, long epoch, boolean isLeader) {
         if (teamMembershipKnown && (Long.compareUnsigned(epoch, teamMembershipEpoch) < 0
                 || epoch == teamMembershipEpoch && id != teamId)) return false;
         teamMembershipKnown = true;
         teamId = id;
         teamMembershipEpoch = epoch;
+        confirmedTeamLeader = id != 0 && isLeader;
         return true;
     }
 
@@ -467,6 +476,10 @@ public final class ScenePlayer {
 
     public void markTransformAndVelocityDirty() {
         syncDirty |= DIRTY_TRANSFORM | DIRTY_VELOCITY;
+    }
+
+    public void markTransformDirty() {
+        syncDirty |= DIRTY_TRANSFORM;
     }
 
     public void markVelocityDirty() {

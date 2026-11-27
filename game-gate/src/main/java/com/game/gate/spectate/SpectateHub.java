@@ -125,6 +125,8 @@ public final class SpectateHub implements SpectateSubscriptions, AutoCloseable {
         long lastTurnRound = -1;
         /** {@link #latest} 所处的回合：STATE(r) 记 r，TURN(r) 记 r + 1。STATE(r) 是第 r 回合结算前的快照，紧跟的 TURN(r) 不是重复，所以不能拿它推进上一条水位。 */
         long cachedStateRound = -1;
+        /** 缓存快照是否处于战前明牌变阵期：true→false（亮牌开打）须向已在看会话扇出亮牌 161。 */
+        boolean cachedPrepActive;
         long lastFrameNanos;
         long emptySinceNanos;
         /** 终局帧；非 null 即已结束（墓碑），不再收帧。 */
@@ -147,6 +149,7 @@ public final class SpectateHub implements SpectateSubscriptions, AutoCloseable {
             firstFrame = null;
             lastTurnRound = -1;
             cachedStateRound = -1;
+            cachedPrepActive = false;
             end = null;
             awaitingFirst.addAll(subscribers);
         }
@@ -388,8 +391,19 @@ public final class SpectateHub implements SpectateSubscriptions, AutoCloseable {
                     metrics.spectateFrame(SpectateFrameResult.DUPLICATE);
                     return;
                 }
+                boolean nextPrepActive = isPrepActiveState(content);
+                boolean prepFinished = entry.cachedPrepActive && !nextPrepActive;
                 cache(entry, content, false, round);
-                flushAwaitingFirst(entry);
+                entry.cachedPrepActive = nextPrepActive;
+                if (prepFinished) {
+                    // 战前明牌变阵亮牌（prepActive true→false）：已在看会话也须收到亮牌 161，避免停在变阵态直至第 1 回合结算
+                    List<ClientSession> watching = new ArrayList<>(entry.subscribers);
+                    watching.removeAll(entry.awaitingFirst);
+                    flushAwaitingFirst(entry);
+                    fanOut(watching, content, SOFT_WATERMARK_BYTES);
+                } else {
+                    flushAwaitingFirst(entry);
+                }
             }
             case SPECTATE_FRAME_END -> {
                 metrics.spectateFrame(SpectateFrameResult.ACCEPTED);
@@ -416,6 +430,19 @@ public final class SpectateHub implements SpectateSubscriptions, AutoCloseable {
         entry.latestIsTurn = turn;
         entry.firstFrame = null;
         entry.cachedStateRound = stateRound;
+        if (turn) {
+            entry.cachedPrepActive = false;
+        }
+    }
+
+    /** STATE 帧是否处于战前明牌变阵期（仅 STATE 帧低频调用；解析失败按非变阵态兜底，不干扰既有测试哑载荷）。 */
+    private static boolean isPrepActiveState(MessageContent content) {
+        try {
+            SpectateStateS2C state = SpectateStateS2C.parseFrom(content.getSerializedMessage());
+            return state.hasState() && state.getState().hasPrepState() && state.getState().getPrepState().getActive();
+        } catch (InvalidProtocolBufferException ignored) {
+            return false;
+        }
     }
 
     /** 终局：扇出、清订阅、退频道，留墓碑给迟到的订阅者。 */

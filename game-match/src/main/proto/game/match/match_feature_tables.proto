@@ -460,3 +460,45 @@ message MatchTrialChallengeCardRow {
   uint64 expires_ms = 8;
   bytes card_view = 9;
 }
+
+// ---- 万象残局坊 V1（对齐 match_authority.proto MatchTacticalPuzzleRecord / ClearRecord） ----
+
+message MatchTacticalPuzzleRow {
+  option (proto2mysql.table_name) = "match_tactical_puzzle";
+  option (proto2mysql.primary_key) = "puzzle_id";
+  option (proto2mysql.index) = "author_player_id,updated_ms,puzzle_id;state,like_count,clear_count,puzzle_id;state,published_ms,puzzle_id";
+
+  uint64 puzzle_id = 1;
+  uint64 author_player_id = 2;
+  string author_name = 3;
+  uint32 state = 4;
+  uint32 spec_revision = 5;
+  string title = 6;
+  string hint_text = 7;
+  uint32 tag_mask = 8;
+  bytes spec_payload = 9;
+  uint64 verified_battle_id = 10;
+  uint32 author_best_rounds = 11;
+  uint32 attempt_count = 12;
+  uint32 clear_count = 13;
+  uint32 global_best_rounds = 14;
+  uint32 like_count = 15;
+  uint64 created_ms = 16;
+  uint64 published_ms = 17;
+  uint64 updated_ms = 18;
+}
+
+message MatchTacticalPuzzleClearRow {
+  option (proto2mysql.table_name) = "match_tactical_puzzle_clear";
+  option (proto2mysql.primary_key) = "puzzle_id,player_id";
+  option (proto2mysql.index) = "player_id,cleared,updated_ms,puzzle_id";
+
+  uint64 puzzle_id = 1;
+  uint64 player_id = 2;
+  uint32 attempts = 3;
+  bool cleared = 4;
+  uint32 best_rounds = 5;
+  bool liked = 6;
+  uint64 first_cleared_ms = 7;
+  uint64 updated_ms = 8;
+}

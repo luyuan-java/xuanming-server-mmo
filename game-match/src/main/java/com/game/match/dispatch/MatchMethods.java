@@ -82,8 +82,16 @@ public final class MatchMethods {
     public static final String CREATE_TRIAL_CHALLENGE_CARD = "CreateTrialChallengeCard";
     public static final String GET_TRIAL_CHALLENGE_CARD = "GetTrialChallengeCard";
     public static final String GET_SHARED_TRIAL_REPLAY = "GetSharedTrialReplay";
+    /** 万象残局坊 V1（575..581）。 */
+    public static final String LIST_TACTICAL_PUZZLES = "ListTacticalPuzzles";
+    public static final String GET_TACTICAL_PUZZLE = "GetTacticalPuzzle";
+    public static final String SAVE_TACTICAL_PUZZLE_DRAFT = "SaveTacticalPuzzleDraft";
+    public static final String DELETE_TACTICAL_PUZZLE = "DeleteTacticalPuzzle";
+    public static final String START_TACTICAL_PUZZLE_BATTLE = "StartTacticalPuzzleBattle";
+    public static final String LIKE_TACTICAL_PUZZLE = "LikeTacticalPuzzle";
+    public static final String GET_TACTICAL_PUZZLE_SOLUTION_REPLAY = "GetTacticalPuzzleSolutionReplay";
 
-    /** 全部 51 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
+    /** 全部 58 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
     public static final List<String> ALL = List.of(JOIN_QUEUE, CANCEL_QUEUE, GET_QUEUE_STATUS, CHALLENGE_PLAYER, RESPOND_CHALLENGE,
             NOTIFY_CHALLENGE_INVITE, NOTIFY_CHALLENGE_RESULT, WATCH_BATTLE, LIST_WATCHABLE_BATTLES, REQUEST_BATTLE_TICKET,
             GET_NETWORK_PROBE_PLAN, COMMIT_NETWORK_PROBE,
@@ -98,7 +106,9 @@ public final class MatchMethods {
             BAN_TOURNAMENT_LEYLINE, GET_TOURNAMENT_HIGHLIGHTS,
             CREATE_JIANGHU_DUEL_INVITE, CONFIRM_JIANGHU_DUEL_MEMBER, RESPOND_JIANGHU_DUEL_INVITE,
             LIST_JIANGHU_GRUDGES, DISMISS_JIANGHU_GRUDGE, NOTIFY_JIANGHU_DUEL_INVITE, NOTIFY_JIANGHU_DUEL_STATUS,
-            CREATE_TRIAL_CHALLENGE_CARD, GET_TRIAL_CHALLENGE_CARD, GET_SHARED_TRIAL_REPLAY);
+            CREATE_TRIAL_CHALLENGE_CARD, GET_TRIAL_CHALLENGE_CARD, GET_SHARED_TRIAL_REPLAY,
+            LIST_TACTICAL_PUZZLES, GET_TACTICAL_PUZZLE, SAVE_TACTICAL_PUZZLE_DRAFT, DELETE_TACTICAL_PUZZLE,
+            START_TACTICAL_PUZZLE_BATTLE, LIKE_TACTICAL_PUZZLE, GET_TACTICAL_PUZZLE_SOLUTION_REPLAY);
 
     private MatchMethods() {
     }

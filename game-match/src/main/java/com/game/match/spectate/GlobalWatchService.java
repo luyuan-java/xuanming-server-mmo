@@ -94,10 +94,10 @@ public final class GlobalWatchService {
                 if(lookup==com.game.match.gather.BattleNodes.Lookup.OTHER_INSTANCE)return answer(actor,request,MatchTips.watchRejected(MatchTip.WATCH_NOT_FOUND),deadline);
                 if(lookup!=com.game.match.gather.BattleNodes.Lookup.SAME_INSTANCE)return verdict(MatchTips.watchRejected(MatchTip.BUSY));
             }
+            if(deadline.remainingMillis()<=MatchBudgets.WATCH_ADD_MIN_BUDGET_MS)return verdict(MatchTips.watchRejected(MatchTip.BUSY));
             String mark=Long.toUnsignedString(battle)+":"+request.getRequestId();
             var acquired=authority.reserve(actor,actor.getPlayerId(),mark,deadline);
             if(acquired!=SpectateStore.Acquire.OK)return answer(actor,request,MatchTips.watchRejected(acquired==SpectateStore.Acquire.QUEUED?MatchTip.WATCH_QUEUED:MatchTip.WATCH_ALREADY),deadline);
-            if(deadline.remainingMillis()<=MatchBudgets.WATCH_ADD_MIN_BUDGET_MS){store.releaseAsync(actor.getPlayerId(),mark);return answer(actor,request,MatchTips.watchRejected(MatchTip.BUSY),deadline);}
             String publicName="";try{publicName=publicNames.apply(actor.getPlayerId(),Deadline.after(Math.max(1,Math.min(1000,deadline.remainingMillis()))));}catch(RuntimeException ignored){/* 展示失败不退回私有账号。 */}
             var base=AddObserverRequest.newBuilder().setBattleId(battle).setObserverPlayerId(actor.getPlayerId()).setObserverName(publicName==null?"":publicName)
                 .setRouting(BattleRoutings.gatePart(presence.get())).build();
@@ -140,7 +140,10 @@ public final class GlobalWatchService {
      * 打开开关用的是这场固定的落点；调不通回 16004，同 UUID 重试还会再来一遍。
      */
     private Verdict admitLobby(BattlePlacement placement,long player,long nowMs,Deadline deadline){
-        return switch(relay.escalate(placement,player,nowMs,deadline)){
+        return verdictOf(relay.escalate(placement,player,nowMs,deadline));
+    }
+    private static Verdict verdictOf(SpectateRelay.Admission admission){
+        return switch(admission){
             case SpectateRelay.Admission.Lobby lobby -> verdict(lobby.response());
             case SpectateRelay.Admission.Rejected refused -> verdict(MatchTips.watchRejected(refused.tip()));
             case SpectateRelay.Admission.Unavailable unavailable -> verdict(MatchTips.watchRejected(MatchTip.BUSY));
@@ -157,7 +160,10 @@ public final class GlobalWatchService {
         if(players.inBattle(actor.getPlayerId(),deadline))return verdict(MatchTips.watchRejected(MatchTip.WATCH_IN_BATTLE));
         var snapshot=store.read(stored.getBattleId(),deadline);
         if(!watchable(snapshot))return verdict(MatchTips.watchRejected(MatchTip.WATCH_NOT_FOUND));
-        return admitLobby(((SpectateStore.Record.Found)snapshot.record()).placement(),actor.getPlayerId(),snapshot.redisNowMs(),deadline);
+        var placement=((SpectateStore.Record.Found)snapshot.record()).placement();
+        // Redis 已是中继/广播档时直接本地核目录签新票（零 battle RPC），避免 gate 重启重连风暴把 battle 打满；档位键缺失时回落 escalate 打开开关。
+        if(relay.relayed(stored.getBattleId(),deadline))return verdictOf(relay.lobby(placement,actor.getPlayerId(),snapshot.redisNowMs(),deadline));
+        return admitLobby(placement,actor.getPlayerId(),snapshot.redisNowMs(),deadline);
     }
     /** 选中的场能不能看：成局已建房（读到好记录）且建房原件里冻结的可见性是 PUBLIC（{@link SpectateVisibilityPolicy}）。 */
     private static boolean watchable(SpectateStore.Snapshot snapshot){

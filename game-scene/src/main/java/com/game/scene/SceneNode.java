@@ -603,7 +603,7 @@ public class SceneNode implements SmartLifecycle {
                         new com.game.scene.afkpass.AfkPassService.ProjectionSink() {
                             @Override
                             public java.util.concurrent.CompletionStage<Boolean> set(long playerId, long expiresAtSec, Duration ttl) {
-                                String key = redisKeys.prefix() + "player:afk_pass:" + Long.toUnsignedString(playerId);
+                                String key = redisKeys.playerAfkPass(playerId);
                                 return redis.getBucket(key, org.redisson.client.codec.StringCodec.INSTANCE)
                                         .setAsync(Long.toUnsignedString(expiresAtSec), ttl)
                                         .thenApply(ignored -> true)
@@ -611,7 +611,7 @@ public class SceneNode implements SmartLifecycle {
                             }
                             @Override
                             public java.util.concurrent.CompletionStage<Boolean> delete(long playerId) {
-                                String key = redisKeys.prefix() + "player:afk_pass:" + Long.toUnsignedString(playerId);
+                                String key = redisKeys.playerAfkPass(playerId);
                                 return redis.getBucket(key, org.redisson.client.codec.StringCodec.INSTANCE)
                                         .deleteAsync()
                                         .thenApply(ignored -> true)
@@ -914,16 +914,17 @@ public class SceneNode implements SmartLifecycle {
         SceneTicker ticker = new SceneTicker(sceneWorld::step, SceneClock.SYSTEM::nanoTime);
         long periodNanos = SceneTicker.STEP_NANOS;
         frameTask = logicLoop.scheduleAtFixedRate(ticker, periodNanos, periodNanos, TimeUnit.NANOSECONDS);
-        // 周期存盘：每秒一个槽（同在逻辑线程上，与帧和客户端消息串行）；周期为 0 = 关闭（只在离场时写回）。
+        // 周期存盘：按 0.1 秒一个细槽摊开（总槽数 = 周期秒数 × 10，对齐 mmorpg 2026-11-11 摊细，单次回调工作量降为 1/10）；周期为 0 = 关闭。
         int saveIntervalSeconds = (int) settings.saveInterval().toSeconds();
         if (saveIntervalSeconds > 0) {
+            int fineSlots = saveIntervalSeconds * 10;
             saveTask = logicLoop.scheduleAtFixedRate(() -> {
                 try {
-                    sceneWorld.saveDuePlayers(saveIntervalSeconds);
+                    sceneWorld.saveDuePlayers(fineSlots);
                 } catch (RuntimeException e) {
-                    log.error("周期存盘这一秒出错，下一秒照常", e);
+                    log.error("周期存盘本槽出错，下一槽照常", e);
                 }
-            }, 1, 1, TimeUnit.SECONDS);
+            }, 100, 100, TimeUnit.MILLISECONDS);
         }
 
         // 玩家位置续期：每秒一个槽，每人每 20 s 一次（异步发出，不阻塞逻辑线程）。

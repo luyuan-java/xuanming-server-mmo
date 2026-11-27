@@ -54,14 +54,32 @@ public final class BattleReplayPolicy {
 
     /** 建房期最终录制入口（对齐 Go {@code recordReplayForBattle}）：普通刷怪/爬塔/历练 PVE 保持关闭。 */
     public static boolean decideForBattle(boolean enabled, MatchMode mode, com.game.proto.TrialBattleContext trialCtx) {
+        return decideForBattle(enabled, mode, trialCtx, null);
+    }
+
+    /** 建房期最终录制入口（含万象残局坊作者自证验题局）：仅作者自证开启录播，普通挑战者局保持关闭。 */
+    public static boolean decideForBattle(MatchMode mode,
+                                          com.game.proto.TrialBattleContext trialCtx,
+                                          com.game.proto.TacticalPuzzleBattleContext puzzleCtx) {
+        return decideForBattle(true, mode, trialCtx, puzzleCtx);
+    }
+
+    public static boolean decideForBattle(boolean enabled,
+                                          MatchMode mode,
+                                          com.game.proto.TrialBattleContext trialCtx,
+                                          com.game.proto.TacticalPuzzleBattleContext puzzleCtx) {
         if (!enabled) {
             return false;
         }
         if (decide(true, mode)) {
             return true;
         }
-        return (mode == MatchMode.MATCH_MODE_PVE_SOLO || mode == MatchMode.MATCH_MODE_PVE_TEAM)
-                && trialCtx != null && trialCtx.getJournalEntryId() != 0;
+        if ((mode == MatchMode.MATCH_MODE_PVE_SOLO || mode == MatchMode.MATCH_MODE_PVE_TEAM)
+                && trialCtx != null && trialCtx.getJournalEntryId() != 0) {
+            return true;
+        }
+        return mode == MatchMode.MATCH_MODE_PVE_SOLO
+                && puzzleCtx != null && puzzleCtx.getIsAuthorVerify();
     }
 
     /** 决策表里显式表态过的模式（只读；测试据此钉住「每个枚举都在表里」）。 */

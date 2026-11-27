@@ -286,8 +286,8 @@ public final class GatherPipeline {
                     && rankedStore.tables().usesFreePreset(mode.getNumber(), plan.battleConfigId());
             int[] teams = TeamAssignment.assign(mode, plan.members(),
                     (mode == MatchMode.MATCH_MODE_5V5 || mode == MatchMode.MATCH_MODE_PVP_TEAM) ? loadRatings(battle) : Map.of());
-            com.game.proto.RankedMatchContext rankedContext = null;
-            if (isRanked) {
+            com.game.proto.RankedMatchContext rankedContext = plan.freePresetContext();
+            if (rankedContext == null && isRanked) {
                 try {
                     var maybeCtx = rankedStore.buildRankedContext(Math.max(1, n / 2), plan.members(), teams, Map.of());
                     if (maybeCtx.isEmpty()) {
@@ -299,7 +299,7 @@ public final class GatherPipeline {
                     log.error("[gather] 构建排位上下文失败 battle_id={}", battle, e);
                     return fail(GatherOutcome.INTERNAL, 0);
                 }
-            } else if (isFreePreset) {
+            } else if (rankedContext == null && isFreePreset) {
                 try {
                     int sideSize = mode == MatchMode.MATCH_MODE_POLARITY_5V5 ? Math.max(1, n / 2) : n;
                     rankedContext = rankedStore.buildFreePresetContext(sideSize, plan.members(), Map.of());
@@ -363,7 +363,11 @@ public final class GatherPipeline {
             long seed;
             long createdAtMs;
             try {
-                seed = seeds.getAsLong();
+                seed = (plan.tacticalPuzzleContext() != null && plan.tacticalPuzzleContext().getPuzzleId() != 0L)
+                        ? com.game.match.puzzle.TacticalPuzzleSpecValidator.deterministicSeed(
+                                plan.tacticalPuzzleContext().getPuzzleId(),
+                                plan.tacticalPuzzleContext().getSpecRevision())
+                        : seeds.getAsLong();
                 createdAtMs = parts.clock().nowMs(Deadline.after(CLOCK_BUDGET_MS));
             } catch (RuntimeException e) {
                 log.error("[gather] 生成种子或读 Redis 时间失败 battle_id={} members={}: {}", battle, members, e.toString());
@@ -372,6 +376,9 @@ public final class GatherPipeline {
             CreateBattleRequest.Builder create = CreateBattleRequest.newBuilder().setBattleId(battleId).setBattleConfigId(plan.battleConfigId())
                     .setSeed(seed).setMatchMode(mode.getNumber()).setCreatedAtMs(createdAtMs).setDeadlineMs(deadlineMs)
                     .setTableFingerprint(fingerprint.passThrough());
+            if (plan.tacticalPuzzleContext() != null) {
+                create.setTacticalPuzzleContext(plan.tacticalPuzzleContext());
+            }
             BattlePlacement.Builder record = BattlePlacement.newBuilder().setBattleId(battleId).setMode(mode.getNumber())
                     .setBattleConfigId(plan.battleConfigId()).setCreatedAtMs(createdAtMs).setDeadlineMs(deadlineMs);
             for (Prepared member : prepared) {
@@ -422,7 +429,9 @@ public final class GatherPipeline {
             create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext(),
                     create.hasCustomDuelRules() ? create.getCustomDuelRules() : null, rankedContext));
             create.setRecordReplay(com.game.match.report.BattleReplayPolicy.decideForBattle(
-                    mode, create.hasTrialContext() ? create.getTrialContext() : null));
+                    mode,
+                    create.hasTrialContext() ? create.getTrialContext() : null,
+                    plan.tacticalPuzzleContext()));
             if (scriptResolver != null && (rankedContext == null || !rankedContext.getUseFreePreset())) {
                 create.addAllTeamScripts(scriptResolver.resolveForBattle(battleId, mode.getNumber(), plan.battleConfigId(), create.getPlayersList()));
             }

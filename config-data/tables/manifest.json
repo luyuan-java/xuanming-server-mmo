@@ -1,9 +1,9 @@
 {
   "schema_version": 2,
   "schema_digest": "88750c2d961d8710",
-  "version": 103,
-  "content_digest": "82a04f216207ac02220e5d6d06f5aa026375abaf48fd6d06c853ed81b1bdd90a",
-  "generated_at": "2026-11-27T04:03:21Z",
+  "version": 104,
+  "content_digest": "c8041bcd29180ddd65bcb03e0199ea9883dc2a492d7617e8a5316647d9ad53eb",
+  "generated_at": "2026-11-27T04:34:29Z",
   "source_rev": {
     "commit": "a0b3d195edcb98dd45c592fb9ccd9953db3f2fdc",
     "data_dirty": true
@@ -539,24 +539,24 @@
       "name": "Dungeon",
       "hot_reload": false,
       "ids_permanent": false,
-      "rows": 34,
+      "rows": 35,
       "source": {
         "file": "Dungeon.xlsx",
-        "size": 6669,
-        "sha256": "7c77e9bd340deb2140b7e736dd9ca2250cd261880d773d12ec35ac61bf886537"
+        "size": 6709,
+        "sha256": "b662a3bbb0e38d5b5ab6352a135bdf7edcee65235f5ae01554ba71b6ce7a6206"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "dungeon.json",
-          "size": 7381,
-          "sha256": "fddb168a48460fe6feb0683b7a132f3e1a6e24386bc8ed1e0885225ca8d199c8"
+          "size": 7591,
+          "sha256": "90140c75b20f180819c54df0c217d55ebca7ed7f65129a62a64e3f5736ee870e"
         },
         {
           "kind": "binary",
           "file": "dungeon.pb",
-          "size": 715,
-          "sha256": "666c6f256b5f5ede62a778d1304fc898ae7e5fdc25334473cb4b99fc8e6b338b"
+          "size": 737,
+          "sha256": "9abda54f7bebbd3b0829f64130d2d2c28574bfcc7bd567b606ae10401fb47dc7"
         }
       ]
     },
@@ -1139,24 +1139,24 @@
       "name": "MessageLimiter",
       "hot_reload": true,
       "ids_permanent": false,
-      "rows": 131,
+      "rows": 138,
       "source": {
         "file": "MessageLimiter.xlsx",
-        "size": 7194,
-        "sha256": "aee881495b52437259f5717e63df2df7af1c2b03199cd8e0efa0bfb1ed212ba9"
+        "size": 7321,
+        "sha256": "90f980ee464b53154eaf7ac27d274a7534a9dc270794f1e1ecfec2033a897a21"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "messagelimiter.json",
-          "size": 11708,
-          "sha256": "ae5eb911e698a50bce3ec1a9c25e708fd7acd71dae253c3495492047a2257288"
+          "size": 12342,
+          "sha256": "e4efd53a3ee8ac2a64c8461359be31463cd06bed33b8785b6488c84fe544658b"
         },
         {
           "kind": "binary",
           "file": "messagelimiter.pb",
-          "size": 1552,
-          "sha256": "70307ee6bfcfa1bdeee8a3f0db3c7d739643485d657efddf11da8feb1c0c2998"
+          "size": 1636,
+          "sha256": "d4c44f362bb5dcf93da5dd16e7a7bd99a6281548283df5c3c3f833c725a90eac"
         }
       ]
     },
@@ -1439,24 +1439,24 @@
       "name": "PlayMode",
       "hot_reload": false,
       "ids_permanent": false,
-      "rows": 49,
+      "rows": 50,
       "source": {
         "file": "PlayMode.xlsx",
-        "size": 6585,
-        "sha256": "9f187547d39126ddc3e58f45518822ee7ee13c627fe691ff2f88dbc105178e6b"
+        "size": 6606,
+        "sha256": "6647ffc92d41ecea7ed000c1061cac38c1134419fa5a001209d11934cb53553f"
       },
       "artifacts": [
         {
           "kind": "json",
           "file": "playmode.json",
-          "size": 5570,
-          "sha256": "0bbb88c47dfb434e3ded68c3871aab6209b20e962dfd508e84107c313ee42f84"
+          "size": 5683,
+          "sha256": "ae57b17111e3cb08193dd8003e6e6665da1c661233c07b058ab5541f9fa0c334"
         },
         {
           "kind": "binary",
           "file": "playmode.pb",
-          "size": 621,
-          "sha256": "150b010328c11989f1a689026c5bfc70e6f7948500cd77531b1135a2b3d4d64c"
+          "size": 635,
+          "sha256": "f2165210db137127cf47465fef9452e1bae8457f6ad782ed2168e65367991ad3"
         }
       ]
     },

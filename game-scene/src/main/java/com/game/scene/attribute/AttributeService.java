@@ -54,6 +54,7 @@ public final class AttributeService {
     private static final Logger log = LoggerFactory.getLogger(AttributeService.class);
 
     static final int INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
+    static final int SERVICE_UNAVAILABLE = CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     /** 回合制战斗在途（基线 kAttributeInBattle）。 */
     static final int IN_BATTLE = AttributeErrorTip.attribute_error.kAttributeInBattle_VALUE;
     static final int POOL_NOT_FOUND = AttributeErrorTip.attribute_error.kAttributePoolNotFound_VALUE;
@@ -88,8 +89,11 @@ public final class AttributeService {
     public record AutoAllocation(int tipId, Map<Integer, Long> suggested) {
     }
 
-    /** 开新方案结果：成功时带新方案 id。 */
-    public record SchemeCreation(int tipId, int schemeId) {
+    /** 开新方案结果：成功时带新方案 id 与是否幂等重放标记。 */
+    public record SchemeCreation(int tipId, int schemeId, boolean replayed) {
+        public SchemeCreation(int tipId, int schemeId) {
+            this(tipId, schemeId, false);
+        }
     }
 
     /** 一体化战法·加点方案快照中某套方案的四维加点摘要。 */
@@ -729,29 +733,64 @@ public final class AttributeService {
         return new AutoAllocation(0, suggested);
     }
 
-    /** 开新方案：空名按「方案N」（N = 现有方案数 + 1）；超出免费数扣金币；不切换当前方案、不重算。 */
+    /** 开新方案（无幂等键旧入口，保留兼容测试与内部调用）。 */
     public SchemeCreation createScheme(ScenePlayer player, String name) {
+        return createScheme(player, com.game.proto.CreateAttributeSchemeRequest.newBuilder().setName(name == null ? "" : name).build());
+    }
+
+    /**
+     * 开新方案（174，接入 {@link com.game.scene.player.PlayerClientRequestLedger} 幂等去重）：
+     * 查账排在冻结、战斗、上限、命名、扣费等一切状态校验之前；同键同参数重放回首次方案号并标 {@code replayed=true}，
+     * 同键换参数或跨接口复用回 1005，账本损坏 fail-closed 回 1003；仅成功后记键，业务拒绝不记。
+     */
+    public SchemeCreation createScheme(ScenePlayer player, com.game.proto.CreateAttributeSchemeRequest request) {
+        long requestId = request.getClientRequestId();
+        com.google.protobuf.ByteString fingerprint = null;
+        if (requestId != 0) {
+            var ledger = player.clientRequestLedger();
+            if (!ledger.isValid()) {
+                return new SchemeCreation(SERVICE_UNAVAILABLE, 0, false);
+            }
+            fingerprint = com.game.scene.player.PlayerClientRequestLedger.fingerprint(
+                    request.toBuilder().clearClientRequestId().build());
+            var check = ledger.check(requestId,
+                    com.game.scene.player.PlayerClientRequestLedger.KIND_CREATE_ATTRIBUTE_SCHEME, fingerprint);
+            if (check.verdict() == com.game.scene.player.PlayerClientRequestLedger.Verdict.REPLAY) {
+                return new SchemeCreation(0, check.record().getCreatedSchemeId(), true);
+            }
+            if (check.verdict() == com.game.scene.player.PlayerClientRequestLedger.Verdict.MISMATCH) {
+                return new SchemeCreation(INVALID_PARAMETER, 0, false);
+            }
+        }
         int writable = checkWritable(player);
         if (writable != 0) {
-            return new SchemeCreation(writable, 0);
+            return new SchemeCreation(writable, 0, false);
         }
         PlayerAttributes attributes = player.attributes();
         int count = attributes.schemes().size();
         if (count >= maxSchemesFor(player)) {
-            return new SchemeCreation(SCHEME_LIMIT, 0);
+            return new SchemeCreation(SCHEME_LIMIT, 0, false);
         }
+        String name = request.getName();
         String finalName = name.isEmpty() ? defaultSchemeName(count + 1) : name;
         if (!isSchemeNameValid(finalName)) {
-            return new SchemeCreation(SCHEME_NAME_INVALID, 0);
+            return new SchemeCreation(SCHEME_NAME_INVALID, 0, false);
         }
         long cost = tables.createSchemeCost(count);
         int paid = payGold(player, cost, AssetAudit.Reason.ATTRIBUTE_SCHEME_CREATE);
         if (paid != 0) {
-            return new SchemeCreation(paid, 0);
+            return new SchemeCreation(paid, 0, false);
         }
         int schemeId = attributes.addScheme(finalName);
+        if (requestId != 0) {
+            player.clientRequestLedger().remember(com.game.player.store.state.ClientRequestRecordState.newBuilder()
+                    .setKey(requestId)
+                    .setKind(com.game.scene.player.PlayerClientRequestLedger.KIND_CREATE_ATTRIBUTE_SCHEME)
+                    .setFingerprint(fingerprint)
+                    .setCreatedSchemeId(schemeId));
+        }
         log.debug("开新方案 player={} scheme={} cost_gold={}", player.playerId(), schemeId, cost);
-        return new SchemeCreation(0, schemeId);
+        return new SchemeCreation(0, schemeId, false);
     }
 
     /** 切换方案：不存在 25006 → 已是当前 25010 → 冷却中 25008（按墙钟 Unix 秒）→ 切换并按比例重算。 */

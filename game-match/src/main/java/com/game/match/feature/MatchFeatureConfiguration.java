@@ -550,4 +550,92 @@ public class MatchFeatureConfiguration {
     public MatchMethodHandler notifyJianghuDuelStatusHandler(JianghuDuelService service) {
         return service.clientHandlers().get(6);
     }
+
+    // ---- 万象残局坊 V1（575..581） ----
+
+    @Bean
+    public com.game.match.puzzle.TacticalPuzzleStore tacticalPuzzleStore(
+            DataSource dataSource, FeatureSchemaReady schemaReady) {
+        return new com.game.match.puzzle.TacticalPuzzleStore(dataSource, System::currentTimeMillis);
+    }
+
+    @Bean
+    public com.game.match.puzzle.TacticalPuzzleService tacticalPuzzleService(
+            com.game.match.puzzle.TacticalPuzzleStore store,
+            MatchIds matchIds,
+            ObjectProvider<TournamentService.TextGuard> tournamentTextGuard,
+            ObjectProvider<GatherLauncher> gatherLauncher,
+            ObjectProvider<RankedTables> rankedTables) {
+        TournamentService.TextGuard guard = tournamentTextGuard.getIfAvailable();
+        com.game.match.puzzle.TacticalPuzzleService.TextGuard puzzleGuard = guard == null
+                ? null
+                : (playerId, text) -> {
+                    try {
+                        var resp = guard.check(com.game.proto.content_guard.TextScene.TEXT_SCENE_GUILD_NAME, playerId, text);
+                        if (resp == null) {
+                            return com.game.match.puzzle.TacticalPuzzleService.TextVerdict.UNAVAILABLE;
+                        }
+                        return resp.getVerdict() == com.game.proto.content_guard.TextVerdict.TEXT_VERDICT_PASS
+                                ? com.game.match.puzzle.TacticalPuzzleService.TextVerdict.PASS
+                                : com.game.match.puzzle.TacticalPuzzleService.TextVerdict.REJECT;
+                    } catch (RuntimeException e) {
+                        return com.game.match.puzzle.TacticalPuzzleService.TextVerdict.UNAVAILABLE;
+                    }
+                };
+        GatherLauncher launcherBean = gatherLauncher.getIfAvailable();
+        com.game.match.puzzle.TacticalPuzzleService.BattleLauncher puzzleLauncher = launcherBean == null
+                ? null
+                : (playerId, puzzleCtx, freePresetCtx, requestId) -> {
+                    long bid = matchIds.nextBattleId().orElse(0L);
+                    if (bid == 0L) {
+                        return 0L;
+                    }
+                    launcherBean.launch(GatherPlan.tacticalPuzzle(
+                            com.game.match.puzzle.TacticalPuzzleService.workshopDungeonId(),
+                            playerId, bid, puzzleCtx, freePresetCtx));
+                    return bid;
+                };
+        RankedTables rt = rankedTables.getIfAvailable();
+        com.game.match.puzzle.TacticalPuzzleService.RankedPresetMetaProvider metaProvider = rt == null
+                ? () -> new com.game.match.puzzle.TacticalPuzzleService.RankedPresetMeta(1, "")
+                : () -> new com.game.match.puzzle.TacticalPuzzleService.RankedPresetMeta(
+                        rt.ruleVersion(), rt.configFingerprint());
+        return new com.game.match.puzzle.TacticalPuzzleService(
+                store, () -> matchIds.nextBattleId().orElse(0L), puzzleGuard, puzzleLauncher, metaProvider);
+    }
+
+    @Bean
+    public MatchMethodHandler listTacticalPuzzlesHandler(com.game.match.puzzle.TacticalPuzzleService service) {
+        return service.clientHandlers().get(0);
+    }
+
+    @Bean
+    public MatchMethodHandler getTacticalPuzzleHandler(com.game.match.puzzle.TacticalPuzzleService service) {
+        return service.clientHandlers().get(1);
+    }
+
+    @Bean
+    public MatchMethodHandler saveTacticalPuzzleDraftHandler(com.game.match.puzzle.TacticalPuzzleService service) {
+        return service.clientHandlers().get(2);
+    }
+
+    @Bean
+    public MatchMethodHandler deleteTacticalPuzzleHandler(com.game.match.puzzle.TacticalPuzzleService service) {
+        return service.clientHandlers().get(3);
+    }
+
+    @Bean
+    public MatchMethodHandler startTacticalPuzzleBattleHandler(com.game.match.puzzle.TacticalPuzzleService service) {
+        return service.clientHandlers().get(4);
+    }
+
+    @Bean
+    public MatchMethodHandler likeTacticalPuzzleHandler(com.game.match.puzzle.TacticalPuzzleService service) {
+        return service.clientHandlers().get(5);
+    }
+
+    @Bean
+    public MatchMethodHandler getTacticalPuzzleSolutionReplayHandler(com.game.match.puzzle.TacticalPuzzleService service) {
+        return service.clientHandlers().get(6);
+    }
 }

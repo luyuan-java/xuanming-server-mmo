@@ -737,6 +737,14 @@ public final class RedisKeys {
     }
 
     /**
+     * 挂机月卡到期时刻投影 {@code game:player:afk_pass:{<player_id>}}（STRING，值 = 到期 Unix 秒，EXAT 到期自动消失，清除时 DEL）。
+     * 仅由 scene 在存档提交确认 / 进场加载 / 离线托管心跳中写入已提交值，供租约续期侧只读查询。
+     */
+    public String playerAfkPass(long playerId) {
+        return prefix + "player:afk_pass:{" + Long.toUnsignedString(playerId) + "}";
+    }
+
+    /**
      * 观战中继的 Redis 分片 pub/sub 频道 {@code game:spectate:{<battle_id>}}（§15.7 Java 口径：一场一个频道；消息 = 契约 {@code contracts.kafka.SpectateFrameEvent} 字节）。
      * battle 每帧发布一次；只有有本机观众的 gate 才订阅。与 {@link #spectateState} 共用 hash tag，上 Cluster 时在同一个分片。
      */

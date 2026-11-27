@@ -249,4 +249,15 @@ class SpectateRulesTest {
         assertThat(remove.toMillis() + addWindowMs + MatchBudgets.WATCH_ADD_RESERVE_MS).as("两跳都带硬截止：加起来不超过请求预算")
                 .isLessThanOrEqualTo(MatchBudgets.DEFAULT_REQUEST_BUDGET_MS).isLessThan(5_000);
     }
+
+    @Test
+    void 观战档位解析_空值按直连_非数字脏值包装为依赖异常而非裸NumberFormatException() {
+        assertThat(RedissonSpectateTierStore.parseTier(null)).isEqualTo(com.game.proto.eSpectateTier.SPECTATE_TIER_DIRECT);
+        assertThat(RedissonSpectateTierStore.parseTier("1")).isEqualTo(com.game.proto.eSpectateTier.SPECTATE_TIER_RELAY);
+        assertThatThrownBy(() -> RedissonSpectateTierStore.parseTier("not-a-number"))
+                .isInstanceOf(Deadline.DependencyException.class)
+                .hasCauseInstanceOf(NumberFormatException.class);
+        assertThatThrownBy(() -> RedissonSpectateTierStore.parseTier("999"))
+                .isInstanceOf(Deadline.DependencyException.class);
+    }
 }

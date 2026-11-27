@@ -94,13 +94,31 @@ public final class AfkPassService {
                 .build();
     }
 
-    /** 431 BuyAfkPass：幂等开通/续费。 */
+    /** 431 BuyAfkPass：幂等开通/续费（查账先于冻结/报价/上限/余额，同键换报价参数回 1005，账本损坏 fail-closed 回 32004）。 */
     public BuyAfkPassResponse buy(SceneWorld world, ScenePlayer player, BuyAfkPassRequest req) {
         long nowSec = nowSeconds();
         long reqId = req.getClientRequestId();
         if (reqId == 0) {
             return buyError(INVALID_PARAMETER);
         }
+        var ledger = player.clientRequestLedger();
+        if (!ledger.isValid()) {
+            return buyError(UNAVAILABLE);
+        }
+        var fingerprint = com.game.scene.player.PlayerClientRequestLedger.fingerprint(
+                req.toBuilder().clearClientRequestId().build());
+        var check = ledger.check(reqId, com.game.scene.player.PlayerClientRequestLedger.KIND_BUY_AFK_PASS, fingerprint);
+        if (check.verdict() == com.game.scene.player.PlayerClientRequestLedger.Verdict.REPLAY) {
+            return BuyAfkPassResponse.newBuilder()
+                    .setErrorMessage(tip(0))
+                    .setInfo(buildInfo(player, nowSec))
+                    .setReplayed(true)
+                    .build();
+        }
+        if (check.verdict() == com.game.scene.player.PlayerClientRequestLedger.Verdict.MISMATCH) {
+            return buyError(INVALID_PARAMETER);
+        }
+        // 兼容未写入 client_request_ledger 的旧存档单键列
         if (player.hasAfkPassRequest(reqId)) {
             return BuyAfkPassResponse.newBuilder()
                     .setErrorMessage(tip(0))
@@ -135,6 +153,10 @@ public final class AfkPassService {
         long after = afterOpt.getAsLong();
         player.setAfkPassExpiresAt(after);
         player.recordAfkPassRequest(reqId);
+        ledger.remember(com.game.player.store.state.ClientRequestRecordState.newBuilder()
+                .setKey(reqId)
+                .setKind(com.game.scene.player.PlayerClientRequestLedger.KIND_BUY_AFK_PASS)
+                .setFingerprint(fingerprint));
         world.requestKeyProgressSave(player);
         log.info("[AfkPass] metric=afk_pass_bought player_id={} expires_before={} expires_after={} price={} currency_type={} client_request_id={}",
                 Long.toUnsignedString(player.playerId()), before, after, rule.price(), rule.priceCurrencyType(),

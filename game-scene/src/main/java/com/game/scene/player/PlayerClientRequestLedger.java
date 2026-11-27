@@ -102,9 +102,19 @@ public final class PlayerClientRequestLedger {
         return out;
     }
 
-    /** 确定性参数指纹：取序列化字节 SHA-256 前 16 字节（调用方须先清掉 client_request_id）。 */
+    /** 确定性参数指纹：清键后按 Protobuf 确定性序列化，取 SHA-256 前 16 字节（跨版本/跨语言字段与 map 键序一致）。 */
     public static ByteString fingerprint(Message messageWithoutRequestId) {
-        return sha256Prefix16(messageWithoutRequestId.toByteArray());
+        int size = messageWithoutRequestId.getSerializedSize();
+        byte[] bytes = new byte[size];
+        try {
+            com.google.protobuf.CodedOutputStream out = com.google.protobuf.CodedOutputStream.newInstance(bytes);
+            out.useDeterministicSerialization();
+            messageWithoutRequestId.writeTo(out);
+            out.checkNoSpaceLeft();
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("确定性序列化客户端请求失败", e);
+        }
+        return sha256Prefix16(bytes);
     }
 
     public static ByteString sha256Prefix16(byte[] data) {

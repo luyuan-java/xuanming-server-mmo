@@ -78,11 +78,11 @@ public final class AttributeFeature implements SceneFeature {
         r.on(SERVICE, "AutoAllocateAttributePoints", AutoAllocateAttributePointsRequest.class, FreezePolicy.REJECT, BattlePolicy.ALLOW,
                 this::autoAllocate);
         r.on(SERVICE, "CreateAttributeScheme", CreateAttributeSchemeRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, req) -> {
-            AttributeService.SchemeCreation created = service.createScheme(call.player(), req.getName());
+            AttributeService.SchemeCreation created = service.createScheme(call.player(), req);
             CreateAttributeSchemeResponse.Builder response = CreateAttributeSchemeResponse.newBuilder()
                     .setErrorMessage(tip(created.tipId()));
             if (created.tipId() == 0) {
-                response.setSchemeId(created.schemeId()).setPanel(panel(call));
+                response.setSchemeId(created.schemeId()).setReplayed(created.replayed()).setPanel(panel(call));
             }
             call.reply(response.build());
         });

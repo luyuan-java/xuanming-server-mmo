@@ -167,6 +167,16 @@ public final class SkillService {
             return reject(SkillResult.STATE_REJECTED, commitTip);
         }
         syncSelfStateFlagsIfChanged(world, caster);
+        if (request.getTargetId() != 0) {
+            ScenePlayer targetPlayer = world.playerByEntity(request.getTargetId());
+            if (targetPlayer != null && targetPlayer != caster) {
+                com.game.proto.Rotation facing = lookAtYawDegrees(caster.position(), targetPlayer.position());
+                if (facing != null) {
+                    caster.setRotation(facing);
+                    caster.markTransformDirty();
+                }
+            }
+        }
 
         world.broadcastToSelfAndWatchers(caster, push(notifySkillUsed, SkillUsedS2C.newBuilder()
                 .setEntity(caster.entity())
@@ -324,6 +334,18 @@ public final class SkillService {
             };
         }
         return cast;
+    }
+
+    /**
+     * 计算地面偏航角（度）：{@code Rotation.z = deg(atan2(dy, dx))}，x/y 恒 0；目标在正上/正下方（无水平分量）返回 null 保留原朝向。
+     */
+    public static com.game.proto.Rotation lookAtYawDegrees(com.game.scene.world.Vec3 from, com.game.scene.world.Vec3 to) {
+        double dx = to.x() - from.x();
+        double dy = to.y() - from.y();
+        if (Math.hypot(dx, dy) <= 1e-6) {
+            return null;
+        }
+        return com.game.proto.Rotation.newBuilder().setZ((float) Math.toDegrees(Math.atan2(dy, dx))).build();
     }
 
     private static CastFsmState toFsmState(Phase phase) {

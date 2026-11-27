@@ -354,12 +354,13 @@ class SpectateRelayRoomTest {
         SpectateStateS2C frozen = SpectateStateS2C.parseFrom(content(h.relayFrames.get(0)).getSerializedMessage());
         assertThat(frozen.getState().getOutcome()).as("冻结态不提前泄露未确认胜负").isEqualTo(eBattleOutcome.BATTLE_OUTCOME_ONGOING);
 
-        // 决策落地后排空并停止心跳
+        // 决策落地后排空并停止心跳：先补发决胜回合 158，再发 166 END（与正常分支和 C++ 同序）
         h.relayFrames.clear();
         sqlDecisions.get(0).complete(com.game.proto.match.BattleOutcomeDecision.BATTLE_OUTCOME_DECISION_COMPLETE);
         h.scheduler.runPending();
         assertThat(drained.join().unconfirmed()).isEmpty();
-        assertThat(h.relayFrames).extracting(SpectateFrameEvent::getKind).contains(eSpectateFrameKind.SPECTATE_FRAME_END);
+        assertThat(h.relayFrames).extracting(SpectateFrameEvent::getKind)
+                .containsExactly(eSpectateFrameKind.SPECTATE_FRAME_TURN, eSpectateFrameKind.SPECTATE_FRAME_END);
         int countAfterEnd = h.relayFrames.size();
         h.scheduler.advance(RoomConstants.SPECTATE_CHANNEL_KEEPALIVE_MS * 2);
         assertThat(h.relayFrames).as("END 之后不再发心跳").hasSize(countAfterEnd);

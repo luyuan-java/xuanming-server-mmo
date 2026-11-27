@@ -360,6 +360,8 @@ message BattlePrepPlayerState {
   bool ready = 7;
   // 本人当前提名的本局禁用技能有序列表（0..3，下标 0 为最高优先级；仅向同队下发）。
   repeated uint32 nominated_ban_skill_ids = 8;
+  // 本人当前提名的本局护招技能 ID（0=未提名；须在候选池内且不与本人禁招列表冲突；仅向同队下发）。
+  uint32 nominated_protect_skill_id = 9;
 }
 
 // 论剑 V6 宿敌交手上下文（开局由 match 权威冻结，战前 15 秒仅向本人脱敏展示，纯荣誉零数值加成）。
@@ -384,6 +386,9 @@ message BattlePrepState {
   repeated uint32 ban_candidate_skill_ids = 8;        // 本局白名单可禁技能 ID 列表（升序；仅参战者可见）
   repeated uint32 team_effective_ban_skill_ids = 9;   // 按当前同队提名确定性聚合的本队生效禁招（仅同队可见，对手与观众清空）
   repeated RankedRivalryEncounter self_rivalries = 10;// 论剑 V6 本人本局面对的宿敌列表（仅本人可见，对手与观众清空）
+  uint32 skill_protect_slots_per_team = 11;           // 战前禁选 V2：本局每队可用护招槽数（0=未启用，1=每队保 1 招）
+  uint32 team_effective_protected_skill_id = 12;      // 战前禁选 V2：按当前同队提名确定性聚合的本队生效护招 ID（0=未提名；仅同队可见）
+  repeated uint32 teammate_equipped_skill_ids = 13;   // 战前禁选 V2：本队其他队友已携带且在候选池内的技能 ID（升序去重；仅同队可见，防误禁）
 }
 
 // 论剑 V4 队内一键战术标点类型（零文字沟通，严格仅同队可见）。

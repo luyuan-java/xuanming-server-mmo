@@ -299,6 +299,7 @@ public final class TeamFollowCoordinator {
             SceneNavigation nav = world.navigationFor(leader.scene());
             TeamFollowTrail.WalkableCheck walkable = (from, to) -> !nav.trace(from, to).blocked();
             List<TeamFollowFormation.Step> steps = comp.formation.tick(leaderPos, deltaSeconds, walkable);
+            List<ScenePlayer> moveBatch = null;
             for (TeamFollowFormation.Step step : steps) {
                 ScenePlayer f = world.playerById(step.playerId());
                 FollowerEntry d = followers.get(step.playerId());
@@ -306,7 +307,12 @@ public final class TeamFollowCoordinator {
                     continue;
                 }
                 if (step.suspended()) {
-                    stopMotion(world, f, d, currentFrame);
+                    if (stopMotion(f, d, currentFrame)) {
+                        if (moveBatch == null) {
+                            moveBatch = new ArrayList<>(steps.size());
+                        }
+                        moveBatch.add(f);
+                    }
                     continue;
                 }
                 if (step.placed()) {
@@ -315,7 +321,15 @@ public final class TeamFollowCoordinator {
                     }
                     continue;
                 }
-                applyWalkStep(world, f, d, step, deltaSeconds, currentFrame);
+                if (applyWalkStep(world, f, d, step, deltaSeconds, currentFrame)) {
+                    if (moveBatch == null) {
+                        moveBatch = new ArrayList<>(steps.size());
+                    }
+                    moveBatch.add(f);
+                }
+            }
+            if (moveBatch != null && !moveBatch.isEmpty()) {
+                world.broadcastTeamFollowMoves(moveBatch);
             }
             if (comp.formation.isEmpty()) {
                 formations.remove(leaderId);
@@ -417,11 +431,10 @@ public final class TeamFollowCoordinator {
         }
     }
 
-    private void applyWalkStep(SceneWorld world, ScenePlayer follower, FollowerEntry driven,
-                               TeamFollowFormation.Step step, double deltaSeconds, long currentFrame) {
+    private boolean applyWalkStep(SceneWorld world, ScenePlayer follower, FollowerEntry driven,
+                                  TeamFollowFormation.Step step, double deltaSeconds, long currentFrame) {
         if (step.moved() <= 0.0 || deltaSeconds <= 0.0) {
-            stopMotion(world, follower, driven, currentFrame);
-            return;
+            return stopMotion(follower, driven, currentFrame);
         }
         Vec3 from = follower.position();
         SceneNavigation nav = world.navigationFor(follower.scene());
@@ -445,26 +458,34 @@ public final class TeamFollowCoordinator {
                 driven.broadcastMoving && !stoppedElsewhere, driven.broadcastVx, driven.broadcastVy);
         TeamFollowFormation.BroadcastState now = new TeamFollowFormation.BroadcastState(true, vel.x(), vel.y());
         if (TeamFollowFormation.shouldBroadcast(last, now, currentFrame - driven.broadcastFrame)) {
-            world.broadcastTeamFollowMove(follower);
             driven.broadcastMoving = true;
             driven.broadcastVx = vel.x();
             driven.broadcastVy = vel.y();
             driven.broadcastFrame = currentFrame;
+            return true;
         }
+        return false;
     }
 
     private void stopMotion(SceneWorld world, ScenePlayer follower, FollowerEntry driven, long currentFrame) {
+        if (stopMotion(follower, driven, currentFrame)) {
+            world.broadcastTeamFollowMove(follower);
+        }
+    }
+
+    private boolean stopMotion(ScenePlayer follower, FollowerEntry driven, long currentFrame) {
         if (follower.isMoving()) {
             follower.stopMotion();
             follower.markVelocityDirty();
         }
         if (driven.broadcastMoving) {
-            world.broadcastTeamFollowMove(follower);
             driven.broadcastMoving = false;
             driven.broadcastVx = 0.0;
             driven.broadcastVy = 0.0;
             driven.broadcastFrame = currentFrame;
+            return true;
         }
+        return false;
     }
 
     private boolean teleportIntoSlot(SceneWorld world, ScenePlayer follower, FollowerEntry driven, ScenePlayer leader,

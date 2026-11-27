@@ -67,7 +67,18 @@ public final class RedissonSpectateTierStore implements SpectateTierStore {
     @Override
     public eSpectateTier tier(long battleId, Deadline d) {
         String value = await("读观战档位", d, () -> redis.<String>getBucket(keys.matchSpectateTier(battleId), StringCodec.INSTANCE).getAsync());
-        return value == null ? eSpectateTier.SPECTATE_TIER_DIRECT : tierOf(Long.parseLong(value));
+        return parseTier(value);
+    }
+
+    static eSpectateTier parseTier(String value) {
+        if (value == null) {
+            return eSpectateTier.SPECTATE_TIER_DIRECT;
+        }
+        try {
+            return tierOf(Long.parseLong(value));
+        } catch (NumberFormatException e) {
+            throw new Deadline.DependencyException("观战档位值非法: " + value, e);
+        }
     }
 
     @Override

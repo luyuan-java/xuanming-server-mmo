@@ -964,6 +964,7 @@ public final class GlobalMatchStore {
             if(f.getState()<4)units.finished(c,f,completedTickets,true,stamp);
             if(create.getRecordReplay()||request.hasReplay())
                 com.game.match.report.BattleReportStore.writeInTransaction(c,create,event,request.hasReplay()?request.getReplay():null,stamp);
+                com.game.match.puzzle.TacticalPuzzleStore.recordBattleCompletionInTx(c,create,event,stamp);
             db.updateByPk(c,completed);db.updateByPk(c,f.toBuilder().setState(4).build());return completed;
         });
     }

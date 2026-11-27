@@ -51,6 +51,11 @@ public final class SceneMetrics {
     static final String TELEPORTS = "game.scene.teleports";
     static final String TELEPORT_SETTLES = "game.scene.teleport.settles";
     static final String PERIODIC_SAVES = "game.scene.periodic.saves";
+    static final String SAVE_STAGE = "game.scene.save.stage";
+    static final String PERIODIC_SAVE_CALLBACK = "game.scene.save.periodic.callback";
+    static final String PERIODIC_SAVE_SLOW = "game.scene.save.periodic.slow";
+    /** 周期存盘单次回调慢回调阈值（10 ms，对齐 mmorpg save_timing_stats.h 初值）。 */
+    public static final long PERIODIC_SAVE_SLOW_THRESHOLD_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
     static final String AOI_CHANGES = "game.scene.aoi.changes";
     static final String STORAGE_WRITES = "game.scene.storage.writes";
     static final String GATE_LINKS = "game.scene.gate.links";
@@ -625,6 +630,18 @@ public final class SceneMetrics {
         WRITE_FAILED
     }
 
+    /** 玩家存盘分段耗时阶段（{@code game.scene.save.stage{stage}}，不带 player_id 标签）。 */
+    public enum SaveStage {
+        /** 组装不可变 {@code PlayerSave} 快照（{@code ScenePlayer.toSave()}）。 */
+        ASSEMBLE,
+        /** 与 {@code lastPersisted} 判脏比对。 */
+        DIRTY_CHECK,
+        /** 存储线程序列化玩家状态字节。 */
+        SERIALIZE,
+        /** 存储线程写库事务耗时。 */
+        DB_WRITE
+    }
+
     private final MeterRegistry registry;
     private final Clock clock;
     private final Timer logicTaskWait;
@@ -638,6 +655,9 @@ public final class SceneMetrics {
     private final Map<SkillResult, Counter> skillReleases;
     private final Counter skillInterrupts;
     private final Map<PeriodicSave, Counter> periodicSaves;
+    private final Map<SaveStage, Timer> saveStages;
+    private final Timer periodicSaveCallback;
+    private final Counter periodicSaveSlow;
     private final Map<TeamFollowResult, Counter> teamFollows;
     private final Counter aoiEntered;
     private final Counter aoiLeft;
@@ -845,6 +865,19 @@ public final class SceneMetrics {
                 "63 镜像分支的同步结局：accepted = 受理（应答 {0}），其余各回 3005");
         this.mirrorResolves = counters(MirrorResolve.class, MIRROR_RESOLVES, "result",
                 "63 镜像分支取号结果的结局（每次受理恰好计一次）");
+        this.saveStages = new EnumMap<>(SaveStage.class);
+        for (SaveStage stage : SaveStage.values()) {
+            Duration[] buckets = stage == SaveStage.DB_WRITE ? STORAGE_BUCKETS : LOGIC_BUCKETS;
+            saveStages.put(stage, Timer.builder(SAVE_STAGE)
+                    .description("玩家存盘各阶段耗时（assemble / dirty_check / serialize / db_write，无 player_id 标签）")
+                    .tag("stage", tagValue(stage))
+                    .serviceLevelObjectives(buckets)
+                    .register(registry));
+        }
+        this.periodicSaveCallback = logicTimer(PERIODIC_SAVE_CALLBACK, "周期存盘单次回调总耗时");
+        this.periodicSaveSlow = Counter.builder(PERIODIC_SAVE_SLOW)
+                .description("周期存盘单次回调超过 10ms 的次数")
+                .register(registry);
     }
 
     /** 不导出任何指标的实例（测试 / 不关心指标的装配用）：没有子注册表的 {@link CompositeMeterRegistry} 上计量器都是空操作。 */
@@ -1181,6 +1214,20 @@ public final class SceneMetrics {
 
     public void periodicSave(PeriodicSave result) {
         periodicSaves.get(result).increment();
+    }
+
+    /** 记录存盘单个阶段耗时（任意线程安全）。 */
+    public void saveStage(SaveStage stage, long elapsedNanos) {
+        saveStages.get(stage).record(Math.max(0L, elapsedNanos), TimeUnit.NANOSECONDS);
+    }
+
+    /** 记录一次周期存盘回调总耗时；超过 10ms 时另计慢回调次数。 */
+    public void periodicSaveCallback(long elapsedNanos) {
+        long clamped = Math.max(0L, elapsedNanos);
+        periodicSaveCallback.record(clamped, TimeUnit.NANOSECONDS);
+        if (clamped > PERIODIC_SAVE_SLOW_THRESHOLD_NANOS) {
+            periodicSaveSlow.increment();
+        }
     }
 
     /**

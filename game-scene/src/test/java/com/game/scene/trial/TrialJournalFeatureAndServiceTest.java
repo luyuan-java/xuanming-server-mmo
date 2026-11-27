@@ -538,9 +538,9 @@ class TrialJournalFeatureAndServiceTest {
             assertThat(m2.getCommentaryKey()).isEqualTo("commentary_season_s" + sid + "_trial");
         }
 
-        // 用独立 TrialJournalService 模拟切到 S2（玄脉之季），验证条件 15/16 掩码过滤与独立领奖
+        // 用独立 TrialJournalService 模拟活跃赛季轮转至 S2（玄脉之季），验证条件 15/16 掩码过滤与独立领奖
         TrialJournalService s2Service = new TrialJournalService(
-                f.trialJournalTables, f.bags, f.appearance, f.clock, f.metrics, () -> 2);
+                f.trialJournalTables, f.bags, null, f.clock, f.sceneMetrics, () -> 2);
         GetTrialJournalResponse s2Snap = s2Service.getJournal(p, f.clock.epochMillis());
         assertThat(s2Snap.getSnapshot().getTotalPermanentSeals()).isEqualTo(36);
         var ch3 = s2Snap.getSnapshot().getChaptersList().stream()
@@ -571,7 +571,7 @@ class TrialJournalFeatureAndServiceTest {
 
         // 补亮 3021 护卫救援 2 印，领取 S2 里程碑 3022，永久印仍为 0 且切到 S3 时 S3 为 0/6
         var rescueS2 = s2Service.applyBattleCredit(p, BattleFixture.settlement(p.playerId(), 99503L, 0L)
-                .setBattleConfigId(109).setMatchMode(3).setTotalRounds(5).setFinishedAtMs(f.clock.epochMillis())
+                .setBattleConfigId(109).setMatchMode(4).setTotalRounds(5).setFinishedAtMs(f.clock.epochMillis())
                 .setTrialFacts(BattleTrialJournalFacts.newBuilder()
                         .setJournalEntryId(3021).setTrialRuleVersion(1).setSeasonId(2).setInitialHumanCount(1)
                         .setGuardSurvived(true))
@@ -585,7 +585,7 @@ class TrialJournalFeatureAndServiceTest {
         assertThat(claimed.response().getSnapshot().getTotalPermanentLitSeals()).isZero();
 
         TrialJournalService s3Service = new TrialJournalService(
-                f.trialJournalTables, f.bags, f.appearance, f.clock, f.metrics, () -> 3);
+                f.trialJournalTables, f.bags, null, f.clock, f.sceneMetrics, () -> 3);
         var s3Ch3 = s3Service.getJournal(p, f.clock.epochMillis()).getSnapshot().getChaptersList().stream()
                 .filter(c -> c.getChapterId() == TrialJournalRules.CHAPTER_SEASONAL).findFirst().orElseThrow();
         assertThat(s3Ch3.getSeasonId()).isEqualTo(3);

@@ -189,7 +189,128 @@ final class PrepSkillBanBattleEngineTest {
         assertThat(duelEngine.prepDurationSeconds()).isEqualTo(BattleConstants.TACTICAL_PREP_WITH_BAN_DURATION_SECONDS);
         BattlePrepState duelPrep = duelEngine.prepStateForViewer(6501L, 99999L);
         assertThat(duelPrep.getSkillBanSlotsPerTeam()).isEqualTo(3);
+        assertThat(duelPrep.getSkillProtectSlotsPerTeam()).isEqualTo(1);
         assertThat(duelPrep.getSelfAvailableSealsList()).isEmpty();
         assertThat(duelPrep.getSelfAvailablePetsList()).isEmpty();
+    }
+
+    @Test
+    void prepSkillBanV2ProtectCounterAndTeammateEquippedSkills() {
+        BattlePlayerSnapshot pA1 = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(7501L)
+                .setTeamIndex(0)
+                .setIsTeamCaptain(true)
+                .setActiveSeasonId(1)
+                .setPlayerName("队长A1")
+                .setLevel(30)
+                .setMaxHealth(5000)
+                .setMaxMana(2000)
+                .setPhysicalAttack(500)
+                .setDefense(100)
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(5000).setMana(2000).setSpeed(200))
+                .addSkillTableIds(10002)
+                .addSkillTableIds(10003)
+                .addSkillTableIds(10040)
+                .putSkillRanks(10002, 1)
+                .putSkillRanks(10003, 1)
+                .putSkillRanks(10040, 1)
+                .build();
+        BattlePlayerSnapshot pA2 = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(7502L)
+                .setTeamIndex(0)
+                .setIsTeamCaptain(false)
+                .setActiveSeasonId(1)
+                .setPlayerName("队友A2")
+                .setLevel(30)
+                .setMaxHealth(5000)
+                .setMaxMana(2000)
+                .setPhysicalAttack(500)
+                .setDefense(100)
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(5000).setMana(2000).setSpeed(190))
+                .addSkillTableIds(10002)
+                .addSkillTableIds(10020)
+                .putSkillRanks(10002, 1)
+                .putSkillRanks(10020, 1)
+                .build();
+        BattlePlayerSnapshot pB1 = BattlePlayerSnapshot.newBuilder()
+                .setPlayerId(7503L)
+                .setTeamIndex(1)
+                .setIsTeamCaptain(true)
+                .setActiveSeasonId(1)
+                .setPlayerName("敌方B1")
+                .setLevel(30)
+                .setMaxHealth(5000)
+                .setMaxMana(2000)
+                .setPhysicalAttack(500)
+                .setDefense(100)
+                .setBaseAttributes(BaseAttributesComp.newBuilder().setHealth(5000).setMana(2000).setSpeed(180))
+                .addSkillTableIds(10002)
+                .addSkillTableIds(10003)
+                .addSkillTableIds(10023)
+                .addSkillTableIds(10040)
+                .putSkillRanks(10002, 1)
+                .putSkillRanks(10003, 1)
+                .putSkillRanks(10023, 1)
+                .putSkillRanks(10040, 1)
+                .build();
+
+        CreateBattleRequest req = CreateBattleRequest.newBuilder()
+                .setBattleId(9911L)
+                .setBattleConfigId(5)
+                .setMatchMode(MatchMode.MATCH_MODE_PVP_TEAM_VALUE)
+                .setSeed(9911L)
+                .setRankedContext(RankedMatchContext.newBuilder()
+                        .setSeasonId(1).setSeasonKey("s1").setRankGeneration(1)
+                        .setRuleVersion(2).setTeamSize(2).setSkillBanSlotsPerTeam(3).build())
+                .addPlayers(pA1)
+                .addPlayers(pA2)
+                .addPlayers(pB1)
+                .build();
+
+        TurnBattleEngine engine = ((BattleStart.Started) TurnBattleEngine.start(req, data)).engine();
+        BattlePrepState prepA1 = engine.prepStateForViewer(7501L, 99999L);
+        assertThat(prepA1.getSkillProtectSlotsPerTeam()).isEqualTo(1);
+        // 7501 仅看到队友 7502 携带的 10020（不含自己独有的 10003/10040 或敌方的 10023，也不含豁免技 10002）
+        assertThat(prepA1.getTeammateEquippedSkillIdsList()).containsExactly(10020);
+        // 观众清空护招与队友技能
+        BattlePrepState obsPrep = engine.prepStateForViewer(0L, 99999L);
+        assertThat(obsPrep.getSkillProtectSlotsPerTeam()).isEqualTo(1);
+        assertThat(obsPrep.getTeamEffectiveProtectedSkillId()).isZero();
+        assertThat(obsPrep.getTeammateEquippedSkillIdsList()).isEmpty();
+
+        // 校验：非白名单护招拒、与本人禁招同招拒
+        assertThat(engine.updateBattlePrep(7501L, 0, 0L, false, false, List.of(), true, 10002).errorTip())
+                .isEqualTo(ActionChecks.INVALID_PARAMETER);
+        assertThat(engine.updateBattlePrep(7501L, 0, 0L, false, true, List.of(10003, 10023), false, 0).errorTip())
+                .isZero();
+        assertThat(engine.updateBattlePrep(7501L, 0, 0L, false, false, List.of(), true, 10003).errorTip())
+                .isEqualTo(ActionChecks.INVALID_PARAMETER);
+
+        // 队长 7501 护招 10040，非队长 7502 护招 10020（1:1 队长胜出 -> 10040）
+        assertThat(engine.updateBattlePrep(7501L, 0, 0L, true, false, List.of(), true, 10040).errorTip()).isZero();
+        var rA2 = engine.updateBattlePrep(7502L, 0, 0L, true, false, List.of(), true, 10020);
+        assertThat(rA2.errorTip()).isZero();
+        assertThat(rA2.prepState().getTeamEffectiveProtectedSkillId()).isEqualTo(10040);
+
+        // B1 禁 [10023, 10040]（撞车 10023 + 禁了 A 队护招 10040）、护招 10003（反制 A 队禁招 10003）
+        assertThat(engine.updateBattlePrep(7503L, 0, 0L, true, true, List.of(10023, 10040), true, 10003).errorTip())
+                .isZero();
+        assertThat(engine.finalizePrepPhase()).isTrue();
+
+        BattleStateS2C state = engine.buildStateSnapshot();
+        assertThat(state.getTeamAProtectedSkillId()).isEqualTo(10040);
+        assertThat(state.getTeamBProtectedSkillId()).isEqualTo(10003);
+        assertThat(state.getCounteredBanSkillIdsList()).containsExactly(10003, 10040);
+        assertThat(state.getBannedSkillIdsList()).containsExactly(10023);
+
+        // 破禁化解的 10003/10040 恢复可放；双方撞车的 10023 仍被禁
+        BattleAction cast10003 = BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                .setSkillTableId(10003).setTargetId(7503L).build();
+        BattleAction cast10023 = BattleAction.newBuilder()
+                .setActionType(eBattleActionType.BATTLE_ACTION_SKILL)
+                .setSkillTableId(10023).setTargetId(7501L).build();
+        assertThat(engine.validateAction(7501L, cast10003)).isEqualTo(ActionChecks.SUCCESS);
+        assertThat(engine.validateAction(7503L, cast10023)).isEqualTo(ActionChecks.SKILL_BANNED_IN_BATTLE);
     }
 }

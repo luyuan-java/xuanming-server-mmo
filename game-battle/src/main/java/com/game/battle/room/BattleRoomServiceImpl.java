@@ -1047,7 +1047,8 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
         room.engine.markPlayerEntered(playerId);
         TurnBattleEngine.UpdatePrepResult res = room.engine.updateBattlePrep(
                 playerId, request.getSelectedSealId(), request.getSelectedPetId(), request.getReady(),
-                request.getUpdateBannedSkills(), request.getBannedSkillIdsList());
+                request.getUpdateBannedSkills(), request.getBannedSkillIdsList(),
+                request.getUpdateProtectedSkill(), request.getProtectedSkillId());
         if (res.errorTip() != 0) {
             return response.setErrorMessage(tip(res.errorTip())).build();
         }
@@ -1401,9 +1402,17 @@ public final class BattleRoomServiceImpl implements BattleRoomService {
             if(pending.finalTurn!=null)broadcastTurnResult(room,pending.finalTurn);
             finishBattle(room,pending.event.getOutcome(),pending.spectateReason,pending.event);
         }else{
-            if(room.spectateRelayEnabled)publishSpectateFrame(room,com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_END,room.lastSpectateRound,
-                    outbound.frame(Notify.SPECTATE_END,SpectateEndS2C.newBuilder().setBattleId(room.battleId).setOutcome(pending.event.getOutcome())
-                            .setReason(pending.spectateReason).build()));
+            if(room.spectateRelayEnabled){
+                if(pending.finalTurn!=null){
+                    MessageContent spectateTurn=outbound.frame(Notify.SPECTATE_TURN_RESULT,
+                            BattleViews.forObserver(pending.finalTurn.getState()).toTurnResult(pending.finalTurn));
+                    publishSpectateFrame(room,com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_TURN,
+                            pending.finalTurn.getRoundIndex(),spectateTurn);
+                }
+                publishSpectateFrame(room,com.game.proto.contracts.kafka.eSpectateFrameKind.SPECTATE_FRAME_END,room.lastSpectateRound,
+                        outbound.frame(Notify.SPECTATE_END,SpectateEndS2C.newBuilder().setBattleId(room.battleId).setOutcome(pending.event.getOutcome())
+                                .setReason(pending.spectateReason).build()));
+            }
             log.info("停服原终局已获SQL COMPLETE battle_id={}，个人奖励由权威Inbox继续投递",Long.toUnsignedString(room.battleId));
         }
         eraseRoom(room,pending.endReason);

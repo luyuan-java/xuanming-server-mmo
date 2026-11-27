@@ -391,6 +391,35 @@ class SpectateHubTest {
     }
 
     @Test
+    void 战前变阵亮牌STATE跃迁_向已在看会话扇出亮牌161_心跳仍不打扰() throws Exception {
+        byte[] prepState = event(eSpectateFrameKind.SPECTATE_FRAME_STATE, 1,
+                MessageContent.newBuilder().setMessageId(STATE_ID).setSerializedMessage(
+                        SpectateStateS2C.newBuilder().setState(
+                                com.game.proto.BattleStateS2C.newBuilder().setBattleId(BATTLE).setRoundIndex(1)
+                                        .setPrepState(com.game.proto.BattlePrepState.newBuilder().setActive(true).setDeadlineMs(15_000L))).build().toByteString()).build(),
+                INSTANCE);
+        source.state.put(BATTLE, prepState);
+        hub.subscribe(session(), ticket());
+        List<MessageContent> initial = frames(channelOf(0));
+        assertThat(ids(initial)).containsExactly(STATE_ID);
+        assertThat(SpectateStateS2C.parseFrom(initial.get(0).getSerializedMessage()).getState().getPrepState().getActive()).isTrue();
+
+        // 变阵期内 10s 心跳：prepActive true→true，不重复推已在看会话
+        publish(prepState);
+        assertThat(frames(channelOf(0))).isEmpty();
+
+        // 变阵结束亮牌：prepActive true→false，已在看会话必须收到亮牌 161
+        publish(stateFrame(1));
+        List<MessageContent> revealed = frames(channelOf(0));
+        assertThat(ids(revealed)).containsExactly(STATE_ID);
+        assertThat(SpectateStateS2C.parseFrom(revealed.get(0).getSerializedMessage()).getState().hasPrepState()).isFalse();
+
+        // 亮牌后常规心跳：prepActive false→false，不再推送给已在看会话
+        publish(stateFrame(1));
+        assertThat(frames(channelOf(0))).isEmpty();
+    }
+
+    @Test
     void 解析不了的帧丢弃并计数_不影响之后的帧() throws Exception {
         source.state.put(BATTLE, stateFrame(1));
         hub.subscribe(session(), ticket());
