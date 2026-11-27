@@ -303,7 +303,51 @@ public final class WriterAuthority {
             }
         }
     }
-    /** normal唯一事务入口：pre-BEGIN强E → own-slot CURRENT ACTIVE锁 → 只读meta/registry。 */
+    /** 事务外纯读专用读闸门（主仓第 21 条）：只核一次 route_meta 的世代与 writable，不开事务、不锁不改 writer_slot；冻结时仍挡回。 */
+    void verifyReadGate(Connection raw) throws SQLException {
+        long started = System.nanoTime();
+        try {
+            requireOpen();
+            if (!raw.getAutoCommit()) {
+                throw new SQLException("读闸门仅用于事务外纯读");
+            }
+            current(raw);
+        } finally {
+            gateObserver.observe(schema, PHASE_READ, System.nanoTime() - started);
+        }
+    }
+
+    /** 事务内合并读取 route_meta 与 writer_registry（主仓第 20 条），单次往返核对世代/epoch/目录/在役身份。 */
+    private Epoch verifyMetaAndRegistryMerged(Connection raw) throws SQLException {
+        String sql = "SELECT m.generation,m.writer_epoch,m.writable,m.fence_shards,m.catalog_revision,m.freeze_run_id,"
+                + "r.generation,r.instance_id,r.sql_principal,r.registration_digest,r.state "
+                + "FROM " + table("route_meta") + " m LEFT JOIN " + table("writer_registry") + " r ON r.writer_key=? WHERE m.id=1";
+        try (var s = raw.prepareStatement(sql)) {
+            s.setBytes(1, writer);
+            s.setQueryTimeout(3);
+            try (var r = s.executeQuery()) {
+                if (!r.next() || !generation.equals(r.getString(1)) || u64(r, 2) == 0 || r.getInt(3) != 1
+                        || r.getInt(4) != 64 || u64(r, 5) == 0 || r.getBytes(6) == null
+                        || (r.getBytes(6).length != 0 && r.getBytes(6).length != 16)) {
+                    throw new SQLException("authority已冻结或epoch/meta原件非法");
+                }
+                if (r.getString(7) == null || !generation.equals(r.getString(7))
+                        || !Arrays.equals(instance, r.getBytes(8))
+                        || !Arrays.equals(principal, r.getBytes(9))
+                        || !Arrays.equals(registration, r.getBytes(10))
+                        || r.getInt(11) != 1) {
+                    throw new SQLException("writer未ACTIVE或启动原件不符");
+                }
+                Epoch result = new Epoch(u64(r, 2), u64(r, 5), r.getBytes(6));
+                if (r.next()) {
+                    throw new SQLException("重复meta或重复writer_registry");
+                }
+                return result;
+            }
+        }
+    }
+
+    /** normal唯一事务入口：pre-BEGIN强E → own-slot CURRENT ACTIVE锁（LOCK_TOUCH 命中即跳过回读）→ 合并读 meta+registry。 */
     void begin(Connection raw)throws SQLException {
         requireOpen();
         if(!raw.getAutoCommit())throw new SQLException("禁止在旧事务snapshot内做epoch预读");
@@ -318,21 +362,24 @@ public final class WriterAuthority {
         raw.setAutoCommit(false);
         try {
             int selected=nextSlot.getAndIncrement()&63;
-            if(lockTouch)try(var lock=raw.prepareStatement("UPDATE "+table("writer_slot")
-                    +" SET lock_touch=1-lock_touch WHERE writer_key=? AND slot=? AND generation=? AND writer_epoch=? AND state=1")){
-                lock.setBytes(1,writer);lock.setInt(2,selected);lock.setString(3,generation);
-                lock.setObject(4,new java.math.BigInteger(Long.toUnsignedString(before.value())));lock.setQueryTimeout(3);
-                if(lock.executeUpdate()!=1)throw new SQLException("CURRENT slot条件锁未命中唯一ACTIVE/E/generation原件","40001");
-            }
-            try(var s=raw.prepareStatement("SELECT generation,writer_epoch,state FROM "+table("writer_slot")
-                    +" WHERE writer_key=? AND slot=?"+(lockTouch?"":" FOR UPDATE"))){
-                s.setBytes(1,writer);s.setInt(2,selected);s.setQueryTimeout(3);
-                try(var r=s.executeQuery()){
-                    if(!r.next()||!generation.equals(r.getString(1))||u64(r,2)!=before.value()||r.getInt(3)!=1||r.next())
-                        throw new SQLException("own slot CURRENT状态或epoch已变化，不能复活旧RR资格","40001");
+            if(lockTouch) {
+                try(var lock=raw.prepareStatement("UPDATE "+table("writer_slot")
+                        +" SET lock_touch=1-lock_touch WHERE writer_key=? AND slot=? AND generation=? AND writer_epoch=? AND state=1")){
+                    lock.setBytes(1,writer);lock.setInt(2,selected);lock.setString(3,generation);
+                    lock.setObject(4,new java.math.BigInteger(Long.toUnsignedString(before.value())));lock.setQueryTimeout(3);
+                    if(lock.executeUpdate()!=1)throw new SQLException("CURRENT slot条件锁未命中唯一ACTIVE/E/generation原件（本代已结束或epoch变化）","40001");
+                }
+            } else {
+                try(var s=raw.prepareStatement("SELECT generation,writer_epoch,state FROM "+table("writer_slot")
+                        +" WHERE writer_key=? AND slot=? FOR UPDATE")){
+                    s.setBytes(1,writer);s.setInt(2,selected);s.setQueryTimeout(3);
+                    try(var r=s.executeQuery()){
+                        if(!r.next()||!generation.equals(r.getString(1))||u64(r,2)!=before.value()||r.getInt(3)!=1||r.next())
+                            throw new SQLException("own slot行缺失或CURRENT状态/epoch已变化（本代已结束），拒绝写入","40001");
+                    }
                 }
             }
-            Epoch after=current(raw);registry(raw);
+            Epoch after = verifyMetaAndRegistryMerged(raw);
             if(after.value()!=before.value()||after.catalog()!=before.catalog())throw new SQLException("epoch/catalog在事务进入期间变化","40001");
         } catch(SQLException|RuntimeException|Error failure){
             try{raw.rollback();raw.setAutoCommit(true);}catch(SQLException cleanup){

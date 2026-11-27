@@ -43,6 +43,10 @@ public final class BattleFreeze {
         return deadlineMs > Long.MAX_VALUE - window ? Long.MAX_VALUE : deadlineMs + window;
     }
 
+    private static final java.util.concurrent.atomic.AtomicLong FREEZE_SEQ = new java.util.concurrent.atomic.AtomicLong(1L);
+
+    /** 本进程内单调唯一的冻结实例标识（供异步回调按值核对身份，严禁跨线程捕获可变 BattleFreeze 引用）。 */
+    private final long freezeId = FREEZE_SEQ.getAndIncrement();
     private final long battleId;
     private final int battleNodeId;
     private Phase phase;
@@ -102,6 +106,10 @@ public final class BattleFreeze {
                 fighting ? Phase.FIGHTING : Phase.PREPARING, deadline, prepareDeadline, false);
         freeze.lockExtended = fighting;
         return freeze;
+    }
+
+    public long freezeId() {
+        return freezeId;
     }
 
     public long battleId() {

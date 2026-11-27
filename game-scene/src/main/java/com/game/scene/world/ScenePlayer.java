@@ -50,6 +50,10 @@ public final class ScenePlayer {
     /** 66 的脏位：velocity。 */
     static final int DIRTY_VELOCITY = 1 << 1;
 
+    private static final java.util.concurrent.atomic.AtomicLong INSTANCE_SEQ = new java.util.concurrent.atomic.AtomicLong(1L);
+
+    /** 本进程内单调唯一的进场实例标识（供异步回调按值核对身份，严禁跨线程捕获可变 ScenePlayer 引用）。 */
+    private final long instanceId = INSTANCE_SEQ.getAndIncrement();
     private final long playerId;
     private final long entity;
     /** 当前绑定的 gate 会话；进入断线保留 / 离线托管后置 null，重连接回时重新绑定。 */
@@ -272,6 +276,10 @@ public final class ScenePlayer {
                 ? PlayerRealtimeBuffs.fromSaved(state.getSavedBuffs())
                 : PlayerRealtimeBuffs.empty();
         this.spectateChatPref = state.getSpectateChatPref();
+    }
+
+    public long instanceId() {
+        return instanceId;
     }
 
     public long playerId() {

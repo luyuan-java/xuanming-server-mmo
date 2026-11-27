@@ -68,7 +68,7 @@ public final class AuthorityConnection implements InvocationHandler {
             if(name.equals("getAutoCommit"))return auto;
             if(name.equals("setAutoCommit")){
                 boolean next=(Boolean)args[0];
-                if(auto&&!next&&begun)throw new SQLException("先完成活动auto operation再开始显式事务","HY010");
+                if(auto&&!next&&(begun||activeAuto!=null))throw new SQLException("先完成活动auto operation再开始显式事务","HY010");
                 if(next&&!auto&&begun)finish(!serverAborted);auto=next;return null;
             }
             if(name.equals("commit")){if(auto)throw new SQLException("autoCommit不能显式commit","25000");finish(true);return null;}
@@ -118,6 +118,11 @@ public final class AuthorityConnection implements InvocationHandler {
     private void begin()throws SQLException {
         healthy();if(serverAborted)throw new SQLException("服务器已中止原事务，仅允许完整rollback","25000");
         if(!begun){try{authority.begin(physical);begun=true;}catch(SQLException failure){if(uncertain(failure)){poison();throw unknown(failure);}throw failure;}}
+    }
+    /** 事务外纯读只过读闸门：核一次 route_meta（冻结照旧挡回），不开事务、不锁不改 writer_slot。 */
+    private void readGate()throws SQLException {
+        healthy();
+        try{authority.verifyReadGate(physical);}catch(SQLException failure){if(uncertain(failure)){poison();throw unknown(failure);}throw failure;}
     }
     private void finish(boolean commit)throws SQLException {
         healthy();if(!begun)return;
@@ -262,7 +267,13 @@ public final class AuthorityConnection implements InvocationHandler {
                     if(readOnly&&kind==AuthoritySql.Kind.WRITE)throw new SQLException("只读Connection不能写业务数据","25006");
                     closePrevious();
                     if(auto&&activeAuto!=null&&activeAuto!=this)throw new SQLException("同physical Connection已有未完成auto operation","HY010");
-                    begin();if(auto)activeAuto=this;
+                    boolean pureAutoRead = auto && !begun && kind == AuthoritySql.Kind.READ;
+                    if (pureAutoRead) {
+                        readGate();
+                    } else {
+                        begin();
+                    }
+                    if(auto)activeAuto=this;
                     CopyBudget budget=new CopyBudget(raw.getQueryTimeout(),physical.getNetworkTimeout(),keyLimits,hasSessionDeadline,sessionDeadlineUntil);
                     operationBudget=budget;captureKeys=kind==AuthoritySql.Kind.WRITE&&(preparedSql!=null?preparedKeys:requestedKeys(args));
                     try{
@@ -281,7 +292,9 @@ public final class AuthorityConnection implements InvocationHandler {
                         if((Boolean)outcome)wrapRows(raw.getResultSet(),this,true);
                         completeIfReady();return outcome;
                     }catch(SQLException failure){
-                        if(auto&&begun&&!unknown.get()){
+                        if(auto&&!begun&&activeAuto==this){
+                            activeAuto=null;
+                        } else if(auto&&begun&&!unknown.get()){
                             try{budget.restore(raw,physical);finish(false);}catch(SQLException rollback){failure.addSuppressed(rollback);poison();throw unknown(failure);}
                         }
                         throw failure;
@@ -308,8 +321,12 @@ public final class AuthorityConnection implements InvocationHandler {
             sequenceComplete=true;completeIfReady();generic=false;
         }
         void completeIfReady()throws SQLException {
-            if(!cleanup&&auto&&begun&&activeAuto==this&&sequenceComplete
+            if(!cleanup&&auto&&activeAuto==this&&sequenceComplete
                     &&rows.values().stream().noneMatch(row->row.ownsCompletion&&!row.completed)){
+                if(!begun){
+                    activeAuto=null;
+                    return;
+                }
                 if(captureKeys){
                     try(ResultSet original=raw.getGeneratedKeys()){keys=Snapshot.capture(original,operationBudget,this);}
                     operationBudget.restore(raw,physical);captureKeys=false;

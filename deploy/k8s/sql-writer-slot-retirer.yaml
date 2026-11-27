@@ -1,0 +1,52 @@
+# 写者槽位缩容收尾：CronJob（每 5 分钟对账）、手工一次性 Job（带 ttlSecondsAfterFinished 自动回收）与 30 分钟失败告警
+# 对齐主仓 docs/design/writer-roster-exhaustion-20261106.md §5.9
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sql-writer-slot-retirer
+  labels:
+    app.kubernetes.io/part-of: xuanming-server-mmo
+    app.kubernetes.io/component: sql-writer-slot-retirer
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 600
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: sql-writer-registrar
+          restartPolicy: Never
+          containers:
+            - name: slot-retirer
+              image: xuanming/game-data:latest
+              args:
+                - "--mode=retire-removed-slots"
+              env:
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sql-writer-slot-retirer-alerts
+  labels:
+    app.kubernetes.io/part-of: xuanming-server-mmo
+spec:
+  groups:
+    - name: sql-writer-slot-retirer
+      rules:
+        - alert: SqlWriterSlotRetirerFailing
+          expr: |
+            (time() - max by (namespace, cronjob) (kube_cronjob_status_last_successful_time{cronjob=~".*sql-writer-slot-retirer.*"})) > 1800
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "SQL 写者缩容收尾任务连续 30 分钟无成功记录"
+            description: "CronJob {{ $labels.cronjob }} 超过 30 分钟未能完成缩容槽位末代退休，请检查归属校验（registered-elsewhere）或数据库连通性。"

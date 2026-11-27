@@ -54,7 +54,7 @@ class ZoneMergeSqlAuthorityTiDbTest {
         assertSqlFreezeRound(key,frozen.getGeneration(),1,2);
         assertThat(n("SELECT COUNT(*) FROM writer_registry")).isEqualTo(1);
         assertThat(n("SELECT COUNT(*) FROM writer_lifecycle_receipt WHERE kind=1 AND previous_epoch=1 AND resulting_epoch=1")).isEqualTo(1);
-        assertThat(n("SELECT COUNT(*) FROM writer_slot WHERE state=2 AND writer_epoch=1")).isEqualTo(64);
+        assertThat(n("SELECT COUNT(*) FROM writer_slot")).isZero();
         var planned=plan(key);assertThat(planned.getItemCount()).isEqualTo(6);assertThatThrownBy(()->store.approve(key,"0".repeat(64),"reviewer")).isInstanceOf(SQLException.class);
         var finished=complete(key,planned);assertThat(n("SELECT zone_id FROM player WHERE player_id=1")).isEqualTo(2);assertThat(n("SELECT owner_epoch FROM player WHERE player_id=1")).isEqualTo(11);assertThat(n("SELECT owner_revision FROM player WHERE player_id=1")).isEqualTo(1);
         assertThat(db.jdbc().queryForObject("SELECT account FROM player WHERE player_id=1",String.class)).isEqualTo("acc1");assertThat(db.jdbc().queryForObject("SELECT data FROM player_state WHERE player_id=1",byte[].class)).isEqualTo(new byte[]{8,7,6});
@@ -77,9 +77,7 @@ class ZoneMergeSqlAuthorityTiDbTest {
         assertThat(n("SELECT COUNT(DISTINCT sql_principal) FROM writer_registry")).isEqualTo(2);
         assertThat(n("SELECT COUNT(*) FROM writer_lifecycle_receipt WHERE kind=1")).isEqualTo(2);
         assertThat(n("SELECT COUNT(*) FROM writer_lifecycle_receipt WHERE kind=1 AND previous_epoch=3 AND resulting_epoch=3")).isEqualTo(1);
-        assertThat(n("SELECT COUNT(*) FROM writer_slot WHERE state=2 AND writer_epoch=1")).isEqualTo(64);
-        assertThat(n("SELECT COUNT(*) FROM writer_slot WHERE state=2 AND writer_epoch=3")).isEqualTo(64);
-        assertThat(db.jdbc().queryForList("SELECT COUNT(*) FROM writer_slot GROUP BY writer_key",Long.class)).containsExactlyInAnyOrder(64L,64L);
+        assertThat(n("SELECT COUNT(*) FROM writer_slot")).isZero();
         var reversePlan=plan(undo);complete(undo,reversePlan);store.release(undo,hash(reversePlan),reverse.getGeneration(),"reviewer");
         assertThat(n("SELECT zone_id FROM player WHERE player_id=1")).isEqualTo(1);assertThat(n("SELECT owner_epoch FROM player WHERE player_id=1")).isEqualTo(12);assertThat(n("SELECT zone_id FROM player WHERE player_id=2")).isEqualTo(2);assertThat(n("SELECT owner_epoch FROM player WHERE player_id=2")).isEqualTo(30);assertThat(n("SELECT COUNT(*) FROM zone_merged_into")).isZero();assertThat(n("SELECT manual_status FROM zone_config WHERE zone_id=1")).isEqualTo(1);assertThat(n("SELECT COUNT(*) FROM zone_merge_run")).isEqualTo(2);
     }

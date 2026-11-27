@@ -463,11 +463,14 @@ public final class PlayerBattleService implements BattleHooks {
         world.haltForBattle(player);
         CompletableFuture<PrepareBattleResponse> reply = new CompletableFuture<>();
         long ttl = BattleRedis.lockTtlSec(prepareDeadline, clock.epochMillis());
+        long playerInstanceId = player.instanceId();
+        long ownerEpoch = player.ownerEpoch();
+        long freezeId = freeze.freezeId();
         onLogic(locks.prepareLock(playerId, battleId, request.getBattleNodeId(), deadline, prepareDeadline, ttl), (held, error) -> {
             try {
-                onPrepareLocked(player, freeze, preparedSnapshot, jianghuFee, held, error, reply);
+                onPrepareLocked(playerId, playerInstanceId, ownerEpoch, battleId, freezeId, preparedSnapshot, jianghuFee, held, error, reply);
             } catch (RuntimeException e) {
-                abandonPrepare(player, freeze);
+                abandonPrepare(playerId, playerInstanceId, ownerEpoch, battleId, freezeId);
                 throw e;
             }
         }, reply::completeExceptionally);
@@ -479,11 +482,12 @@ public final class PlayerBattleService implements BattleHooks {
      * （审计 FRZ-2）。冻结若还挂着就摘掉；再尽力只删一次备战锁——正常流程里紧随其后的那次尽力删锁可能正是被这个异常跳过的
      * （例如写锁超时、解冻那一步抛出），不补的话孤儿锁留到备战 TTL。删的是 {@code b == X 且 s ≠ F} 的锁，对别的局、对已确认的局都无害。
      */
-    private void abandonPrepare(ScenePlayer player, BattleFreeze freeze) {
-        long playerId = player.playerId();
-        long battleId = freeze.battleId();
+    private void abandonPrepare(long playerId, long playerInstanceId, long ownerEpoch, long battleId, long freezeId) {
         try {
-            if (world.playerById(playerId) == player && player.battle().freeze() == freeze) {
+            ScenePlayer player = world.playerById(playerId);
+            BattleFreeze freeze = player == null ? null : player.battle().freeze();
+            if (player != null && player.instanceId() == playerInstanceId && player.ownerEpoch() == ownerEpoch
+                    && freeze != null && freeze.freezeId() == freezeId) {
                 freeze.setLockPending(false);
                 clearFreeze(player, LockAction.KEEP_LOCK);
             }
@@ -523,12 +527,14 @@ public final class PlayerBattleService implements BattleHooks {
         return true;
     }
 
-    private void onPrepareLocked(ScenePlayer player, BattleFreeze freeze, BattlePlayerSnapshot snapshot,
+    private void onPrepareLocked(long playerId, long playerInstanceId, long ownerEpoch, long battleId, long freezeId,
+                                 BattlePlayerSnapshot snapshot,
                                  com.game.proto.JianghuDuelPrepareFee jianghuFee, String held, Throwable error,
                                  CompletableFuture<PrepareBattleResponse> reply) {
-        long playerId = player.playerId();
-        long battleId = freeze.battleId();
-        boolean current = world.playerById(playerId) == player && player.battle().freeze() == freeze;
+        ScenePlayer player = world.playerById(playerId);
+        BattleFreeze freeze = player == null ? null : player.battle().freeze();
+        boolean current = player != null && player.instanceId() == playerInstanceId && player.ownerEpoch() == ownerEpoch
+                && freeze != null && freeze.freezeId() == freezeId;
         if (!current) {
             // 实例已换或冻结已不是这个：占到了、或结局不明（出错 / 超时：脚本可能已执行、只是回复丢了）都尽力删一次
             // （match 认为这人没冻结成功，不会对他发取消；审计 FRZ-6 / RDS-10）。只删备战锁：这把锁若已被确认标成 F 就不是我们能删的。
@@ -740,8 +746,10 @@ public final class PlayerBattleService implements BattleHooks {
             writeOff(player, battleId, AckTrigger.APPLY);
             return;
         }
-        onLogic(locks.confirm(playerId, battleId, deadline, ttl), (fields, error) -> onLateConfirm(player, battleId, deadline, fields,
-                error));
+        long playerInstanceId = player.instanceId();
+        long ownerEpoch = player.ownerEpoch();
+        onLogic(locks.confirm(playerId, battleId, deadline, ttl), (fields, error) -> onLateConfirm(playerId, playerInstanceId, ownerEpoch,
+                battleId, deadline, fields, error));
     }
 
     /**
@@ -750,22 +758,29 @@ public final class PlayerBattleService implements BattleHooks {
      */
     private void extendFighting(ScenePlayer player, BattleFreeze freeze) {
         long playerId = player.playerId();
+        long playerInstanceId = player.instanceId();
+        long ownerEpoch = player.ownerEpoch();
+        long battleId = freeze.battleId();
+        long freezeId = freeze.freezeId();
         long deadline = freeze.deadlineMs();
-        onLogic(locks.confirm(playerId, freeze.battleId(), deadline, BattleRedis.lockTtlSec(freeze.effectiveDeadlineMs(), clock.epochMillis())),
+        onLogic(locks.confirm(playerId, battleId, deadline, BattleRedis.lockTtlSec(freeze.effectiveDeadlineMs(), clock.epochMillis())),
                 (fields, error) -> {
                     if (error != null) {
                         metrics.confirm(Confirm.ERROR);
                         log.warn("确认续锁失败（下一次补发确认再续） player={} battle_id={}: {}", Long.toUnsignedString(playerId),
-                                Long.toUnsignedString(freeze.battleId()), error.toString());
+                                Long.toUnsignedString(battleId), error.toString());
                         return;
                     }
                     if (fields == null) {
                         log.warn("确认续锁时锁已不是本局 player={} battle_id={}", Long.toUnsignedString(playerId),
-                                Long.toUnsignedString(freeze.battleId()));
+                                Long.toUnsignedString(battleId));
                         return;
                     }
-                    if (player.battle().freeze() == freeze) {
-                        freeze.setLockExtended(true);
+                    ScenePlayer current = world.playerById(playerId);
+                    BattleFreeze currentFreeze = current == null ? null : current.battle().freeze();
+                    if (current != null && current.instanceId() == playerInstanceId && current.ownerEpoch() == ownerEpoch
+                            && currentFreeze != null && currentFreeze.freezeId() == freezeId) {
+                        currentFreeze.setLockExtended(true);
                     }
                 });
     }
@@ -779,10 +794,12 @@ public final class PlayerBattleService implements BattleHooks {
      * <p>{@code deadline == 0}（事件没带期限）时这段 CONFIRM 只标了 F、没续期（脚本对 0 不写 d、不 EXPIRE）：{@code lockExtended} 不得置真，
      * 当场按锁里的期限补一次续期（审计 RDS-9；否则之后的补发全走零 Redis 的幂等分支，锁停在备战 TTL 提前过期）。
      */
-    private void onLateConfirm(ScenePlayer player, long battleId, long deadline, Map<String, String> fields, Throwable error) {
-        long playerId = player.playerId();
-        if(inboxPersistedApplied(player,battleId)){
-            onLogic(locks.deleteIfMatch(playerId,battleId),(ignored,failed)->logScriptError("已持久Inbox结算清迟到确认锁",playerId,battleId,failed));
+    private void onLateConfirm(long playerId, long playerInstanceId, long ownerEpoch, long battleId, long deadline,
+                               Map<String, String> fields, Throwable error) {
+        ScenePlayer player = world.playerById(playerId);
+        if (player != null && player.instanceId() == playerInstanceId && player.ownerEpoch() == ownerEpoch
+                && inboxPersistedApplied(player, battleId)) {
+            onLogic(locks.deleteIfMatch(playerId, battleId), (ignored, failed) -> logScriptError("已持久Inbox结算清迟到确认锁", playerId, battleId, failed));
             return;
         }
         if (error != null) {
@@ -797,7 +814,7 @@ public final class PlayerBattleService implements BattleHooks {
             metrics.rebuild(RebuildReason.LATE_CONFIRM, RebuildResult.MISS);
             return;
         }
-        if (world.playerById(playerId) != player || player.frozen()) {
+        if (player == null || player.instanceId() != playerInstanceId || player.ownerEpoch() != ownerEpoch || player.frozen()) {
             metrics.confirm(Confirm.IDEMPOTENT);
             metrics.rebuild(RebuildReason.LATE_CONFIRM, RebuildResult.MISS);
             return;
@@ -898,6 +915,8 @@ public final class PlayerBattleService implements BattleHooks {
         battle.setRecovery(Recovery.PENDING);
         long generation = battle.nextRecoveryGeneration();
         long playerId = player.playerId();
+        long playerInstanceId = player.instanceId();
+        long ownerEpoch = player.ownerEpoch();
         CompletableFuture<EnterRead> read;
         try {
             read = locks.enterRead(playerId);
@@ -905,12 +924,12 @@ public final class PlayerBattleService implements BattleHooks {
             // 端口约定出错以异常完成；同步抛出只做防御（钩子不得抛异常，也不得把恢复卡在 PENDING）
             read = CompletableFuture.failedFuture(e);
         }
-        onLogic(read, (snapshot, error) -> onEnterRead(player, generation, snapshot, error));
+        onLogic(read, (snapshot, error) -> onEnterRead(playerId, playerInstanceId, ownerEpoch, generation, snapshot, error));
     }
 
-    private void onEnterRead(ScenePlayer player, long generation, EnterRead read, Throwable error) {
-        long playerId = player.playerId();
-        if (world.playerById(playerId) != player) {
+    private void onEnterRead(long playerId, long playerInstanceId, long ownerEpoch, long generation, EnterRead read, Throwable error) {
+        ScenePlayer player = world.playerById(playerId);
+        if (player == null || player.instanceId() != playerInstanceId || player.ownerEpoch() != ownerEpoch) {
             return;
         }
         PlayerBattle battle = player.battle();
@@ -1214,12 +1233,18 @@ public final class PlayerBattleService implements BattleHooks {
         // D21：过了有效期限的宽限，判废前先读本局记录
         freeze.setRescuing(true);
         long playerId = player.playerId();
-        onLogic(locks.readSettlement(playerId, freeze.battleId()), (bytes, error) -> onRescueRead(player, freeze, bytes, error));
+        long playerInstanceId = player.instanceId();
+        long ownerEpoch = player.ownerEpoch();
+        long freezeId = freeze.freezeId();
+        long battleId = freeze.battleId();
+        onLogic(locks.readSettlement(playerId, battleId), (bytes, error) -> onRescueRead(playerId, playerInstanceId, ownerEpoch, freezeId, bytes, error));
     }
 
-    private void onRescueRead(ScenePlayer player, BattleFreeze freeze, byte[] bytes, Throwable error) {
-        long playerId = player.playerId();
-        if (world.playerById(playerId) != player || player.battle().freeze() != freeze) {
+    private void onRescueRead(long playerId, long playerInstanceId, long ownerEpoch, long freezeId, byte[] bytes, Throwable error) {
+        ScenePlayer player = world.playerById(playerId);
+        BattleFreeze freeze = player == null ? null : player.battle().freeze();
+        if (player == null || player.instanceId() != playerInstanceId || player.ownerEpoch() != ownerEpoch
+                || freeze == null || freeze.freezeId() != freezeId) {
             return;
         }
         freeze.setRescuing(false);

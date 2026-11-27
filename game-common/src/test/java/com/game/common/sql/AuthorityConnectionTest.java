@@ -57,7 +57,7 @@ class AuthorityConnectionTest {
         Statement a=f.managed.createStatement(),b=f.managed.createStatement();ResultSet result=a.executeQuery("SELECT v FROM business");
         SQLException blocked=assertThrows(SQLException.class,()->b.executeUpdate("UPDATE business SET v=2"));assertEquals("HY010",blocked.getSQLState());verify(second,never()).executeUpdate(anyString());
         assertSame(a,result.getStatement());assertSame(f.managed,a.getConnection());assertThrows(SQLException.class,()->a.unwrap(first.getClass()));
-        result.close();verify(f.raw).commit();
+        result.close();verify(f.authority).verifyReadGate(f.raw);verify(f.authority,never()).begin(f.raw);verify(f.raw,never()).commit();
     }
     @Test void explicitBatchPreservesDefinite1062PrefixAndCallerDecision()throws Exception{
         var f=fixture();PreparedStatement statement=mock(PreparedStatement.class);when(f.raw.prepareStatement("INSERT INTO business(v) VALUES (?)")).thenReturn(statement);

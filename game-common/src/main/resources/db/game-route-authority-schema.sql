@@ -38,8 +38,9 @@ CREATE TABLE writer_registry (
     retirement_request_id VARBINARY(16) NOT NULL,
     retirement_digest VARBINARY(32) NOT NULL,
     retired_ms BIGINT UNSIGNED NOT NULL,
-    PRIMARY KEY(writer_key), UNIQUE KEY uq_writer_principal(sql_principal), UNIQUE KEY uq_writer_instance(instance_id),
-    CHECK(state IN(1,2)), CHECK(registered_ms>0)
+    boot_seq BIGINT UNSIGNED NOT NULL DEFAULT 1,
+    PRIMARY KEY(writer_key), UNIQUE KEY uq_writer_principal_boot(sql_principal,boot_seq), UNIQUE KEY uq_writer_instance(instance_id),
+    CHECK(state IN(1,2)), CHECK(registered_ms>0), CHECK(boot_seq>0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 CREATE TABLE writer_slot (
     writer_key BINARY(16) NOT NULL,

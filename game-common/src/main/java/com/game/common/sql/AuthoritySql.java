@@ -5,7 +5,7 @@ import java.util.*;
 
 /** 完整扫描后才按受支持的数据语句族接受；不改写SQL，不用startsWith放行。 */
 public final class AuthoritySql {
-    enum Kind { READ, WRITE, DEADLINE }
+    enum Kind { READ, LOCKING_READ, WRITE, DEADLINE }
     private enum TokenKind { WORD, QUOTED_IDENTIFIER, VALUE, PUNCTUATION }
     private record Token(TokenKind kind, String text) {}
     private static final Set<String> CONTROL = Set.of("CALL","CREATE","ALTER","DROP","TRUNCATE","RENAME",
@@ -79,7 +79,7 @@ public final class AuthoritySql {
             if(tokens.stream().noneMatch(t->t.kind()==TokenKind.WORD&&t.text().equals("FROM")))throw denied("DELETE缺少FROM");
         } else if(tokens.stream().anyMatch(t->t.kind()==TokenKind.WORD&&t.text().equals("INTO")))
             throw denied("SELECT不允许输出或赋值目的地");
-        return family.equals("SELECT")?Kind.READ:Kind.WRITE;
+        return family.equals("SELECT") ? (locking ? Kind.LOCKING_READ : Kind.READ) : Kind.WRITE;
     }
     private static void identifier(List<Token> t,int i)throws SQLException {
         if(i>=t.size() || t.get(i).kind()!=TokenKind.WORD && t.get(i).kind()!=TokenKind.QUOTED_IDENTIFIER)

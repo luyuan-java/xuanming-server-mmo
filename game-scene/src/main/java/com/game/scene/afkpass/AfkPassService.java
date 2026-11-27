@@ -68,6 +68,12 @@ public final class AfkPassService {
     private final SceneClock clock;
     private final ProjectionSink projection;
     private final Executor logicExecutor;
+    private volatile java.util.function.LongFunction<ScenePlayer> playerLookup;
+
+    public AfkPassService bindPlayerLookup(java.util.function.LongFunction<ScenePlayer> lookup) {
+        this.playerLookup = Objects.requireNonNull(lookup, "lookup");
+        return this;
+    }
 
     public AfkPassService(AfkPassTables tables, CurrencyService currency, SceneClock clock) {
         this(tables, currency, clock, ProjectionSink.NOOP, Runnable::run);
@@ -240,6 +246,11 @@ public final class AfkPassService {
 
     private void sendProjection(ScenePlayer player, long expiresAtSec, long seq, long nowSec, String reason) {
         long playerId = player.playerId();
+        long ownerEpoch = player.ownerEpoch();
+        long instanceId = player.instanceId();
+        java.util.function.LongFunction<ScenePlayer> lookup = this.playerLookup;
+        // 仅在独立单测未装配 SceneWorld 时保留当前实例兜底；生产路径只捕获不可变身份值，禁止跨线程传播可变 ScenePlayer。
+        ScenePlayer unboundFallback = lookup == null ? player : null;
         boolean set = AfkPassRules.projectionIsSet(expiresAtSec, nowSec);
         CompletionStage<Boolean> future;
         try {
@@ -261,7 +272,15 @@ public final class AfkPassService {
                 return;
             }
             try {
-                logicExecutor.execute(() -> player.confirmAfkPassProjection(seq));
+                logicExecutor.execute(() -> {
+                    ScenePlayer current = lookup != null ? lookup.apply(playerId) : unboundFallback;
+                    if (current == null || current.instanceId() != instanceId || current.ownerEpoch() != ownerEpoch) {
+                        log.debug("[AfkPass] stale projection confirmation dropped player_id={} epoch={} seq={}",
+                                Long.toUnsignedString(playerId), ownerEpoch, seq);
+                        return;
+                    }
+                    current.confirmAfkPassProjection(seq);
+                });
             } catch (java.util.concurrent.RejectedExecutionException stopped) {
                 log.debug("[AfkPass] projection confirmation dropped during shutdown player_id={} seq={}",
                         Long.toUnsignedString(playerId), seq);

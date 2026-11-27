@@ -190,6 +190,7 @@ public final class PetFeature implements SceneFeature {
         DeferredReply deferred = call.defer();
         SceneWorld world = call.world();
         long ownerEpoch = player.ownerEpoch();
+        long playerInstanceId = player.instanceId();
         long petId = request.getPetId();
         String name = request.getName();
         try {
@@ -206,7 +207,7 @@ public final class PetFeature implements SceneFeature {
                     logicExecutor.execute(() -> {
                         try {
                             ScenePlayer current = world.playerById(playerId);
-                            if (current == null || current != player || current.ownerEpoch() != ownerEpoch) {
+                            if (current == null || current.instanceId() != playerInstanceId || current.ownerEpoch() != ownerEpoch) {
                                 deferred.cancel();
                                 return;
                             }

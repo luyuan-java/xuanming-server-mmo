@@ -291,8 +291,27 @@ public final class SceneWorld {
         return teamFollowCoordinator;
     }
 
+    /** 场景逻辑线程归属守卫（生产 SceneNode 绑定为 logic::inEventLoop；单测默认放行）。 */
+    private volatile java.util.function.BooleanSupplier logicThreadCheck = () -> true;
+
+    public SceneWorld withLogicThreadGuard(java.util.function.BooleanSupplier inLoop) {
+        this.logicThreadCheck = Objects.requireNonNull(inLoop, "inLoop");
+        return this;
+    }
+
+    /** 断言当前处于场景逻辑线程；跨线程越界直调立即快速失败。 */
+    public void assertLogicThread() {
+        if (!logicThreadCheck.getAsBoolean()) {
+            throw new IllegalStateException("SceneWorld must only be accessed on scene-logic thread, current="
+                    + Thread.currentThread().getName());
+        }
+    }
+
     public SceneWorld withAfkPassService(com.game.scene.afkpass.AfkPassService afkPassService) {
         this.afkPassService = afkPassService;
+        if (afkPassService != null) {
+            afkPassService.bindPlayerLookup(this::playerById);
+        }
         return this;
     }
 
@@ -3128,6 +3147,7 @@ public final class SceneWorld {
      * 指标：整帧、移动兑现与视野变化每帧各一次；属性同步偶数帧一次。帧内禁止瞬移以免改动正在遍历的兴趣集合。
      */
     public void step() {
+        assertLogicThread();
         if (stepping) throw new IllegalStateException("场景帧不能重入");
         stepping = true;
         try {
@@ -3881,6 +3901,7 @@ public final class SceneWorld {
 
     /** 按 player_id 找本节点上的玩家（已进场的实例；加载中的不算）；没有为 null。 */
     public ScenePlayer playerById(long playerId) {
+        assertLogicThread();
         return playersById.get(playerId);
     }
 

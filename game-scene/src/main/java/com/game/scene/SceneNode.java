@@ -765,7 +765,11 @@ public class SceneNode implements SmartLifecycle {
                         com.game.proto.TeamFollowStopReason.TEAM_FOLLOW_STOP_REASON_LEFT_FOLLOW);
             }
         });
-        sceneWorld.withAfkPassService(afkPassService)
+        sceneWorld.withLogicThreadGuard(() -> {
+                    DefaultEventLoop l = logicLoop;
+                    return l == null || l.inEventLoop();
+                })
+                .withAfkPassService(afkPassService)
                 .withConnectionLostHold(true)
                 .withSyncDigests(new com.game.scene.storage.RedisPlayerSyncDigests(redis, redisKeys, logic));
         if (seasonService != null) {
