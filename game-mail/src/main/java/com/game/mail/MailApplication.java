@@ -1,4 +1,5 @@
 package com.game.mail;
+import com.game.common.startup.ClockCheck;
 import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -8,6 +9,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class MailApplication {
     public static void main(String[] args) {
         System.setProperty("dubbo.shutdownHook.listenIgnore", "true");
+        ClockCheck.mustPass("game-mail");
         SpringApplication.run(MailApplication.class, args);
     }
 }

@@ -1,5 +1,6 @@
 package com.game.guild;
 
+import com.game.common.startup.ClockCheck;
 import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -38,6 +39,7 @@ public class GuildApplication {
 
     public static void main(String[] args) {
         System.setProperty(DUBBO_SHUTDOWN_HOOK_IGNORE, "true");
+        ClockCheck.mustPass("game-guild");
         SpringApplication.run(GuildApplication.class, args);
     }
 }

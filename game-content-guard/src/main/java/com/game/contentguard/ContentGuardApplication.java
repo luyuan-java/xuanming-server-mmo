@@ -1,5 +1,6 @@
 package com.game.contentguard;
 
+import com.game.common.startup.ClockCheck;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.api.AccountLoginService;
 import com.game.api.DubboGroups;
@@ -38,6 +39,7 @@ import org.springframework.context.annotation.Configuration;
 public class ContentGuardApplication {
 
     public static void main(String[] args) {
+        ClockCheck.mustPass("game-content-guard");
         SpringApplication.run(ContentGuardApplication.class, args);
     }
 

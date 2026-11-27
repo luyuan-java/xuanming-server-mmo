@@ -16,6 +16,26 @@ public final class WriterAuthority {
     private static final Set<String> FIELDS=Set.of("format","writerKey","instanceId","generation","authoritySchema",
             "protectedSchemas","sqlPrincipal","registrationDigest","deploymentId","grantId","grantedMs",
             "permission","physicalAuthoritySha256","maintenanceRunId","lockPrimitive","lockQualificationSha256");
+    /** 写者闸门各阶段耗时观察点名称（对齐主仓 {@code writer_gate_seconds{logical_db, phase}}，低基数枚举）。 */
+    public static final String PHASE_BEFORE_BEGIN = "before_begin";
+    public static final String PHASE_ENTER = "enter";
+    public static final String PHASE_READ = "read";
+    public static final String PHASE_PIN = "pin";
+    public static final String PHASE_REVALIDATE = "revalidate";
+
+    /** 写者闸门耗时回调：由装配层（如 {@code AuthorityDataSourcePolicy}）接入 Micrometer，不给 {@code game-common} 引入框架依赖。 */
+    @FunctionalInterface
+    public interface GateObserver {
+        GateObserver NOOP = (logicalDb, phase, durationNanos) -> { };
+        void observe(String logicalDb, String phase, long durationNanos);
+    }
+
+    private static volatile GateObserver gateObserver = GateObserver.NOOP;
+
+    public static void setGateObserver(GateObserver observer) {
+        gateObserver = observer == null ? GateObserver.NOOP : observer;
+    }
+
     private final java.util.concurrent.atomic.AtomicBoolean sealed=new java.util.concurrent.atomic.AtomicBoolean();
     /** 仅P3真实join后或进程销毁时调用；终态拒未来SQL，不充当排空证明，也不修改SQL registry。 */
     public void seal(){sealed.set(true);}
@@ -160,21 +180,26 @@ public final class WriterAuthority {
     private String table(String name){return (char)96+schema+(char)96+"."+name;}
     /** 在真实physical connection交池之前调用，不能把检查放在已有RR事务中。 */
     public void verifyPhysical(Connection raw)throws SQLException {
-        requireOpen();
-        if(!raw.getAutoCommit())throw new SQLException("physical初始连接不能已有事务");
-        String catalog=raw.getCatalog();
-        if(catalog==null||!protectedSchemas.contains(catalog))catalog=raw.getSchema();
-        if(catalog==null||!protectedSchemas.contains(catalog))throw new SQLException("连接schema不在固定保护集合");
-        boolean h2="H2".equals(raw.getMetaData().getDatabaseProductName());
-        try(var s=raw.createStatement();var r=s.executeQuery(h2?"SELECT CURRENT_USER":"SELECT CURRENT_USER(),@@SESSION.sql_mode")){
-            if(!r.next()||!MessageDigest.isEqual(principal,r.getString(1).getBytes(StandardCharsets.UTF_8)))throw new SQLException("实际SQL认证主体不匹配启动原件");
-            String mode=h2?"":r.getString(2).toUpperCase(Locale.ROOT);
-            if(mode.contains("NO_BACKSLASH_ESCAPES")||mode.contains("ANSI_QUOTES"))throw new SQLException("SQL词法会话模式未受支持");
+        long started=System.nanoTime();
+        try {
+            requireOpen();
+            if(!raw.getAutoCommit())throw new SQLException("physical初始连接不能已有事务");
+            String catalog=raw.getCatalog();
+            if(catalog==null||!protectedSchemas.contains(catalog))catalog=raw.getSchema();
+            if(catalog==null||!protectedSchemas.contains(catalog))throw new SQLException("连接schema不在固定保护集合");
+            boolean h2="H2".equals(raw.getMetaData().getDatabaseProductName());
+            try(var s=raw.createStatement();var r=s.executeQuery(h2?"SELECT CURRENT_USER":"SELECT CURRENT_USER(),@@SESSION.sql_mode")){
+                if(!r.next()||!MessageDigest.isEqual(principal,r.getString(1).getBytes(StandardCharsets.UTF_8)))throw new SQLException("实际SQL认证主体不匹配启动原件");
+                String mode=h2?"":r.getString(2).toUpperCase(Locale.ROOT);
+                if(mode.contains("NO_BACKSLASH_ESCAPES")||mode.contains("ANSI_QUOTES"))throw new SQLException("SQL词法会话模式未受支持");
+            }
+            Epoch epoch=current(raw);
+            if(maintenanceRun.length!=0&&epoch.run().length!=0&&!Arrays.equals(maintenanceRun,epoch.run()))
+                throw new SQLException("prepare-only boot不属于当前release run");
+            registry(raw);verifyRegistration(raw);verifyShape(raw);verifySlots(raw,epoch);
+        } finally {
+            gateObserver.observe(schema, PHASE_PIN, System.nanoTime() - started);
         }
-        Epoch epoch=current(raw);
-        if(maintenanceRun.length!=0&&epoch.run().length!=0&&!Arrays.equals(maintenanceRun,epoch.run()))
-            throw new SQLException("prepare-only boot不属于当前release run");
-        registry(raw);verifyRegistration(raw);verifyShape(raw);verifySlots(raw,epoch);
     }
     /** 只加载本仓protoc产出的descriptor；不解释.proto文本，不手造平行消息。 */
     private static com.google.protobuf.Descriptors.Descriptor requestDescriptor()throws SQLException {
@@ -282,7 +307,14 @@ public final class WriterAuthority {
     void begin(Connection raw)throws SQLException {
         requireOpen();
         if(!raw.getAutoCommit())throw new SQLException("禁止在旧事务snapshot内做epoch预读");
-        Epoch before=current(raw);
+        long beforeStart = System.nanoTime();
+        Epoch before;
+        try {
+            before = current(raw);
+        } finally {
+            gateObserver.observe(schema, PHASE_BEFORE_BEGIN, System.nanoTime() - beforeStart);
+        }
+        long enterStart = System.nanoTime();
         raw.setAutoCommit(false);
         try {
             int selected=nextSlot.getAndIncrement()&63;
@@ -307,6 +339,8 @@ public final class WriterAuthority {
                 failure.addSuppressed(cleanup);throw new SQLNonTransientConnectionException("authority进入阶段的回滚或复位未知","08007",failure);
             }
             throw failure;
+        } finally {
+            gateObserver.observe(schema, PHASE_ENTER, System.nanoTime() - enterStart);
         }
     }
     private static long u64(ResultSet row,int column)throws SQLException {

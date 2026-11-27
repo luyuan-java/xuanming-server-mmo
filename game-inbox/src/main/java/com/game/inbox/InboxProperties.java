@@ -16,8 +16,6 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param requestBudget         一次 Fetch / Ack / 运维请求的预算（≤ 3.5s：scene 的 Dubbo 调用超时是 4s）
  * @param workerThreads         Fetch / Ack 的工作池大小（阻塞 JDBC 只在这里跑）
  * @param workerQueueCapacity   工作池队列上限；满了回 StoreUnavailable（scene 退避）
- * @param terminalRetention     旧配置兼容字段；终态原收据永久保留，此值不再授权物理删除
- * @param sweepInterval         旧配置兼容字段；终态清理循环已停用
  * @param notifyResendInterval  提醒补发循环的间隔（设计 §6.3：30 秒一轮）
  * @param gaugeInterval         扫描型 gauge 的刷新间隔
  * @param reconcileInterval     对账间隔（缺省 60m；0 = 不跑）
@@ -30,8 +28,6 @@ public record InboxProperties(
         @DefaultValue("3s") Duration requestBudget,
         @DefaultValue("8") int workerThreads,
         @DefaultValue("1024") int workerQueueCapacity,
-        @DefaultValue("30d") Duration terminalRetention,
-        @DefaultValue("10m") Duration sweepInterval,
         @DefaultValue("30s") Duration notifyResendInterval,
         @DefaultValue("60s") Duration gaugeInterval,
         @DefaultValue("60m") Duration reconcileInterval,
@@ -48,10 +44,7 @@ public record InboxProperties(
         if (workerThreads < 1 || workerQueueCapacity < 1) {
             throw new IllegalArgumentException("game.inbox.worker-threads / worker-queue-capacity 必须为正");
         }
-        if (terminalRetention.compareTo(InboxRules.ISSUED_AT_MAX_PAST) <= 0) {
-            throw new IllegalArgumentException("game.inbox.terminal-retention 必须大于签发窗 " + InboxRules.ISSUED_AT_MAX_PAST + ": " + terminalRetention);
-        }
-        if (!positive(sweepInterval) || !positive(notifyResendInterval) || !positive(gaugeInterval) || reconcileInterval.isNegative()) {
+        if (!positive(notifyResendInterval) || !positive(gaugeInterval) || reconcileInterval.isNegative()) {
             throw new IllegalArgumentException("game.inbox 的循环间隔必须为正（reconcile-interval 可以是 0 = 不跑）");
         }
         if (!reconcileInterval.isZero() && (!positive(reconcileWindow) || reconcileWindow.compareTo(reconcileInterval.multipliedBy(2)) < 0)) {

@@ -42,35 +42,49 @@ public final class MailStore {
     static final int PENDING = MailErrorTip.mail_error.kMailClaimPending_VALUE;
     static final int MANUAL = MailErrorTip.mail_error.kMailClaimManual_VALUE;
     static final int RECIPIENT_DELETED = MailErrorTip.mail_error.kMailRecipientDeleted_VALUE;
+    /** 缺省活跃全服系统邮件上限（guild_id = 0）。 */
+    public static final int DEFAULT_MAX_ACTIVE_SYSTEM_MAILS = 100;
+    /** 缺省单帮活跃帮会邮件上限（guild_id > 0，按帮独立计数，对齐主仓缺口清单第 27 条）。 */
+    public static final int DEFAULT_MAX_ACTIVE_GUILD_MAILS = 20;
     private final AuthorityJdbc sql;
     private final AuthorityIds ids;
     private final IntPredicate itemExists;
     private final LongSupplier clock;
     private final LongPredicate recipientDeleted;
     private final long actorPlayer;
+    private final int maxActiveSystemMails;
+    private final int maxActiveGuildMails;
     private static final String MC = "mail_id,owner_player_id,guild_id,kind,sender_kind,request_id,request_hash,title,body,attachments,"
                                      + "sent_ms,expire_ms,campaign_id,manifest_generation";
     public MailStore(AuthorityJdbc sql, AuthorityIds ids, IntPredicate itemExists, LongSupplier clock) {
-        this(sql, ids, itemExists, clock, id -> false, 0);
+        this(sql, ids, itemExists, clock, id -> false, 0, DEFAULT_MAX_ACTIVE_SYSTEM_MAILS, DEFAULT_MAX_ACTIVE_GUILD_MAILS);
     }
     public MailStore(AuthorityJdbc sql, AuthorityIds ids, IntPredicate itemExists, LongSupplier clock, LongPredicate recipientDeleted) {
-        this(sql, ids, itemExists, clock, recipientDeleted, 0);
+        this(sql, ids, itemExists, clock, recipientDeleted, 0, DEFAULT_MAX_ACTIVE_SYSTEM_MAILS, DEFAULT_MAX_ACTIVE_GUILD_MAILS);
+    }
+    public MailStore withBroadcastLimits(int maxActiveSystemMails, int maxActiveGuildMails) {
+        if (maxActiveSystemMails <= 0 || maxActiveGuildMails <= 0) {
+            throw new IllegalArgumentException("邮件活跃上限必须为正: system=" + maxActiveSystemMails + " guild=" + maxActiveGuildMails);
+        }
+        return new MailStore(sql, ids, itemExists, clock, recipientDeleted, actorPlayer, maxActiveSystemMails, maxActiveGuildMails);
     }
     private MailStore(AuthorityJdbc sql, AuthorityIds ids, IntPredicate itemExists, LongSupplier clock,
-                      LongPredicate recipientDeleted, long actorPlayer) {
+                      LongPredicate recipientDeleted, long actorPlayer, int maxActiveSystemMails, int maxActiveGuildMails) {
         this.sql = sql;
         this.ids = ids;
         this.itemExists = itemExists;
         this.clock = clock;
         this.recipientDeleted = recipientDeleted == null ? id -> false : recipientDeleted;
         this.actorPlayer = actorPlayer;
+        this.maxActiveSystemMails = maxActiveSystemMails;
+        this.maxActiveGuildMails = maxActiveGuildMails;
     }
     // 请求视图显式保留队列受理时的原会话；实际领域事务首锁player验证，不能从当前角色反推身份。
     public MailStore forActor(SessionContext session) {
         require(session != null && session.getPlayerId() != 0 && !session.getAccount().isEmpty()
                         && session.getOwnerRevision() > 0, INVALID);
         return new MailStore(sql.forActor(session.getPlayerId(), session.getAccount(), session.getOwnerRevision()),
-                ids, itemExists, clock, recipientDeleted, session.getPlayerId());
+                ids, itemExists, clock, recipientDeleted, session.getPlayerId(), maxActiveSystemMails, maxActiveGuildMails);
     }
     private void requireActor(long player) { require(actorPlayer == 0 || actorPlayer == player, INVALID); }
     public static int sender(String caller) {
@@ -200,7 +214,9 @@ public final class MailStore {
             require(in.getCampaignId() == 0 && in.getManifestGeneration() == 0 && in.getExpectedRecipientCount() == 0
                             && in.getExpectedShardCount() == 0 && in.getManifestHash().isEmpty(),
                     INVALID);
-        long id = ids.next(d), guard = kind == 1 ? in.getRecipientPlayerId() : 0;
+        long id = ids.next(d);
+        // 个人邮件锁玩家邮箱行，系统邮件锁 0 号行，帮会邮件锁高位互斥空间（与玩家号 1..2^63-1 及 0 永不相交）实现按帮独立限流。
+        long guard = kind == 1 ? in.getRecipientPlayerId() : (kind == 3 ? (Long.MIN_VALUE | in.getGuildId()) : 0L);
         ensure(d, guard);
         return sql.tx(d, s -> {
             lock(s, guard);
@@ -210,13 +226,24 @@ public final class MailStore {
                 require(previous.hash.equals(hash), CONFLICT);
                 return SendMailResponse.newBuilder().setMailId(previous.id).setDuplicated(true).build();
             }
-            long count = kind == 1
-                    ? s.count("SELECT COUNT(*) FROM mail_message m JOIN mail_state t ON t.mail_id=m.mail_id AND "
-                              + "t.player_id=m.owner_player_id WHERE m.owner_player_id=? AND t.deleted_ms=0 AND (m.expire_ms>? OR "
-                              + "t.claim_state NOT IN (0,1,3))",
-                              U(guard), now)
-                    : s.count("SELECT COUNT(*) FROM mail_message WHERE owner_player_id=0 AND kind IN (0,2,3) AND expire_ms>?", now);
-            require(count < (kind == 1 ? 200 : 100), FULL);
+            long count;
+            int limit;
+            if (kind == 1) {
+                count = s.count("SELECT COUNT(*) FROM mail_message m JOIN mail_state t ON t.mail_id=m.mail_id AND "
+                                + "t.player_id=m.owner_player_id WHERE m.owner_player_id=? AND t.deleted_ms=0 AND (m.expire_ms>? OR "
+                                + "t.claim_state NOT IN (0,1,3))",
+                        U(guard), now);
+                limit = 200;
+            } else if (kind == 3) {
+                count = s.count("SELECT COUNT(*) FROM mail_message WHERE owner_player_id=0 AND guild_id=? AND kind IN (0,3) AND expire_ms>?",
+                        U(in.getGuildId()), now);
+                limit = maxActiveGuildMails;
+            } else {
+                count = s.count("SELECT COUNT(*) FROM mail_message WHERE owner_player_id=0 AND guild_id=0 AND kind IN (0,2) AND expire_ms>?",
+                        now);
+                limit = maxActiveSystemMails;
+            }
+            require(count < limit, FULL);
             s.update("INSERT INTO mail_message (" + MC + ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", U(id), U(in.getRecipientPlayerId()),
                     U(in.getGuildId()), campaign ? 0 : kind, in.getSenderKind(), U(in.getRequestId()), hash, in.getTitle(), in.getBody(),
                     payload, now, expire, U(in.getCampaignId()), U(in.getManifestGeneration()));
@@ -253,6 +280,26 @@ public final class MailStore {
         require(c != null, NOT_FOUND);
         return c;
     }
+    private record ShardRecord(String hash, int count) {}
+
+    private static boolean isDuplicateKey(SQLException e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof java.sql.SQLIntegrityConstraintViolationException) {
+                return true;
+            }
+            if (t instanceof SQLException sqlEx) {
+                if (sqlEx.getErrorCode() == 1062 || "23000".equals(sqlEx.getSQLState()) || "23505".equals(sqlEx.getSQLState())) {
+                    return true;
+                }
+                SQLException next = sqlEx.getNextException();
+                if (next != null && next != sqlEx && isDuplicateKey(next)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public ImportMailRecipientsResponse importRecipients(String caller, ImportMailRecipientsRequest in, Deadline d) throws SQLException {
         require(sender(caller) == in.getSenderKind() && in.getCampaignId() != 0 && in.getManifestGeneration() != 0
                         && in.getPlayerIdsCount() > 0 && in.getPlayerIdsCount() <= 1000,
@@ -266,32 +313,49 @@ public final class MailStore {
         return sql.tx(d, s -> {
             var c = campaign(s, in.getSenderKind(), in.getCampaignId(), in.getManifestGeneration());
             require(c.producer.equals(caller) && Integer.compareUnsigned(in.getShardIndex(), c.shards) < 0, INVALID);
-            var old = s.one("SELECT shard_hash FROM mail_campaign_shard WHERE sender_kind=? AND campaign_id=? AND manifest_generation=? "
-                            + "AND shard_index=?",
-                    r -> r.getString(1), in.getSenderKind(), U(in.getCampaignId()), U(in.getManifestGeneration()), in.getShardIndex());
+            var old = s.one("SELECT shard_hash,recipient_count FROM mail_campaign_shard WHERE sender_kind=? AND campaign_id=? AND "
+                            + "manifest_generation=? AND shard_index=?",
+                    r -> new ShardRecord(r.getString(1), r.getInt(2)),
+                    in.getSenderKind(), U(in.getCampaignId()), U(in.getManifestGeneration()), in.getShardIndex());
             if (old != null) {
-                require(old.equals(hash), CONFLICT);
+                require(old.hash().equals(hash) && old.count() == recipients.size(), CONFLICT);
                 return ImportMailRecipientsResponse.newBuilder().setImportedCount(recipients.size()).setDuplicated(true).build();
             }
             require(c.state == 1, CONFLICT);
-            require(s.count("SELECT COUNT(*) FROM mail_campaign_recipient WHERE sender_kind=? AND campaign_id=? AND manifest_generation=?",
-                            in.getSenderKind(), U(in.getCampaignId()), U(in.getManifestGeneration()))
-                                    + recipients.size()
-                            <= c.expected,
-                    INVALID);
+            long imported = s.count(
+                    "SELECT COALESCE(SUM(recipient_count),0) FROM mail_campaign_shard WHERE sender_kind=? AND campaign_id=? AND "
+                    + "manifest_generation=?",
+                    in.getSenderKind(), U(in.getCampaignId()), U(in.getManifestGeneration()));
+            require(imported + recipients.size() <= c.expected, INVALID);
+            // 一片一条多行 INSERT（禁用 INSERT IGNORE / ON DUPLICATE KEY UPDATE），唯一键冲突即转 CONFLICT 整笔回滚。
+            StringBuilder insertSql = new StringBuilder(
+                    "INSERT INTO mail_campaign_recipient (sender_kind,campaign_id,manifest_generation,player_id,shard_index) VALUES ");
+            Object[] params = new Object[recipients.size() * 5];
+            int idx = 0;
+            Object cid = U(in.getCampaignId());
+            Object gen = U(in.getManifestGeneration());
             for (long player : recipients) {
-                require(s.count("SELECT COUNT(*) FROM mail_campaign_recipient WHERE sender_kind=? AND campaign_id=? AND "
-                                + "manifest_generation=? AND player_id=?",
-                                in.getSenderKind(), U(in.getCampaignId()), U(in.getManifestGeneration()), U(player))
-                                == 0,
-                        CONFLICT);
-                s.update("INSERT INTO mail_campaign_recipient (sender_kind,campaign_id,manifest_generation,player_id,shard_index) VALUES "
-                         + "(?,?,?,?,?)",
-                        in.getSenderKind(), U(in.getCampaignId()), U(in.getManifestGeneration()), U(player), in.getShardIndex());
+                if (idx > 0) {
+                    insertSql.append(',');
+                }
+                insertSql.append("(?,?,?,?,?)");
+                params[idx++] = in.getSenderKind();
+                params[idx++] = cid;
+                params[idx++] = gen;
+                params[idx++] = U(player);
+                params[idx++] = in.getShardIndex();
+            }
+            try {
+                s.update(insertSql.toString(), params);
+            } catch (SQLException e) {
+                if (isDuplicateKey(e)) {
+                    throw new Reject(CONFLICT);
+                }
+                throw e;
             }
             s.update("INSERT INTO mail_campaign_shard (sender_kind,campaign_id,manifest_generation,shard_index,shard_hash,recipient_count) "
                      + "VALUES (?,?,?,?,?,?)",
-                    in.getSenderKind(), U(in.getCampaignId()), U(in.getManifestGeneration()), in.getShardIndex(), hash, recipients.size());
+                    in.getSenderKind(), cid, gen, in.getShardIndex(), hash, recipients.size());
             return ImportMailRecipientsResponse.newBuilder().setImportedCount(recipients.size()).build();
         });
     }

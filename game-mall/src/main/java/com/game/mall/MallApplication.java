@@ -1,5 +1,6 @@
 package com.game.mall;
 
+import com.game.common.startup.ClockCheck;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -9,6 +10,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 @EnableConfigurationProperties({MallProperties.class, RmbConsignmentProperties.class})
 public class MallApplication {
     public static void main(String[] args) {
+        ClockCheck.mustPass("game-mall");
         SpringApplication.run(MallApplication.class, args);
     }
 }

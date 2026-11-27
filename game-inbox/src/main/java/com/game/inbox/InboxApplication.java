@@ -1,5 +1,6 @@
 package com.game.inbox;
 
+import com.game.common.startup.ClockCheck;
 import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -17,6 +18,7 @@ public class InboxApplication {
 
     public static void main(String[] args) {
         System.setProperty("dubbo.shutdownHook.listenIgnore", "true");
+        ClockCheck.mustPass("game-inbox");
         SpringApplication.run(InboxApplication.class, args);
     }
 }

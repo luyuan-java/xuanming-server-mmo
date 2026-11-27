@@ -50,9 +50,6 @@ game:
     request-budget: 3s
     worker-threads: 8
     worker-queue-capacity: 1024
-    # 旧配置兼容字段；终态原收据永久保留，不再调度物理删除
-    terminal-retention: 30d
-    sweep-interval: 10m
     notify-resend-interval: 30s
     gauge-interval: 60s
     # 对账（0 = 不跑）；窗口必须覆盖至少两轮间隔

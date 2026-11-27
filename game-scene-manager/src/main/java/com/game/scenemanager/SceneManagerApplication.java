@@ -1,5 +1,6 @@
 package com.game.scenemanager;
 
+import com.game.common.startup.ClockCheck;
 import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -16,6 +17,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class SceneManagerApplication {
 
     public static void main(String[] args) {
+        ClockCheck.mustPass("game-scene-manager");
         SpringApplication.run(SceneManagerApplication.class, args);
     }
 }

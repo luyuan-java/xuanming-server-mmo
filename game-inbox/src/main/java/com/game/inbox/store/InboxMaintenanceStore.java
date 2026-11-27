@@ -63,14 +63,6 @@ public final class InboxMaintenanceStore {
         return Deadline.after(STATEMENT_BUDGET.toMillis());
     }
 
-    // ================================================================ 清理（设计 §9.1）
-
-    /** 旧运维调用保留为显式不删除：终态原唯一收据永久阻止跨owner重放，不受保留期或领导权TTL影响。 */
-    public int sweepTerminal(long cutoffMs, int budget, java.util.function.BooleanSupplier stop) throws SQLException {
-        metrics.sweepDeleted(0);
-        return 0;
-    }
-
     // ================================================================ 提醒补发（设计 §6.3）
 
     /** 一个分片里到期的提醒：notify_due_ms ∈ [1, dueBeforeMs]，最多 limit 条（走 (shard, notify_due_ms) 索引）。 */

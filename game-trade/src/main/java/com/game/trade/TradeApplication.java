@@ -1,5 +1,6 @@
 package com.game.trade;
 
+import com.game.common.startup.ClockCheck;
 import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -21,6 +22,7 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 public class TradeApplication {
 
     public static void main(String[] args) {
+        ClockCheck.mustPass("game-trade");
         SpringApplication.run(TradeApplication.class, args);
     }
 }

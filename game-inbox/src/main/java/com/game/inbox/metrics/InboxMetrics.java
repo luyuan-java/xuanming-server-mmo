@@ -38,7 +38,6 @@ public final class InboxMetrics {
     static final String RECONCILE_TRUNCATED = "game.inbox.reconcile.truncated";
     static final String RECONCILE_ROUNDS = "game.inbox.reconcile.rounds";
     static final String RECONCILE_LEDGER_READS = "game.inbox.reconcile.ledger.reads";
-    static final String SWEEP_DELETED = "game.inbox.sweep.deleted";
     static final String CONSUMER_GATE = "game.inbox.consumer.gate";
     static final String FETCH_SCANNED_ROWS = "game.inbox.fetch.scanned.rows";
 
@@ -73,7 +72,6 @@ public final class InboxMetrics {
         registry.counter(FENCE_REGRESSED);
         registry.counter(EPOCH_AHEAD);
         registry.counter(RECONCILE_TRUNCATED);
-        registry.counter(SWEEP_DELETED);
         gauge("game.inbox.open.items", () -> scan.get().openItems());
         gauge("game.inbox.oldest.open.age.seconds", () -> scan.get().oldestOpenAgeSeconds());
         gauge("game.inbox.delivered.unacked", () -> scan.get().deliveredUnacked());
@@ -137,12 +135,6 @@ public final class InboxMetrics {
 
     public void reconcileLedgerRead(String result) {
         registry.counter(RECONCILE_LEDGER_READS, "result", result).increment();
-    }
-
-    public void sweepDeleted(int rows) {
-        if (rows > 0) {
-            registry.counter(SWEEP_DELETED).increment(rows);
-        }
     }
 
     public void consumerGate(String result) {

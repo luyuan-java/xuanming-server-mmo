@@ -1,5 +1,6 @@
 package com.game.team;
 
+import com.game.common.startup.ClockCheck;
 import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -21,6 +22,7 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 public class TeamApplication {
 
     public static void main(String[] args) {
+        ClockCheck.mustPass("game-team");
         SpringApplication.run(TeamApplication.class, args);
     }
 }

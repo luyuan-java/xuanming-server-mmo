@@ -164,7 +164,7 @@ public class InboxConfiguration {
     InboxMaintenance inboxMaintenance(RedissonClient redis, RedisKeys keys, InboxMaintenanceStore store, JdbcPlayerTables players,
                                       InboxMetrics metrics, InboxProperties properties) {
         LeaderLease lease = new LeaderLease(redis, keys, "inbox-" + UUID.randomUUID(), properties.leaderTtl());
-        InboxMaintenance.Settings settings = new InboxMaintenance.Settings(properties.terminalRetention(), properties.sweepInterval(),
+        InboxMaintenance.Settings settings = new InboxMaintenance.Settings(
                 properties.notifyResendInterval(), properties.gaugeInterval(), properties.reconcileInterval(), properties.reconcileWindow());
         return new InboxMaintenance(lease, store, players, metrics, settings, System::currentTimeMillis, System::nanoTime,
                 bound -> bound <= 0 ? 0 : ThreadLocalRandom.current().nextLong(bound));

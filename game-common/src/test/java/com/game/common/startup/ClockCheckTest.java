@@ -21,4 +21,11 @@ class ClockCheckTest {
         assertThat(ClockCheck.judge(-oneYear, "warn")).isNull();
         assertThat(ClockCheck.judge(-oneYear, "WARN")).isNotNull();
     }
+
+    @Test
+    void 非Kubernetes环境直接跳过不阻塞() {
+        if (System.getenv("KUBERNETES_SERVICE_HOST") == null) {
+            ClockCheck.mustPass("game-test");
+        }
+    }
 }

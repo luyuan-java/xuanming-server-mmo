@@ -2,10 +2,16 @@ package com.game.discovery.sql;
 
 import com.game.common.RunMode;
 import com.game.common.sql.*;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.lang.reflect.*;
 import java.sql.*;
+import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.*;
 import org.springframework.beans.factory.support.*;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -16,13 +22,44 @@ import org.springframework.core.env.Environment;
 /** 所有SQL池在init之前安装physical adapter；内部BPP最后执行，消费并清空已审init SQL。 */
 @AutoConfiguration
 public class AuthorityDataSourcePolicy {
+    /** 对齐主仓 {@code writer_gate_seconds} 的 12 档指数桶（0.2ms ～ 409.6ms）。 */
+    static final Duration[] GATE_BUCKETS = {
+            Duration.ofNanos(200_000), Duration.ofNanos(400_000), Duration.ofNanos(800_000),
+            Duration.ofNanos(1_600_000), Duration.ofNanos(3_200_000), Duration.ofNanos(6_400_000),
+            Duration.ofNanos(12_800_000), Duration.ofNanos(25_600_000), Duration.ofNanos(51_200_000),
+            Duration.ofNanos(102_400_000), Duration.ofNanos(204_800_000), Duration.ofNanos(409_600_000)
+    };
+
+    /** 将 {@link WriterAuthority} 写者闸门阶段耗时绑定到 Micrometer（Prometheus 导出为 {@code writer_gate_seconds}）。 */
+    public static WriterAuthority.GateObserver micrometerGateObserver(MeterRegistry registry) {
+        Objects.requireNonNull(registry, "registry");
+        Map<String, Timer> timers = new ConcurrentHashMap<>();
+        return (logicalDb, phase, durationNanos) -> {
+            String key = logicalDb + '\0' + phase;
+            Timer timer = timers.computeIfAbsent(key, ignored -> Timer.builder("writer.gate")
+                    .description("写者闸门各阶段耗时（before_begin / enter / read / pin / revalidate）")
+                    .tag("logical_db", logicalDb)
+                    .tag("phase", phase)
+                    .serviceLevelObjectives(GATE_BUCKETS)
+                    .register(registry));
+            timer.record(Math.max(0L, durationNanos), TimeUnit.NANOSECONDS);
+        };
+    }
+
     /** 非Spring工具在首次借连接之前调用；签名只暴露JDBC类型，避免装配反射提前链接可选Druid；真实池与holder/proxy类型保持不变。 */
     public static void protectDruid(DataSource pool,WriterAuthority boot,boolean required)throws SQLException{
         if(pool==null||!Installer.is(pool,"com.alibaba.druid.pool.DruidDataSource"))throw new SQLException("CLI physical封口仅支持真实Druid池");
         try{Installer installer=new Installer(null,null);installer.authority=Objects.requireNonNull(boot);installer.druid(pool,"normal-cli",required);}
         catch(ReflectiveOperationException invalid){throw new SQLException("CLI physical封口安装失败",invalid);}
     }
-    @Bean static Installer normalWriterDataSourcePolicy(Environment environment,org.springframework.beans.factory.ObjectProvider<WriterAuthority> boots){return new Installer(environment,boots);}
+    @Bean static Installer normalWriterDataSourcePolicy(Environment environment,ObjectProvider<WriterAuthority> boots){return new Installer(environment,boots);}
+    @Bean Object writerGateMetricsBinder(ObjectProvider<MeterRegistry> meters) {
+        MeterRegistry registry = meters.getIfAvailable();
+        if (registry != null) {
+            WriterAuthority.setGateObserver(micrometerGateObserver(registry));
+        }
+        return new Object();
+    }
     @Bean @org.springframework.context.annotation.Lazy
     WriterAuthority normalWriterBoot()throws java.io.IOException{return WriterAuthority.consumeEnvironment();}
     static final class Installer implements MergedBeanDefinitionPostProcessor,DestructionAwareBeanPostProcessor,Ordered {

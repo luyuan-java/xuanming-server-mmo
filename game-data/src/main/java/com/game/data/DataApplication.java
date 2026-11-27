@@ -1,5 +1,6 @@
 package com.game.data;
 
+import com.game.common.startup.ClockCheck;
 import com.game.player.store.PlayerStoreAutoConfiguration;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -15,6 +16,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class DataApplication {
 
     public static void main(String[] args) {
+        ClockCheck.mustPass("game-data");
         SpringApplication.run(DataApplication.class, args);
     }
 }

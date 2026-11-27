@@ -1,5 +1,6 @@
 package com.game.scene;
 
+import com.game.common.startup.ClockCheck;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
@@ -19,6 +20,7 @@ public class SceneApplication {
 
     public static void main(String[] args) {
         System.setProperty(DUBBO_SHUTDOWN_HOOK_IGNORE, "true");
+        ClockCheck.mustPass("game-scene");
         SpringApplication.run(SceneApplication.class, args);
     }
 }

@@ -1,5 +1,6 @@
 package com.game.battle;
 
+import com.game.common.startup.ClockCheck;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
@@ -37,6 +38,7 @@ public class BattleApplication {
 
     public static void main(String[] args) {
         ignoreDubboShutdownHook();
+        ClockCheck.mustPass("game-battle");
         SpringApplication.run(BattleApplication.class, args);
     }
 

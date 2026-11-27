@@ -1,5 +1,6 @@
 package com.game.gate;
 
+import com.game.common.startup.ClockCheck;
 import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -15,6 +16,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 public class GateApplication {
 
     public static void main(String[] args) {
+        ClockCheck.mustPass("game-gate");
         SpringApplication.run(GateApplication.class, args);
     }
 }

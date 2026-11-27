@@ -93,7 +93,6 @@ final class BattleInboxRecoveryTest {
             var replay=f.store.battleSettlement(budget(),original,true);assertEquals(first.getSeq(),replay.getSeq());
             assertEquals(PlayerInboxItemState.PLAYER_INBOX_ITEM_APPLIED,replay.getState());assertEquals(first.getContentSha256(),replay.getContentSha256());
             assertEquals(replay,f.store.battleSettlement(budget(),original,false));
-            assertEquals(0,new InboxMaintenanceStore(f.base.jdbc,Notifier.NONE,new InboxMetrics(f.base.metrics),f.clock::get).sweepTerminal(Long.MAX_VALUE,100,()->false));
             assertNotNull(f.item(91));
         }
     }

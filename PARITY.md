@@ -1195,14 +1195,11 @@ Java 版 `0.1.0-SNAPSHOT` 的节点链路已有等价机制,不需要改代码:
 
 2026-11-26 核销：已在 `game-gate`（`ClientPipeline`/`ClientDispatcher`/`GateProperties`/`GateMetrics`/`ClientHeartbeatTest` 14 项）与 `game-robot`（`ConnectionHandler`/`GameConnection`）落地，详见下方同日「Java 已实现，分层验证」条目。
 
-### 2026-11-05 选 gate 时的 Redis 读按 zone 短缓存(Java 待做)
+### 2026-11-05 选 gate 时的 Redis 读按 zone 短缓存（Java 已对齐）
 
-主仓缺口清单(`docs/handoff/server-gap-audit-20261101.md`)第 31 条,Go 版已落码、未编译,说明见主仓 `docs/PROGRESS.md` 2026-11-05「缺口清单第 31 条」。Go 版 login 选 gate 的各条路径(快速通道、容量判断、排队放行、放行复核)原来每次各打一次排空标记 MGET,现在按 zone 共用一份缓存 1 秒的结果(`loginqueue.DrainMarkCache`),每个实例每个 zone 每秒至多查一次。Java 版 `0.1.0-SNAPSHOT` 同样每次都读:`game-discovery` 的 `RedisGateSource.listGates` 每调一次(`AssignGateService`、`QueueDispatcher`、`ZoneHealthProbe`、scene-manager 的 `TravelRouter`)先读一次 `NodeDirectory.list(zoneId)`、再 MGET 一次排空标记,开服洪峰时读量随全服登录量涨。待做,口径与 Go 版相同:
+主仓缺口清单(`docs/handoff/server-gap-audit-20261101.md`)第 31 条,Go 版已落码、未编译,说明见主仓 `docs/PROGRESS.md` 2026-11-05「缺口清单第 31 条」。Go 版 login 选 gate 的各条路径(快速通道、容量判断、排队放行、放行复核)原来每次各打一次排空标记 MGET,现在按 zone 共用一份缓存 1 秒的结果(`loginqueue.DrainMarkCache`),每个实例每个 zone 每秒至多查一次。
 
-- 按 zone 缓存一次读到的结果,同 zone 并发过期只读一次;排空标记最多晚一个缓存周期生效。
-- 失败方向不变:排空标记读不到按没人在排空放行,空结果同样缓存一个周期;目录读不到照旧抛出(调用方 fail-closed),不缓存失败。
-- 排空迁移等纵深防御类的校验(确认调用方 gate 真在排空)直读 Redis,不走缓存。
-- 客户端契约不变:没有新消息、字段和 tip 码。
+2026-11-27 已对齐：`game-discovery` `RedisGateSource` 已实现按 `zone` 1 秒单飞短缓存（`DEFAULT_CACHE_TTL = 1s`，无锁读快路径 + 按区单飞回源）；空列表同样缓存一个周期，排空标记读取异常按未排空放行，目录读取异常照旧抛出不缓存失败；纵深防御排空校验仍直走 `GateDrainMarks`。`RedisGateSourceCacheTest` 3/3 PASS。
 
 ### 2026-11-06 组队跟随:服务器沿队长轨迹驱动队员（Java 已对齐）
 
@@ -1695,17 +1692,12 @@ Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`
 
 本条只登记待核对,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-10 帮会邮件按帮计数、写者闸门耗时指标（主仓已落码未编译，Java 待做）
+### 2026-11-10 帮会邮件按帮计数、写者闸门耗时指标（Java 已对齐）
 
 - **帮会邮件按帮计数**（主仓缺口清单第 27 条）：
-  - 主仓改法：系统邮件仍按全服上限 `MaxActiveSystemMails` 计数；帮会邮件（文本与活动）改为按帮计数，上限 `MaxActiveGuildMailsPerGuild`，缺省 20。两类按 `guild_id` 是否为 0 区分。
-  - 设计见主仓 `docs/design/mail-system.md` 文末 2026-11-10 节。
-  - Java 待做：先核对 Java 版邮件的系统邮件与帮会邮件是否共用一个全服上限；共用的话按同一口径拆开。
+  - 2026-11-27 已对齐：`game-mail` `MailStore` 拆分为全服系统邮件（`kind=2, guild_id=0`，锁 0 号守卫行，缺省上限 `100`）与帮会邮件（`kind=3, guild_id>0`，锁高位互斥空间 `Long.MIN_VALUE | guild_id`，缺省按帮独立上限 `20`），`MailConfiguration` 接入 `game.mail.max-active-system-mails` / `game.mail.max-active-guild-mails`；`MailCampaignAndQuotaTest` 已覆盖按帮独立计数与互不挤占。
 - **写者闸门耗时指标**（主仓缺口清单第 20 条，先测再改）：
-  - 主仓只加了测量指标 `writer_gate_seconds{logical_db, phase}`，闸门判定没改。
-  - 测量方案见主仓 `docs/design/db-write-fencing-mysql.md` 文末 2026-11-10 节。
-  - Java 待做：Java 版若也有每笔写事务的写者闸门，照加同口径的耗时指标，压测时一起看；没有就不登记后续。
-- 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+  - 2026-11-27 已对齐：`game-common` `WriterAuthority` 新增低基数阶段耗时回调 `GateObserver`（`before_begin`/`enter`/`read`/`pin`/`revalidate`），在 `verifyPhysical` 与 `begin` 中采集真实耗时；`game-discovery` `AuthorityDataSourcePolicy` 通过 Micrometer `Timer("writer.gate")` 导出同口径 `writer_gate_seconds{logical_db, phase}` 及 12 档指数桶（`0.2ms..409.6ms`）；`WriterGateMetricsTest` 1/1 PASS。
 
 ### 2026-11-10 资产指令重投与匹配终局发件箱按玩家分片(主仓第 25 条已落码未编译,Java 待做)
 
@@ -2363,15 +2355,9 @@ robot `killswitch` 端到端补两项:type 范围关停 gate 上的一个客户�
 - **回归要覆盖**:只读、只处理本实例的片;成员变化后新属主接手;成员表为空时全做,本实例不在表里时不做;一轮正常返回才更新活性,抛异常的一轮不更新但循环继续;有意退出后序列消失;告警阈值与代码常量同源。
 - 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-12 收件箱删除空转的清理循环与两个配置项(主仓已落码未编译,Java 待做;补同日「交易退回不受获取封禁约束…」条目)
+### 2026-11-12 收件箱删除空转的清理循环与两个配置项（Java 已对齐）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。服务端内部改动,不涉及客户端契约。
-设计见主仓 `docs/design/player-inbox-service.md` §9.1,验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「数据覆写审计 r2 批 T、U 补做」。
-
-**要对齐的行为**:终态行是永久收据,没有清理。主仓把空转的清理循环、恒返回 0 的 `SweepTerminal`、`TerminalRetentionDays` 与
-`SweepIntervalSeconds` 两个配置项、`player_inbox_sweep_deleted_total` 指标一起删了:它们不删任何行,留着只会让人以为调保留期能控制容量。
-Java `InboxMaintenance` 仍按 `terminalRetention` / `sweepInterval` 起清理循环,`InboxMaintenanceStore.sweepTerminal` 只记 0、返回 0,
-配置与指标同样还在,按同一口径删除即可(旧配置里还写着这两个键时要能照常启动)。
+主仓设计见 `docs/design/player-inbox-service.md` §9.1。2026-11-27 已对齐：删除 `game-inbox` 中空转的 `InboxMaintenance.sweepRound`、`InboxMaintenanceStore.sweepTerminal`、`InboxProperties` / `application.yaml` 的 `terminalRetention` 与 `sweepInterval`（Spring Boot 默认忽略未知配置键，旧配置照常启动）以及 `InboxMetrics` 的 `SWEEP_DELETED`；`BattleInboxRecoveryTest`（6/6）与 `InboxOwnerAdmissionTest`（6/6）12/12 PASS。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
@@ -2708,16 +2694,9 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-19 节点时钟告警与服务启动时钟核对(主仓已落码未编译,Java 待做)
+### 2026-11-19 节点时钟告警与服务启动时钟核对（Java 已对齐）
 
-主仓负责人反映过线上运维把机器时间调回一年前又调回来、没有被发现。主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
-运维口径见主仓 `docs/ops/clock-sync-runbook.md`,验证命令见主仓 `docs/PROGRESS.md` 2026-11-19「节点时钟告警与服务启动时钟核对」。
-
-不改客户端协议,客户端看不到变化。
-
-1. **启动核对**:每个服务进程启动时,把本机时钟和 Kubernetes API server 回应里的 `Date` 头比一次(`GET /version`,不要 RBAC 权限,状态码不论;TLS 用 Pod 挂载的集群 CA 核对)。偏差取「请求前后本机时间的中点」减「Date 那一秒的中点」。差 30 秒以上拒启、退出码非 0;读不到参照只告警、照常启动;不在 Kubernetes 里不核。
-2. **应急开关**:环境变量 `MMORPG_CLOCK_CHECK_MODE=warn`(只认小写)时超限只告警、照常启动,两版同名。
-3. **告警**:按节点报,两版共用主仓 `deploy/k8s/clock-alerts.yaml`,Java 版不用另写。
+运维口径见主仓 `docs/ops/clock-sync-runbook.md`。2026-11-27 已对齐：`game-common` `ClockCheck.mustPass` 已实现与 Kubernetes API server `/version` `Date` 头 ±30 秒核对及 `MMORPG_CLOCK_CHECK_MODE=warn` 应急放行开关，并已接入全部 20 个 Java 服务进程入口（`Battle`/`Chat`/`ContentGuard`/`Data`/`Friend`/`Gate`/`Gateway`/`GmAdmin`/`Guild`/`Inbox`/`Login`/`Mail`/`Mall`/`Match`/`Payment`/`Rank`/`Scene`/`SceneManager`/`Team`/`TradeApplication`，均在 `SpringApplication.run` 之前执行）；`ClockCheckTest` 3/3 PASS，19/20 服务模块编译通过（`game-match` 仅因并行会话 `TacticalPuzzle*` 未完成 WIP，其 `MatchApplication.java` 零错误）。
 
 **验证**(Java 仓口径):移植主仓 `go/shared/clockcheck/clockcheck_test.go` 与 `java/gateway_node/src/test/java/com/game/gateway/ClockCheckTest.java` 的同名场景(偏差取两个中点之差;30 秒以内放行、超出拒启、只有小写 warn 放行)。
 
@@ -3234,18 +3213,9 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 
 2026-11-26 已对齐（`a1d5e1ad`）：`game-api`（`EnterScene.minor_play_deadline_ms=6`、`PlayerEnter.minor_play_deadline_ms=9`、`PlayerLeave.immediate_exit=4`）→ `game-login`（`NppaLedger.readPlayDeadlineMs`、`AntiAddictionGate.readWatchedSessionDeadlineMs`、`EnterGameHandler` 进游戏前读取并 fail-closed 透传截止时刻）→ `game-gate`（`ClientDispatcher` 提前 5 秒触发 `closeByServer` 发 msg 34 `KickPlayer` 并置 `immediate_exit=true`，跨节点切场透传 `minor_play_deadline_ms`）→ `game-scene`（`ScenePlayer`/`ConnectionLostHold`/`SceneWorld` `onPlayerLeave` 与 `sweepConnectionLostHolds` 强制跳过保留与月卡托管立即存盘离场）。验证：`game-api` `install` BUILD SUCCESS、`game-login` **47/47 PASS**、`game-gate` **111/111 PASS**、`game-scene` `AfkPassHostingAndTeamFollowTest` **5/5 PASS**（独立 JUnit 5 运行器，因并行会话在 `TrialJournalFeatureAndServiceTest` 留有未编译 WIP）。
 
-### 2026-11-26 活动名单导入:已导入数取各片之和、一片一条 INSERT(主仓 11-05 已落码未编译,Java 待做)
+### 2026-11-26 活动名单导入:已导入数取各片之和、一片一条 INSERT（Java 已对齐）
 
-主仓缺口清单(`docs/handoff/server-gap-audit-20261101.md`)第 27 条前一半。主仓代码 `go/mail/internal/data/campaign.go` 的 `Import` / `insertCampaignRecipients`,设计记录 2026-11-26 补进主仓 `docs/design/mail-system.md`「2026-11-05 活动名单导入」一节。不改客户端协议。
-
-- **Java 现状**(`game-mail` 的 `MailStore` 导入方法,2026-11-26 核对源码):每导一片先 `SELECT COUNT(*) FROM mail_campaign_recipient` 数本活动此前导入的全部收件人,导完一份名单的总开销随名单长度平方增长;收件人逐人先 `COUNT` 再 `INSERT`,一片 1000 人是 2000 次往返。与主仓改动前相同。
-- **Java 待做**(口径与主仓相同):
-  1. 已导入人数改为本活动本代各片行 `recipient_count` 之和(片行与收件人行同事务写入,活动行锁把同一活动的导入串行)。
-  2. 一片收件人用一条多行 `INSERT` 写入;撞收件人主键(MySQL / TiDB 1062,Java 侧是 `SQLIntegrityConstraintViolationException` 或驱动的同类错误)按整片冲突回 `CONFLICT`,整笔回滚。
-  3. 同一片重放按片行判:片行已在时 `shard_hash` 与人数都相同才回 `duplicated`(Java 现在只比摘要,顺带补上人数)。
-  4. 不用 `INSERT IGNORE` / `ON DUPLICATE KEY UPDATE`:撞上的人会被悄悄跳过,一片只导进一部分。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+主仓缺口清单第 27 条前一半，设计见主仓 `docs/design/mail-system.md`「2026-11-05 活动名单导入」。2026-11-27 已对齐：`game-mail` `MailStore.importRecipients` 已改为按 `COALESCE(SUM(recipient_count),0) FROM mail_campaign_shard` 统计已导入人数、一片收件人用单条多行 `INSERT INTO mail_campaign_recipient` 写入（禁用 `INSERT IGNORE` / `ON DUPLICATE KEY UPDATE`），捕获唯一键冲突（`SQLIntegrityConstraintViolationException` / 1062 / SQLState `23000`/`23505`）转 `Reject(CONFLICT)` 整笔回滚，重放同时核对 `shard_hash` 与 `recipient_count`；`game-mail` 10/10 PASS（含 `MailCampaignAndQuotaTest` 3/3）。
 
 ### 2026-11-26 未成年人到点由战斗服断开战斗直连(主仓已落码未编译,Java 待做)
 

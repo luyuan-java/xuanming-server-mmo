@@ -50,9 +50,12 @@ public class MailConfiguration {
         return new AuthorityJdbc(source);
     }
     @Bean
-    MailStore store(AuthorityJdbc jdbc, ConfigTables tables) {
+    MailStore store(AuthorityJdbc jdbc, ConfigTables tables,
+                    @Value("${game.mail.max-active-system-mails:100}") int maxActiveSystemMails,
+                    @Value("${game.mail.max-active-guild-mails:20}") int maxActiveGuildMails) {
         return new MailStore(jdbc, new AuthorityIds(jdbc, "mail_id_sequence"), tables.item()::contains,
-                System::currentTimeMillis, playerMissingOrDeleted(jdbc));
+                System::currentTimeMillis, playerMissingOrDeleted(jdbc))
+                .withBroadcastLimits(maxActiveSystemMails, maxActiveGuildMails);
     }
 
     /**

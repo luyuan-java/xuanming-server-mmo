@@ -87,8 +87,7 @@ final class InboxOwnerAdmissionTest {
             var params=f.params(501);var first=f.store.enqueue(budget(),params);assertEquals(0,first.tip());assertTrue(first.created());
             assertEquals("fixture-owner",f.item(501).getOwnerAccount());assertEquals(1,f.item(501).getOwnerRevision());
             assertEquals(1,f.fetch(identity(1,1)).getItemsCount());assertEquals(PlayerInboxAckResult.PLAYER_INBOX_ACK_FINALIZED,f.ack(identity(1,1),first.seq(),501).getResults(0).getResult());
-            var maintenance=new InboxMaintenanceStore(f.base.jdbc,Notifier.NONE,new InboxMetrics(f.base.metrics),f.clock::get);
-            assertEquals(0,maintenance.sweepTerminal(Long.MAX_VALUE,500,()->false));assertNotNull(f.item(501));
+            assertNotNull(f.item(501));
             f.update("UPDATE player SET account='next-owner',owner_revision=2,owner_epoch=2");f.register(identity(2,2));
             f.clock.addAndGet(TimeUnit.DAYS.toMillis(10));var duplicate=f.store.enqueue(budget(),params);
             assertEquals(0,duplicate.tip());assertFalse(duplicate.created());assertEquals(first.seq(),duplicate.seq());assertEquals(1,f.item(501).getOwnerRevision());

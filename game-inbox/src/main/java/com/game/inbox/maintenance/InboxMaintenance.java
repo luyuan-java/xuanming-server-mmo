@@ -39,8 +39,6 @@ public final class InboxMaintenance implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(InboxMaintenance.class);
 
-    /** 每轮最多删 500 行。 */
-    static final int SWEEP_BUDGET_PER_ROUND = 500;
     /** 补发每个分片每轮最多 100 条。 */
     static final int NOTIFY_PER_SHARD_LIMIT = 100;
     /** 补发只扫 notify_due_ms ≤ now − 5s 的行，不与请求内那次提醒抢。 */
@@ -60,7 +58,7 @@ public final class InboxMaintenance implements SmartLifecycle {
      *
      * @param reconcileInterval 0 = 不跑对账
      */
-    public record Settings(Duration terminalRetention, Duration sweepInterval, Duration notifyInterval, Duration gaugeInterval,
+    public record Settings(Duration notifyInterval, Duration gaugeInterval,
                            Duration reconcileInterval, Duration reconcileWindow) {
     }
 
@@ -273,18 +271,6 @@ public final class InboxMaintenance implements SmartLifecycle {
     }
 
     // ================================================================ 各轮
-
-    void sweepRound(Round round) throws SQLException {
-        long now = wallClockMs.getAsLong();
-        long retention = settings.terminalRetention().toMillis();
-        if (now <= retention) {
-            return;
-        }
-        int deleted = store.sweepTerminal(now - retention, SWEEP_BUDGET_PER_ROUND, round::stop);
-        if (deleted > 0) {
-            log.info("[PlayerInbox] 清理删除了 {} 条保留期（{}）外的终态行", deleted, settings.terminalRetention());
-        }
-    }
 
     void notifyRound(Round round) {
         long now = wallClockMs.getAsLong();
