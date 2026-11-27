@@ -46,6 +46,41 @@ public final class BattleCompletionStore {
             s.setQueryTimeout(3);try(var r=s.executeQuery()){if(!r.next())throw new SQLException("缺少持久终局排空计数");return r.getLong(1);}
         }catch(SQLException failure){throw new IllegalStateException("终局来源不可读，不能证明排空",failure);}
     }
+
+    /** 个人结算首投（inbox_seq == 0）积压快照：待首投行数与最老一行自 COMPLETE 提交以来的年龄（秒）。 */
+    public record FirstDeliveryBacklog(long rows, double oldestPendingAgeSeconds) { }
+
+    /** 采样尚未进入收件箱（inbox_seq == 0）的个人结算首投积压；按同连接数据库时钟算年龄，无积压返回 (0, 0.0)。 */
+    public FirstDeliveryBacklog firstDeliveryBacklog() {
+        try (Connection c = source.getConnection()) {
+            long nowMs = nowMillis(c);
+            try (var query = c.prepareStatement(
+                    "SELECT COUNT(*), MIN(issued_at_ms) FROM match_battle_player_completion "
+                            + "WHERE applied=0 AND owner_revision>0 AND inbox_seq=0")) {
+                query.setQueryTimeout(3);
+                try (var rs = query.executeQuery()) {
+                    if (!rs.next()) {
+                        return new FirstDeliveryBacklog(0L, 0.0);
+                    }
+                    long count = rs.getLong(1);
+                    if (count <= 0L) {
+                        return new FirstDeliveryBacklog(0L, 0.0);
+                    }
+                    String minStr = rs.getString(2);
+                    if (minStr == null || minStr.isBlank()) {
+                        return new FirstDeliveryBacklog(count, 0.0);
+                    }
+                    long oldestIssuedMs = Long.parseUnsignedLong(minStr);
+                    double ageSeconds = oldestIssuedMs > 0L && nowMs > oldestIssuedMs
+                            ? (nowMs - oldestIssuedMs) / 1000.0
+                            : 0.0;
+                    return new FirstDeliveryBacklog(count, ageSeconds);
+                }
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("个人结算首投积压采样失败", failure);
+        }
+    }
     public static PbMysql registry() {
         PbMysql db=new PbMysql();
         db.register(BattleCompletionRow.getDefaultInstance());

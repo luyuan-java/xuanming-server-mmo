@@ -1315,43 +1315,13 @@ Java 版待做：
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-06 Match 个人结算首投积压指标与告警(Java 待做)
+### 2026-11-06 Match 个人结算首投积压指标与告警（Java 已对齐）
 
-主仓说明见:
+2026-11-27 已在 `game-match` 与 K8s 告警规则完整对齐（设计见主仓 `docs/design/turn-battle-gap-closure.md` §11.2 与 `docs/ops/player-inbox-runbook.md` §6.1）：
 
-- `docs/design/turn-battle-gap-closure.md` §11.2「指标」段;
-- `docs/ops/player-inbox-runbook.md` §6.1「Match 个人结算首投积压」;
-- 主仓 `docs/PROGRESS.md` 2026-11-06 同名条目。
-
-主仓这一条只加了 Prometheus 规则、合同用例与处置说明,没改代码,规则与用例也都没运行。主仓的指标早已有:`match_outcome_outbox_backlog_rows` 与 `match_outcome_outbox_oldest_pending_age_seconds`,按类别区分。
-
-Java 版 `0.1.0-SNAPSHOT` 待做,做同一组行为:
-
-1. **指标**:`game-match` 的 `BattleCompletionReplay` 给「还没进收件箱的个人结算」补两个 gauge,一个记条数,一个记最老一行的年龄。
-   - 首投行指 `BattleCompletionStore` 里 `inboxSeq == 0` 的 `BattlePlayerCompletionRow`。
-   - 年龄从 COMPLETE 提交、也就是个人终局行写入的时刻算起。
-   - 每个副本定时读一次库。没有积压写 0;读失败保留上一次读数,并打 ERROR。
-   - label 只有类别,不带玩家号、对局号。
-2. **告警**:与主仓同口径两条,规则按 max 聚合:
-   - 最老一行超过 60 秒、持续 2 分钟,warning;
-   - 超过 300 秒、持续 1 分钟,critical。
-
-   阈值跟着 Java 的冻结时刻走,要先等两件事落地后确认取值:
-   - Java 的 FIGHTING 冻结到期:D-11,deadline + 60s 终局宽限 + 60s 投递余量;
-   - 续冻上限:主仓 2026-11-06「冻结到期先查 SQL 终局后有界续冻」,Java 同样待做,由那一条另行登记。
-
-   取值约束:warning 不超过投递余量,critical 离续冻上限至少 10 分钟。
-3. **处置文档**:Java 的运维手册写同样的处置:
-   - 先分清卡住还是跟不上:条数少而年龄一直涨是个别行卡住,条数在涨是吞吐不够或收件箱不可用;
-   - 跟不上时调 Java 投递的批量、并发与节拍配置,或加副本;
-   - 禁止手改个人终局行与收件箱条目。
-
-验证按 Java 仓自己的口径(见其 `AGENTS.md`):
-
-- gauge 的单测覆盖有积压、无积压、读失败保留读数三种情形;
-- 告警文件做静态核对:指标名有注册者,阈值与冻结常量同源。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- **指标**：`BattleCompletionStore.firstDeliveryBacklog()` 基于同连接数据库时钟查询 `match_battle_player_completion` 中 `applied=0 AND owner_revision>0 AND inbox_seq=0` 的行数与最老 `issued_at_ms` 年龄；`MatchMetrics` 注册并预建 `game_match_outcome_outbox_backlog_rows{kind="first"}` 与 `game_match_outcome_outbox_oldest_pending_age_seconds{kind="first"}`（标签仅含 `kind`，无高基数玩家/对局号）；`BattleCompletionReplay` 每 10 秒采样一次（无积压写 0；读库失败保留上一次读数并打 ERROR）。
+- **告警与处置**：`deploy/k8s/match-alerts.yaml` 定义按 `max(...)` 聚合的 `warning`（>60s 持续 2m，不超过 60s 投递余量）与 `critical`（>300s 持续 1m，距续冻上限保留 10 分钟以上）两条规则，并附分清个别行卡住 vs 吞吐/收件箱不可用及禁止手改表的处置说明。
+- **验证**：`BattleCompletionBacklogMetricsTest` **2/2 PASS**（覆盖有积压、读库失败保留读数、清空归零及告警清单静态核对），`MatchMetricsTest` **16/16 PASS**。
 
 ### 2026-11-06 回合制战斗战报回放（已对齐，详见顶部 2026-11-24 / 2026-11-25 条目）
 
@@ -1561,18 +1531,13 @@ Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`
 - **写者名册**:主仓定为「账号按槽位、每次启动换代(写者身份与实例每代唯一)、槽位 = StatefulSet 序号」,解决名册一次一条、上限 1024 会用完,以及死写者要人工退休。Java 要核对 Java 版有没有同类「每次启动消耗一个预批准身份」的设计,有就按同一口径评估。
 - 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-10 全服匹配第四批：后台工作按片分工、评级停写不卡消费（主仓已落码未编译，Java 待做）
+### 2026-11-10 全服匹配第四批：后台工作按片分工、评级停写不卡消费（Java 已对齐）
 
-主仓 commit：`a8af9372d` 起（2026-11-06 落码，随整批保存提交）；Java 版本 `0.1.0-SNAPSHOT`，待做。本条补充表格里「全服匹配：按怪物战斗模板分池…」一行（那一行只写到 11-05 第三批）和 2026-11-06「后台分片归属哈希修复与收件箱对账分工」条，旧记录保留。这是服务端内部改动，不涉及客户端契约。说明见主仓 `docs/PROGRESS.md` 2026-11-06「全服匹配第四批」条目，设计见主仓 `docs/design/global-match-hierarchical-pools.md` §5.2、§8 R5「停写之后的新局」与 §11 R8 行。
+2026-11-27 已在 `game-match` 与 `game-team` 完整对齐（设计见主仓 `docs/design/global-match-hierarchical-pools.md` §5.2、§8 R5 与 §11 R8）：
 
-- **一条归属规则管全部后台工作**：主仓 `svc.OwnsWork(key)`，撮合池和下面几项按片分工的后台工作共用。成员表为空（注册表还没同步，或一直不可用）时全部副本都做，保活优先；成员表非空、但本实例不在其中时什么都不做。归属只管分工，正确性仍由各自提交点的行锁、版本条件和幂等键保证，两个副本偶尔同做一片也不会写错。
-- **按片分工的工作**：固定 64 片，片号 = 业务实体 id 取模（发号器的 id 已打散）。分片条件写在 SQL 里、`LIMIT` 之前，每个副本只读自己的片，吞吐随副本数增长。成局推进按 `battle_id`，整队维护按发起者 `actor_id`，闲置队伍到期按 `team_id`，投榜按（计分模式, 来源片），已建房票巡检按 `player_id`。最后一项主仓还没接上，由另一个会话在改同一文件的批次里一起接。
-- **评级来源停写之后的新局**：评分照记、入账标记照写，只是这一局不进榜：不写投榜 outbox，也不推进来源游标，所以封榜时返回的期望游标不变。结果按「已处理」回，不报错，另计指标 `match_rating_unpublished_total{mode}`。原先这里报错，全部模式共用的结果流会一直重试到 HOLD，把别的模式和别的局一起卡住（主仓数据覆写审计 r2 §4 第 12 条）。
-- **Java 要做**：
-  - 核对 `game-match` 的全局后台循环（成局推进、整队维护、闲置队伍到期、投榜、已建房票巡检）是不是每个副本都扫全量。是的话按同一口径分片分工，成员表为空时继续工作。内部实现按 Java 惯用方式，选主和打分不必照抄 Go。
-  - 核对评级来源停写后的行为（Java 有 `RatingRankOutbox`）。如果停写后报错或卡住结果消费，就改成评分照记、不进榜、不卡消费，并计数。
-  - 公开接口回归要覆盖：只读本副本的片、成员表为空时全做、本实例不在成员表时不做；停写后结果照常确认、评分有变化、没有 outbox 行、来源游标不变、计数加一，同一局重放仍回「重复」。
-- 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
+- **后台 64 片 HRW 分工与保活**：`GlobalMatchStore` 为成局推进（`battle_id`）、已建房票巡检（`player_id`）、Join/Direct 准入恢复（`player_id` / `owner_id`）补齐 `WorkShard.SqlFilter` 重载（`MOD(col,64) IN(...)` 严格置于 `LIMIT` 之前），`GlobalMatchService` / `GlobalMatchConfiguration` 接入统一 `RedisWorkShardMembership` 与 `LoopLiveness`（空成员表全做保活、非成员如 canary 零查库，连同既有 `BattleCompletionReplay` 与 `RatingRankOutbox` 共用同一归属规则）；`game-team/.../TeamLaunchRecovery` 同步接入按发起者 `l.actor_player_id` 64 片分工与 `LoopLiveness`。
+- **评级来源停写不卡消费**：`RatingRankOutbox.append` / `appendRanked` 遇到 `guard.getStopped()` 时不再抛异常回滚评分事务，而是放行 `RatingStore.apply` 正常提交玩家评分与 `match_rating_applied` 入账标记、不写 `match_global_rank_outbox` 且不推进 `produced_cursor`，并递增 `game_match_rating_unpublished_total{mode}`（`deploy/k8s/match-alerts.yaml` 同步纳入告警）；停写后已入账局的重放仍命中 `match_rating_applied` 主键返回 `DUPLICATE`。
+- **验证**：`game-match` `GlobalMatchShardingAndStopSourceTest`（2/2）+ `BattleCompletionShardingTest`（1/1）+ `MatchOutboxShardingAndLivenessTest`（1/1）+ `RatingStoreTest` + `BattleCompletionReplayMetricsTest` + `MatchMetricsTest`（共 **68/68 PASS**），`game-team` `TeamLaunchRecoveryShardingTest`（1/1）+ `TeamConfigurationTest`（8/8，共 **9/9 PASS**）。
 
 ### 2026-11-10 存档库和区脱钩：每地域固定 K 个存档库，建号按 player_id 取模选库（主仓 A17a、A17b 已落码未编译，Java 待做）
 

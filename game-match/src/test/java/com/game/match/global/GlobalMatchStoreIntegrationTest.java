@@ -420,6 +420,7 @@ class GlobalMatchStoreIntegrationTest {
         var meters=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
         try(var outbox=new RatingRankOutbox(data,new GlobalRankProperties("127.0.0.1",20917,"fixture-only-rank-producer-key-0000"))){
             var metrics=new com.game.match.metrics.MatchMetrics(meters,new com.game.match.metrics.MetricLabels(id->false));
+            outbox.withMetrics(metrics);
             var ratings=new com.game.match.rating.RatingStore(com.game.match.rating.RatingStore.connections(data),id->30,metrics,System::currentTimeMillis).withCommitHook(outbox);
             var event=com.game.proto.contracts.kafka.BattleResultEvent.newBuilder().setBattleId(900).setMatchMode(3).setOutcome(com.game.proto.eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)
                     .addTeams(com.game.proto.contracts.kafka.BattleResultTeam.newBuilder().setTeamIndex(0).addPlayerIds(1))
@@ -429,10 +430,15 @@ class GlobalMatchStoreIntegrationTest {
             assertEquals(com.game.match.rating.RatingStore.Outcome.DUPLICATE,ratings.apply(event).outcome());
             assertThrows(RuntimeException.class,()->ratings.apply(event.toBuilder().setBattleConfigId(7).build()));
             assertEquals(1,outbox.stopSource());
-            assertThrows(RuntimeException.class,()->ratings.apply(event.toBuilder().setBattleId(901).build()));
-            assertEquals(151_600,ratings.findOrFresh(1).ratingCenti());
+            // 2026-11-10 全服匹配第四批：来源停写后不阻塞消费——评分照记、入账标记照写，不写 outbox、不推游标，计数+1，重放仍回 DUPLICATE
+            var afterStop = event.toBuilder().setBattleId(901).build();
+            assertEquals(com.game.match.rating.RatingStore.Outcome.APPLIED,ratings.apply(afterStop).outcome());
+            assertTrue(ratings.findOrFresh(1).ratingCenti() > 151_600);
             try(var c=data.getConnection();var s=c.createStatement();var r=s.executeQuery("SELECT COUNT(*) FROM match_global_rank_outbox")){assertTrue(r.next());assertEquals(1,r.getInt(1));}
-            try(var c=data.getConnection();var s=c.createStatement();var r=s.executeQuery("SELECT COUNT(*) FROM match_rating_applied WHERE battle_id=901")){assertTrue(r.next());assertEquals(0,r.getInt(1));}
+            try(var c=data.getConnection();var s=c.createStatement();var r=s.executeQuery("SELECT produced_cursor FROM match_global_rank_source WHERE source_epoch=1")){assertTrue(r.next());assertEquals(1,r.getLong(1));}
+            try(var c=data.getConnection();var s=c.createStatement();var r=s.executeQuery("SELECT COUNT(*) FROM match_rating_applied WHERE battle_id=901")){assertTrue(r.next());assertEquals(1,r.getInt(1));}
+            assertEquals(1.0,meters.get("game.match.rating.unpublished").tag("mode","MATCH_MODE_1V1").counter().count());
+            assertEquals(com.game.match.rating.RatingStore.Outcome.DUPLICATE,ratings.apply(afterStop).outcome());
         }finally{meters.close();}
     }
 

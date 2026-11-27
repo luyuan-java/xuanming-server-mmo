@@ -47,6 +47,16 @@ public final class GlobalMatchService implements AutoCloseable {
     }
     private com.game.match.spectate.SqlSpectateStore spectators;
     public GlobalMatchService withSpectators(com.game.match.spectate.SqlSpectateStore spectators){this.spectators=spectators;return this;}
+    private volatile com.game.common.workshard.WorkShard.Membership workShard;
+    private volatile com.game.common.workshard.LoopLiveness liveness;
+    /** 挂载全服 64 片 HRW 后台分工（成局按 battle_id、已建房票与准入恢复按 player_id / owner_id；空成员表全做保活）。 */
+    public GlobalMatchService withWorkShard(com.game.common.workshard.WorkShard.Membership membership){this.workShard=membership;return this;}
+    /** 挂载后台循环活性探针与每轮 Throwable 兜底。 */
+    public GlobalMatchService withLiveness(com.game.common.workshard.LoopLiveness liveness){this.liveness=liveness;return this;}
+    private com.game.common.workshard.WorkShard.SqlFilter shardFilter(String namespace, String column) {
+        var m = this.workShard;
+        return m == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL : m.sqlFilter(namespace, column);
+    }
     private void exitSpectators(List<ObserverExitOriginal> originals,Deadline deadline){
         if(originals.isEmpty())return;
         if(spectators==null)throw new IllegalStateException("原观战退出SQL端口未装配");
@@ -87,12 +97,14 @@ public final class GlobalMatchService implements AutoCloseable {
                 &&running.isEmpty()&&admissions.isEmpty()&&store.maintenanceOutstanding()==0;
     }
     public void start(){
-        admissionTimer.scheduleWithFixedDelay(()->{try{recoverJoins();}catch(RuntimeException failure){log.warn("原Join恢复扫描待重读，类别={}",failure.getClass().getSimpleName());}},500,500,TimeUnit.MILLISECONDS);
-        admissionTimer.scheduleWithFixedDelay(()->{try{recoverDirects();}catch(RuntimeException failure){log.warn("原direct恢复扫描待重读，类别={}",failure.getClass().getSimpleName());}},500,500,TimeUnit.MILLISECONDS);
+        admissionTimer.scheduleWithFixedDelay(()->{try{recoverJoins();}catch(Throwable failure){log.warn("原Join恢复扫描待重读，类别={}",failure.getClass().getSimpleName());}},500,500,TimeUnit.MILLISECONDS);
+        admissionTimer.scheduleWithFixedDelay(()->{try{recoverDirects();}catch(Throwable failure){log.warn("原direct恢复扫描待重读，类别={}",failure.getClass().getSimpleName());}},500,500,TimeUnit.MILLISECONDS);
     }
     private void recoverJoins(){
-        if(joinUpper==null){joinUpper=store.pendingJoinUpper();joinPlayer=joinHigh=joinLow=0;if(joinUpper==null)return;}
-        var rows=store.pendingJoins(joinPlayer,joinHigh,joinLow,joinUpper);if(rows.isEmpty()){joinUpper=null;return;}
+        var filter=shardFilter("match_join_intent","player_id");
+        if(filter.isNone()){joinUpper=null;return;}
+        if(joinUpper==null){joinUpper=store.pendingJoinUpper(filter);joinPlayer=joinHigh=joinLow=0;if(joinUpper==null)return;}
+        var rows=store.pendingJoins(joinPlayer,joinHigh,joinLow,joinUpper,filter);if(rows.isEmpty()){joinUpper=null;return;}
         for(var row:rows){String key="j:"+Long.toUnsignedString(row.getPlayerId())+":"+row.getRequestId();
             if(admissions.contains(key)){advanceJoin(row);continue;}if(!joinRecoverySlots.tryAcquire())return;
             if(!admissions.add(key)){joinRecoverySlots.release();advanceJoin(row);continue;}
@@ -102,8 +114,10 @@ public final class GlobalMatchService implements AutoCloseable {
     }
     private void advanceJoin(GlobalJoinIntentRow row){joinPlayer=row.getPlayerId();joinHigh=row.getRequestHigh();joinLow=row.getRequestLow();}
     private void recoverDirects(){
-        if(directUpper==null){directUpper=store.pendingDirectUpper();directKind=0;directOwner=directHigh=directLow=0;if(directUpper==null)return;}
-        var rows=store.pendingDirects(directKind,directOwner,directHigh,directLow,directUpper);if(rows.isEmpty()){directUpper=null;return;}
+        var filter=shardFilter("match_direct_intent","owner_id");
+        if(filter.isNone()){directUpper=null;return;}
+        if(directUpper==null){directUpper=store.pendingDirectUpper(filter);directKind=0;directOwner=directHigh=directLow=0;if(directUpper==null)return;}
+        var rows=store.pendingDirects(directKind,directOwner,directHigh,directLow,directUpper,filter);if(rows.isEmpty()){directUpper=null;return;}
         for(var row:rows){String key="d:"+row.getKind()+":"+Long.toUnsignedString(row.getOwnerId())+":"+Long.toUnsignedString(row.getRequestHigh())+":"+Long.toUnsignedString(row.getRequestLow());
             if(admissions.contains(key)){advanceDirect(row);continue;}if(!directRecoverySlots.tryAcquire())return;
             if(!admissions.add(key)){directRecoverySlots.release();advanceDirect(row);continue;}
@@ -421,8 +435,22 @@ public final class GlobalMatchService implements AutoCloseable {
     }
     public synchronized void round() {
         if(!config.enabled())return;
+        Runnable step = this::roundBody;
+        var live = this.liveness;
+        if (live != null) {
+            live.runGuarded(step);
+        } else {
+            try {
+                step.run();
+            } catch (Throwable e) {
+                log.error("全球凑单/恢复本轮失败", e);
+            }
+        }
+    }
+    private void roundBody() {
         try {
-            for(var f:store.pending())launch(f,false);
+            var formationFilter=shardFilter("match_formation","battle_id");
+            for(var f:store.pending(formationFilter))launch(f,false);
             sweepReady();
             boolean repaired=store.repairRegions();
             if(!ids.leaseValid()||slots.availablePermits()==0)return;
@@ -488,7 +516,9 @@ public final class GlobalMatchService implements AutoCloseable {
         }return false;
     }
     private void sweepReady() {
-        var rows=store.readyCandidates(readyMs,readyPlayer);
+        var filter=shardFilter("match_ready_ticket","player_id");
+        if(filter.isNone())return;
+        var rows=store.readyCandidates(readyMs,readyPlayer,filter);
         if(rows.isEmpty()){readyMs=0;readyPlayer=0;return;}
         int submitted=0;
         for(var ticket:rows) {
@@ -921,6 +951,6 @@ public final class GlobalMatchService implements AutoCloseable {
             return RequestBattleTicketResponse.newBuilder().setAssignment(result.getAssignment()).setErrorMessage(result.getErrorMessage()).build();
         }catch(Exception e){return RequestBattleTicketResponse.newBuilder().setErrorMessage(MatchTip.REISSUE_BATTLE_UNAVAILABLE.proto()).build();}
     }
-    @Override public void close(){admissionTimer.shutdownNow();workers.shutdown();try{if(!workers.awaitTermination(10,TimeUnit.SECONDS))workers.shutdownNow();}
+    @Override public void close(){var live=this.liveness;if(live!=null){live.close();}admissionTimer.shutdownNow();workers.shutdown();try{if(!workers.awaitTermination(10,TimeUnit.SECONDS))workers.shutdownNow();}
         catch(InterruptedException e){Thread.currentThread().interrupt();workers.shutdownNow();}}
 }

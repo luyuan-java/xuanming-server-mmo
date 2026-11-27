@@ -44,6 +44,7 @@ public final class BattleCompletionReplay implements AutoCloseable {
             Thread.ofPlatform().name("battle-terminal-replay").daemon(true).factory());
     private final java.util.concurrent.locks.ReentrantLock turn=new java.util.concurrent.locks.ReentrantLock();
     private volatile boolean quiesced;
+    private static final long BACKLOG_SAMPLE_INTERVAL_SECONDS = 10L;
     private volatile com.game.common.workshard.WorkShard.Membership workShard;
     private volatile com.game.common.workshard.LoopLiveness liveness;
     private long deadlineCursor,deadlineUpper,resultCursor;
@@ -68,6 +69,7 @@ public final class BattleCompletionReplay implements AutoCloseable {
     }
     public void start(){
         worker.scheduleWithFixedDelay(this::roundSafely,0,500,TimeUnit.MILLISECONDS);
+        worker.scheduleWithFixedDelay(this::sampleBacklog,BACKLOG_SAMPLE_INTERVAL_SECONDS,BACKLOG_SAMPLE_INTERVAL_SECONDS,TimeUnit.SECONDS);
     }
     void roundSafely() {
         var live = this.liveness;
@@ -112,6 +114,17 @@ public final class BattleCompletionReplay implements AutoCloseable {
         deliverPending(true,firstPlayers,playerFilter);
         if(Thread.currentThread().isInterrupted())return;
         deliverPending(false,waitingPlayers,playerFilter);
+    }
+
+    /** 采样个人结算首投（inbox_seq == 0）积压并写入两个 gauge；无积压写 0，读失败保留上一次读数并打 ERROR。 */
+    public void sampleBacklog() {
+        try {
+            var backlog = store.firstDeliveryBacklog();
+            metrics.outcomeOutboxBacklog(TerminalDeliveryKind.FIRST, backlog.rows(), backlog.oldestPendingAgeSeconds());
+        } catch (RuntimeException failure) {
+            log.error("[match] failed to sample first-delivery outbox backlog; keeping previous gauge reading: {}",
+                    failure.getMessage(), failure);
+        }
     }
     private static final class PlayerScanCursor { long battle,player,upper; }
     private void deliverPending(boolean first,PlayerScanCursor cursor,com.game.common.workshard.WorkShard.SqlFilter playerFilter) {

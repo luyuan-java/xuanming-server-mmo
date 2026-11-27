@@ -35,6 +35,7 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
     private volatile com.game.match.ranked.RankedStore rankedStore;
     private volatile com.game.common.workshard.WorkShard.Membership workShard;
     private volatile com.game.common.workshard.LoopLiveness liveness;
+    private volatile com.game.match.metrics.MatchMetrics metrics;
     public RatingRankOutbox(DataSource source,GlobalRankProperties config){
         if(config.secret().getBytes(java.nio.charset.StandardCharsets.UTF_8).length<32)throw new IllegalArgumentException("评级投榜必须注入 RANK_PRODUCER_SECRET_MATCH");
         this.source=source;this.config=config;db.register(GlobalRankSourceRow.getDefaultInstance());db.register(GlobalRankOutboxRow.getDefaultInstance());
@@ -46,6 +47,8 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
     public RatingRankOutbox withWorkShard(com.game.common.workshard.WorkShard.Membership membership){this.workShard=membership;return this;}
     /** 挂载循环活性跟踪器（每轮兜底 Throwable 防静默停摆，有意关闭时摘除序列）。 */
     public RatingRankOutbox withLiveness(com.game.common.workshard.LoopLiveness liveness){this.liveness=liveness;return this;}
+    /** 挂载指标注册器（记录评级来源停写后继续入账未投榜计数 game_match_rating_unpublished_total）。 */
+    public RatingRankOutbox withMetrics(com.game.match.metrics.MatchMetrics metrics){this.metrics=metrics;return this;}
     private static byte[] digest(BattleResultEvent event){try{return MessageDigest.getInstance("SHA-256").digest(NetworkProbes.bytes(event));}
         catch(java.security.NoSuchAlgorithmException e){throw new IllegalStateException(e);}}
     @Override public boolean alreadyApplied(Connection c,BattleResultEvent event)throws SQLException{
@@ -140,10 +143,30 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
         return RANKED_SOURCE_EPOCH_BASE + Integer.toUnsignedLong(seasonId);
     }
 
+    /** 用 ON DUPLICATE KEY UPDATE 无副作用补齐来源行，替代 INSERT IGNORE（MySQL 8.4/TiDB 更安全且兼容 H2）。 */
+    private static void ensureSourceRow(Connection c, long epoch) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "INSERT INTO match_global_rank_source (source_epoch, produced_cursor, committed_cursor, board_id, stopped) "
+                        + "VALUES (?, 0, 0, 0, 0) ON DUPLICATE KEY UPDATE source_epoch = source_epoch")) {
+            ps.setQueryTimeout(3);
+            ps.setObject(1, PbMysql.uint64(epoch));
+            ps.executeUpdate();
+        }
+    }
+
     @Override public void append(Connection c,BattleResultEvent event,Map<Long,Long> next,long stamp)throws SQLException{
-        var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build();db.insertIgnore(c,key);
+        var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build();ensureSourceRow(c,1L);
         var guard=db.findOneByPkForUpdate(c,key).orElseThrow();
-        if(guard.getStopped())throw new SQLException("评级代次已停止，必须显式协调下一代");
+        if(guard.getStopped()){
+            // 评级来源停写后：评分与入账标记照常提交，不写 outbox、不推进游标、不阻塞 Kafka 消费。
+            var m = this.metrics;
+            if (m != null) {
+                m.ratingUnpublished(event.getMatchMode());
+            }
+            log.info("[rating-outbox] rank source stopped; rating committed without rank outbox battle={} mode={} epoch=1",
+                    Long.toUnsignedString(event.getBattleId()), event.getMatchMode());
+            return;
+        }
         long cursor=guard.getProducedCursor()+1;
         var request=SubmitRankScoresRequest.newBuilder().setGeneration(1).setSourceEpoch(1).setSourceCursor(cursor)
                 .setRequestId(event.getBattleId()).setMode(RankSubmitMode.RANK_SUBMIT_SET);
@@ -162,10 +185,17 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
         }
         long epoch = rankedSourceEpoch(commit.seasonId());
         var key = GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build();
-        db.insertIgnore(c, key);
+        ensureSourceRow(c, epoch);
         var guard = db.findOneByPkForUpdate(c, key).orElseThrow();
         if (guard.getStopped()) {
-            throw new SQLException("排位赛季榜来源代次已停止 season=" + commit.seasonId());
+            // 排位赛季榜来源停写后同样只记分不卡消费。
+            var m = this.metrics;
+            if (m != null) {
+                m.ratingUnpublished(event.getMatchMode());
+            }
+            log.info("[rating-outbox] ranked season source stopped; rating committed without outbox battle={} season={}",
+                    Long.toUnsignedString(event.getBattleId()), commit.seasonId());
+            return;
         }
         long cursor = guard.getProducedCursor() + 1;
         var request = SubmitRankScoresRequest.newBuilder()
@@ -351,7 +381,7 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
             try {
                 com.game.common.player.PlayerRouteAuthority.requireMeta(c, 3, true);
                 var key = GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build();
-                db.insertIgnore(c, key);
+                ensureSourceRow(c, epoch);
                 var row = db.findOneByPkForUpdate(c, key).orElseThrow();
                 db.updateByPk(c, row.toBuilder().setStopped(true).build());
                 c.commit();
@@ -434,7 +464,7 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
     public long stopSource()throws SQLException{
         try(var c=source.getConnection()){
             c.setAutoCommit(false);
-            try{com.game.common.player.PlayerRouteAuthority.requireMeta(c,3,true);var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build();db.insertIgnore(c,key);
+            try{com.game.common.player.PlayerRouteAuthority.requireMeta(c,3,true);var key=GlobalRankSourceRow.newBuilder().setSourceEpoch(1).build();ensureSourceRow(c,1L);
                 var row=db.findOneByPkForUpdate(c,key).orElseThrow();db.updateByPk(c,row.toBuilder().setStopped(true).build());c.commit();return row.getProducedCursor();}
             catch(Exception e){c.rollback();throw e;}
         }

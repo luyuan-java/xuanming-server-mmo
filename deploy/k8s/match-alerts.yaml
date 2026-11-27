@@ -1,0 +1,46 @@
+# game-match 个人结算首投积压与运维告警规则（对齐 2026-11-06 Match 个人结算首投积压指标与告警）
+# 指标注册者：com.game.match.metrics.MatchMetrics（OUTCOME_OUTBOX_BACKLOG_ROWS / OUTCOME_OUTBOX_OLDEST_PENDING_AGE）
+# 阈值依据：
+#   - FIGHTING 冻结到期 = deadline + 60s 终局宽限 + 60s 投递余量；warning(60s) <= 投递余量(60s)；
+#   - 续冻上限离 critical(300s) 保留 >= 10 分钟人工处置窗口。
+# 运维处置指引：
+#   1. 先分清卡住还是跟不上：backlog_rows 少而 oldest_pending_age 持续增长 = 个别行卡住；rows 与 age 同涨 = 吞吐不足或 game-inbox 不可用。
+#   2. 跟不上时调整投递批量/并发/节拍配置或增加 game-match 副本。
+#   3. 严禁手工修改 match_battle_player_completion 或 player_inbox 行。
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: game-match-outcome-outbox-alerts
+  labels:
+    app: game-match
+spec:
+  groups:
+    - name: game-match-outcome-outbox
+      rules:
+        - alert: MatchOutcomeOutboxFirstDeliveryBacklogWarning
+          expr: max(game_match_outcome_outbox_oldest_pending_age_seconds{kind="first"}) > 60
+          for: 2m
+          labels:
+            severity: warning
+            service: game-match
+          annotations:
+            summary: "Match 个人结算首投积压超过 60 秒（接近 60s 投递余量）"
+            description: "先对比 game_match_outcome_outbox_backlog_rows{kind=\"first\"} 分清个别行卡住还是吞吐/收件箱故障，禁止手改个人终局行与收件箱表。"
+        - alert: MatchOutcomeOutboxFirstDeliveryBacklogCritical
+          expr: max(game_match_outcome_outbox_oldest_pending_age_seconds{kind="first"}) > 300
+          for: 1m
+          labels:
+            severity: critical
+            service: game-match
+          annotations:
+            summary: "Match 个人结算首投积压超过 300 秒（需立即排查避免逼近续冻上限）"
+            description: "检查 game-inbox 存活与数据库写入延迟；跟不上时扩副本或调投递节拍，严禁手工改表。"
+        - alert: MatchRatingUnpublishedAfterSourceStop
+          expr: increase(game_match_rating_unpublished_total[5m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+            service: game-match
+          annotations:
+            summary: "Match 评级来源停写后存在未进排行榜的已入账对局"
+            description: "评分已正常入账且不阻塞 Kafka 消费，但该代榜源已停止写入；如需继续上榜请协调开启下一代榜源。"

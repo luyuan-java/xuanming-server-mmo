@@ -60,15 +60,20 @@ public class GlobalMatchConfiguration {
             com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "match", "match_terminal_result", membership.membership());
             com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "match", "match_terminal_player", membership.membership());
             com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "match", "match_rank_removal", membership.membership());
+            com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "match", "match_formation", membership.membership());
+            com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "match", "match_ready_ticket", membership.membership());
         }
         return membership;
     }
     @Bean(initMethod="start",destroyMethod="close") @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     RatingRankOutbox ratingRankOutbox(DataSource source,GlobalRankProperties config,GlobalMatchStore schema,
             ObjectProvider<com.game.match.ranked.RankedStore> rankedStore,
+            ObjectProvider<com.game.match.metrics.MatchMetrics> matchMetrics,
             ObjectProvider<com.game.discovery.workshard.RedisWorkShardMembership> workShard,
             ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters){
-        var outbox = new RatingRankOutbox(source,config).withRankedStore(rankedStore.getIfAvailable());
+        var outbox = new RatingRankOutbox(source,config)
+                .withRankedStore(rankedStore.getIfAvailable())
+                .withMetrics(matchMetrics.getIfAvailable());
         var shards = workShard.getIfAvailable();
         if (shards != null) {
             outbox.withWorkShard(shards.membership());
@@ -86,10 +91,22 @@ public class GlobalMatchConfiguration {
             ObjectProvider<com.game.match.script.BattleScriptResolver> scriptResolver,
             ObjectProvider<com.game.match.ranked.RankedStore> rankedStore,
             ObjectProvider<com.game.match.ranked.RankedTables> rankedTables,
-            ObjectProvider<com.game.match.tournament.TournamentStore> tournamentStore){
-        return new GlobalMatchService(store,config,props,directory,ids,ratings,scenes,calls,players,projections,hooks)
+            ObjectProvider<com.game.match.tournament.TournamentStore> tournamentStore,
+            ObjectProvider<com.game.discovery.workshard.RedisWorkShardMembership> workShard,
+            ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters){
+        var svc = new GlobalMatchService(store,config,props,directory,ids,ratings,scenes,calls,players,projections,hooks)
                 .withSpectators(spectators).withMetrics(metrics)
                 .withBattleScriptResolver(scriptResolver.getIfAvailable())
                 .withRanked(rankedStore.getIfAvailable(),rankedTables.getIfAvailable())
-                .withTournamentStore(tournamentStore.getIfAvailable());}
+                .withTournamentStore(tournamentStore.getIfAvailable());
+        var shards = workShard.getIfAvailable();
+        if (shards != null) {
+            svc.withWorkShard(shards.membership());
+        }
+        var live = new com.game.common.workshard.LoopLiveness("match", "global_match_round", 60L, System::currentTimeMillis);
+        var registry = meters.getIfAvailable();
+        if (registry != null) {
+            com.game.discovery.workshard.LoopLivenessMeters.bind(registry, live);
+        }
+        return svc.withLiveness(live);}
 }

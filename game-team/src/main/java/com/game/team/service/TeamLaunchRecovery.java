@@ -17,15 +17,32 @@ public final class TeamLaunchRecovery implements AutoCloseable {
     private final ExecutorService attempts=new ThreadPoolExecutor(2,2,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(2),Thread.ofPlatform().name("team-launch-attempt-",0).daemon(true).factory(),new ThreadPoolExecutor.AbortPolicy());
     private final Semaphore permits=new Semaphore(2);
     private final java.util.Set<String> inflight=ConcurrentHashMap.newKeySet();
+    private volatile com.game.common.workshard.WorkShard.Membership workShard;
+    private volatile com.game.common.workshard.LoopLiveness liveness;
     public TeamLaunchRecovery(DataSource source,TeamService service){this.sql=new AuthorityJdbc(source);this.service=service;}
-    public void start(){worker.scheduleWithFixedDelay(this::round,1000,1000,TimeUnit.MILLISECONDS);}
+    /** 挂载 64 片 HRW 后台分工（按发起者 actor_player_id % 64 分片，条件在 LIMIT 之前；成员表为空全做保活）。 */
+    public TeamLaunchRecovery withWorkShard(com.game.common.workshard.WorkShard.Membership membership){this.workShard=membership;return this;}
+    /** 挂载后台循环活性探针与每轮 Throwable 兜底。 */
+    public TeamLaunchRecovery withLiveness(com.game.common.workshard.LoopLiveness liveness){this.liveness=liveness;return this;}
+    public void start(){worker.scheduleWithFixedDelay(this::roundSafely,1000,1000,TimeUnit.MILLISECONDS);}
+    void roundSafely(){
+        var live=this.liveness;
+        if(live!=null){live.runGuarded(this::round);}
+        else{try{round();}catch(Throwable panic){log.error("Team开局恢复轮次异常（循环继续）",panic);}}
+    }
     private record Pending(String request,SessionContext actor,byte[] original){}
     void round(){
         try{
-            if(permits.availablePermits()==0)return;Deadline round=Deadline.after(3000);
-            var rows=sql.read(round,c->c.list("SELECT l.request_id,l.actor_player_id,l.owner_account,l.owner_revision,l.request_proto FROM team_launch l JOIN team_authority t ON t.team_id=l.team_id AND t.active_launch_id=l.request_id WHERE l.active=1 ORDER BY l.updated_ms,l.request_id LIMIT 2",r->{
+            if(permits.availablePermits()==0)return;
+            var m=this.workShard;
+            var filter=m==null?com.game.common.workshard.WorkShard.SqlFilter.ALL
+                    :m.sqlFilter("team_launch_recovery","l.actor_player_id");
+            if(filter.isNone())return;
+            String clause=filter.isAll()?"":" AND "+filter.sql();
+            Deadline round=Deadline.after(3000);
+            var rows=sql.read(round,c->c.list("SELECT l.request_id,l.actor_player_id,l.owner_account,l.owner_revision,l.request_proto FROM team_launch l JOIN team_authority t ON t.team_id=l.team_id AND t.active_launch_id=l.request_id WHERE l.active=1"+clause+" ORDER BY l.updated_ms,l.request_id LIMIT 2",r->{
                 return new Pending(r.getString(1),SessionContext.newBuilder().setPlayerId(r.getLong(2)).setAccount(r.getString(3)).setOwnerRevision(r.getLong(4)).build(),r.getBytes(5));
-            }));
+            },filter.args().toArray()));
             for(var row:rows){if(Thread.currentThread().isInterrupted())return;
                 if(!inflight.add(row.request()))continue;if(!permits.tryAcquire()){inflight.remove(row.request());return;}
                 try{
@@ -39,5 +56,5 @@ public final class TeamLaunchRecovery implements AutoCloseable {
             }
         }catch(Exception failure){log.warn("Team开局恢复轮次未完成，保留原件",failure);}
     }
-    public void close(){worker.shutdownNow();attempts.shutdownNow();}
+    public void close(){var live=this.liveness;if(live!=null){live.close();}worker.shutdownNow();attempts.shutdownNow();}
 }

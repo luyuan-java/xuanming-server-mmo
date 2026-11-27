@@ -141,9 +141,9 @@ public final class GlobalMatchStore {
         } catch (Exception e) { throw new Deadline.DependencyException("全球匹配 SQL 操作失败", e); }
     }
     private static long now(Connection c) throws SQLException {
-        try (Statement s = c.createStatement(); ResultSet r = s.executeQuery("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)")) {
-            if (!r.next()) throw new SQLException("缺少数据库时间");
-            return r.getLong(1);
+        try (Statement s = c.createStatement(); ResultSet r = s.executeQuery("SELECT CURRENT_TIMESTAMP(3)")) {
+            if (!r.next() || r.getTimestamp(1) == null) throw new SQLException("缺少数据库时间");
+            return r.getTimestamp(1).getTime();
         }
     }
     public long now() { return tx(GlobalMatchStore::now); }
@@ -272,10 +272,30 @@ public final class GlobalMatchStore {
         if(!original.getOwnerAccount().equals(actor.getAccount())||original.getOwnerRevision()!=actor.getOwnerRevision()||original.getCancelled())throw new SecurityException("原Join回复身份不同或已取消");
         if(!original.getResponsePayload().isEmpty())return com.game.proto.match.JoinQueueResponse.parseFrom(original.getResponsePayload());
         db.updateByPk(c,original.toBuilder().setResponsePayload(response.toByteString()).setAdmissionCompleted(true).build());return response;});}
-    public GlobalJoinIntentRow pendingJoinUpper(){return tx(c->{var rows=db.findAll(c,GlobalJoinIntentRow.class,"admission_prepared=1 AND admission_completed=0 AND cancelled=0 ORDER BY player_id DESC,request_high DESC,request_low DESC LIMIT 1");return rows.isEmpty()?null:rows.getFirst();});}
-    public List<GlobalJoinIntentRow> pendingJoins(long player,long high,long low,GlobalJoinIntentRow upper){return tx(c->db.findAll(c,GlobalJoinIntentRow.class,
-        "admission_prepared=1 AND admission_completed=0 AND cancelled=0 AND (player_id>? OR (player_id=? AND (request_high>? OR (request_high=? AND request_low>?)))) AND (player_id<? OR (player_id=? AND (request_high<? OR (request_high=? AND request_low<=?)))) ORDER BY player_id,request_high,request_low LIMIT 8",
-        PbMysql.uint64(player),PbMysql.uint64(player),PbMysql.uint64(high),PbMysql.uint64(high),PbMysql.uint64(low),PbMysql.uint64(upper.getPlayerId()),PbMysql.uint64(upper.getPlayerId()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestLow())));}
+    public GlobalJoinIntentRow pendingJoinUpper(){return pendingJoinUpper(com.game.common.workshard.WorkShard.SqlFilter.ALL);}
+    public GlobalJoinIntentRow pendingJoinUpper(com.game.common.workshard.WorkShard.SqlFilter shardFilter){
+        var filter=shardFilter==null?com.game.common.workshard.WorkShard.SqlFilter.ALL:shardFilter;
+        if(filter.isNone())return null;
+        String clause=filter.isAll()?"":" AND "+filter.sql();
+        return tx(c->{var rows=db.findAll(c,GlobalJoinIntentRow.class,"admission_prepared=1 AND admission_completed=0 AND cancelled=0"+clause+" ORDER BY player_id DESC,request_high DESC,request_low DESC LIMIT 1",filter.args().toArray());return rows.isEmpty()?null:rows.getFirst();});
+    }
+    public List<GlobalJoinIntentRow> pendingJoins(long player,long high,long low,GlobalJoinIntentRow upper){
+        return pendingJoins(player,high,low,upper,com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+    public List<GlobalJoinIntentRow> pendingJoins(long player,long high,long low,GlobalJoinIntentRow upper,com.game.common.workshard.WorkShard.SqlFilter shardFilter){
+        var filter=shardFilter==null?com.game.common.workshard.WorkShard.SqlFilter.ALL:shardFilter;
+        if(filter.isNone())return List.of();
+        String clause=filter.isAll()?"":" AND "+filter.sql();
+        return tx(c->db.findAll(c,GlobalJoinIntentRow.class,
+        "admission_prepared=1 AND admission_completed=0 AND cancelled=0 AND (player_id>? OR (player_id=? AND (request_high>? OR (request_high=? AND request_low>?)))) AND (player_id<? OR (player_id=? AND (request_high<? OR (request_high=? AND request_low<=?))))"+clause+" ORDER BY player_id,request_high,request_low LIMIT 8",
+        withFilterArgs(filter,PbMysql.uint64(player),PbMysql.uint64(player),PbMysql.uint64(high),PbMysql.uint64(high),PbMysql.uint64(low),PbMysql.uint64(upper.getPlayerId()),PbMysql.uint64(upper.getPlayerId()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestLow()))));
+    }
+    private static Object[] withFilterArgs(com.game.common.workshard.WorkShard.SqlFilter filter,Object... base){
+        if(filter.isAll()||filter.args().isEmpty())return base;
+        Object[] all=Arrays.copyOf(base,base.length+filter.args().size());
+        for(int i=0;i<filter.args().size();i++)all[base.length+i]=filter.args().get(i);
+        return all;
+    }
     /** 只有原退出正证明已齐，才可安全终结失效的pending票；绝不换新profile延续旧请求。 */
     public boolean closeObsoleteJoin(GlobalJoinIntentRow original,Deadline deadline){return tx(deadline,c->{
         owner(c,original.getPlayerId(),original.getOwnerAccount(),original.getOwnerRevision());var current=db.findOneByPkForUpdate(c,original).orElseThrow();
@@ -443,7 +463,15 @@ public final class GlobalMatchStore {
                 now(c),now(c), afterMs, afterMs, PbMysql.uint64(afterPlayer)));
     }
     public List<GlobalTicketRow> readyCandidates(long afterMs,long afterPlayer) {
-        return tx(c->db.findAll(c,GlobalTicketRow.class,"state=3 AND (enqueued_ms>? OR (enqueued_ms=? AND player_id>?)) ORDER BY enqueued_ms,player_id LIMIT 8",afterMs,afterMs,PbMysql.uint64(afterPlayer)));
+        return readyCandidates(afterMs,afterPlayer,com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+    /** 已建房票巡检按 player_id % 64 分片，分片条件置于 LIMIT 之前。 */
+    public List<GlobalTicketRow> readyCandidates(long afterMs,long afterPlayer,com.game.common.workshard.WorkShard.SqlFilter shardFilter) {
+        var filter=shardFilter==null?com.game.common.workshard.WorkShard.SqlFilter.ALL:shardFilter;
+        if(filter.isNone())return List.of();
+        String clause=filter.isAll()?"":" AND "+filter.sql();
+        return tx(c->db.findAll(c,GlobalTicketRow.class,"state=3 AND (enqueued_ms>? OR (enqueued_ms=? AND player_id>?))"+clause+" ORDER BY enqueued_ms,player_id LIMIT 8",
+                withFilterArgs(filter,afterMs,afterMs,PbMysql.uint64(afterPlayer))));
     }
     public synchronized boolean repairRegions(){
         var unitProgress=tx(c->units.repair(c,now(c)));units.committed(unitProgress);
@@ -586,10 +614,24 @@ public final class GlobalMatchStore {
             if(invite!=null)db.updateByPk(c,invite.toBuilder().setState(2).setBattleId(result.getBattleId()).build());return result;
         });
     }
-    public GlobalDirectIntentRow pendingDirectUpper(){return tx(c->{var rows=db.findAll(c,GlobalDirectIntentRow.class,"admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3,4,5,6) ORDER BY kind DESC,owner_id DESC,request_high DESC,request_low DESC LIMIT 1");return rows.isEmpty()?null:rows.getFirst();});}
-    public List<GlobalDirectIntentRow> pendingDirects(int kind,long owner,long high,long low,GlobalDirectIntentRow upper){return tx(c->db.findAll(c,GlobalDirectIntentRow.class,
-        "admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3,4,5,6) AND (kind>? OR (kind=? AND (owner_id>? OR (owner_id=? AND (request_high>? OR (request_high=? AND request_low>?)))))) AND (kind<? OR (kind=? AND (owner_id<? OR (owner_id=? AND (request_high<? OR (request_high=? AND request_low<=?)))))) ORDER BY kind,owner_id,request_high,request_low LIMIT 8",
-        kind,kind,PbMysql.uint64(owner),PbMysql.uint64(owner),PbMysql.uint64(high),PbMysql.uint64(high),PbMysql.uint64(low),upper.getKind(),upper.getKind(),PbMysql.uint64(upper.getOwnerId()),PbMysql.uint64(upper.getOwnerId()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestLow())));}
+    public GlobalDirectIntentRow pendingDirectUpper(){return pendingDirectUpper(com.game.common.workshard.WorkShard.SqlFilter.ALL);}
+    public GlobalDirectIntentRow pendingDirectUpper(com.game.common.workshard.WorkShard.SqlFilter shardFilter){
+        var filter=shardFilter==null?com.game.common.workshard.WorkShard.SqlFilter.ALL:shardFilter;
+        if(filter.isNone())return null;
+        String clause=filter.isAll()?"":" AND "+filter.sql();
+        return tx(c->{var rows=db.findAll(c,GlobalDirectIntentRow.class,"admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3,4,5,6)"+clause+" ORDER BY kind DESC,owner_id DESC,request_high DESC,request_low DESC LIMIT 1",filter.args().toArray());return rows.isEmpty()?null:rows.getFirst();});
+    }
+    public List<GlobalDirectIntentRow> pendingDirects(int kind,long owner,long high,long low,GlobalDirectIntentRow upper){
+        return pendingDirects(kind,owner,high,low,upper,com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+    public List<GlobalDirectIntentRow> pendingDirects(int kind,long owner,long high,long low,GlobalDirectIntentRow upper,com.game.common.workshard.WorkShard.SqlFilter shardFilter){
+        var filter=shardFilter==null?com.game.common.workshard.WorkShard.SqlFilter.ALL:shardFilter;
+        if(filter.isNone())return List.of();
+        String clause=filter.isAll()?"":" AND "+filter.sql();
+        return tx(c->db.findAll(c,GlobalDirectIntentRow.class,
+        "admission_prepared=1 AND admission_completed=0 AND battle_id=0 AND kind IN(2,3,4,5,6) AND (kind>? OR (kind=? AND (owner_id>? OR (owner_id=? AND (request_high>? OR (request_high=? AND request_low>?)))))) AND (kind<? OR (kind=? AND (owner_id<? OR (owner_id=? AND (request_high<? OR (request_high=? AND request_low<=?))))))"+clause+" ORDER BY kind,owner_id,request_high,request_low LIMIT 8",
+        withFilterArgs(filter,kind,kind,PbMysql.uint64(owner),PbMysql.uint64(owner),PbMysql.uint64(high),PbMysql.uint64(high),PbMysql.uint64(low),upper.getKind(),upper.getKind(),PbMysql.uint64(upper.getOwnerId()),PbMysql.uint64(upper.getOwnerId()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestHigh()),PbMysql.uint64(upper.getRequestLow()))));
+    }
     /** 新意图仅此处捕获目标归属；旧邀请/接受绝不再用当前归属补原件。 */
     private SessionContext newTarget(Connection c,long player)throws SQLException {
         try(var q=c.prepareStatement("SELECT account,owner_revision,trade_listing_id FROM player WHERE player_id=? FOR UPDATE")) {
@@ -871,7 +913,15 @@ public final class GlobalMatchStore {
         return tx(c -> db.findOneByPk(c, GlobalFormationRow.newBuilder().setBattleId(battle).build()).orElse(null));
     }
     public List<GlobalFormationRow> pending() {
-        return tx(c -> db.findAll(c,GlobalFormationRow.class,"state IN (1,2,3) AND retry_ms<=? ORDER BY retry_ms LIMIT 32",now(c)));
+        return pending(com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+    /** 成局推进按 battle_id % 64 分片，分片条件置于 LIMIT 之前。 */
+    public List<GlobalFormationRow> pending(com.game.common.workshard.WorkShard.SqlFilter shardFilter) {
+        var filter=shardFilter==null?com.game.common.workshard.WorkShard.SqlFilter.ALL:shardFilter;
+        if(filter.isNone())return List.of();
+        String clause=filter.isAll()?"":" AND "+filter.sql();
+        return tx(c -> db.findAll(c,GlobalFormationRow.class,"state IN (1,2,3) AND retry_ms<=?"+clause+" ORDER BY retry_ms LIMIT 32",
+                withFilterArgs(filter,now(c))));
     }
     /** retry_ms 是到期时间也是单调工作代次；不续租，所有出站准入截止须早于该代次。 */
     public GlobalFormationRow acquireWork(long battle) {

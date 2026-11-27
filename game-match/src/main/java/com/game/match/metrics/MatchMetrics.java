@@ -86,8 +86,11 @@ public final class MatchMetrics {
     static final String TEAM_CALLS = "game.match.team.calls";
     static final String RATING_UPDATES = "game.match.rating.updates";
     static final String RATING_ROUND_CAP_DRAWS = "game.match.rating.round.cap.draws";
+    static final String RATING_UNPUBLISHED = "game.match.rating.unpublished";
     static final String RATING_CONSUMER_PAUSED = "game.match.rating.consumer.paused";
     static final String OUTCOME_OUTBOX_DELIVERY = "game.match.outcome.outbox.delivery";
+    public static final String OUTCOME_OUTBOX_BACKLOG_ROWS = "game.match.outcome.outbox.backlog.rows";
+    public static final String OUTCOME_OUTBOX_OLDEST_PENDING_AGE = "game.match.outcome.outbox.oldest.pending.age";
     static final String BATTLE_NODES = "game.match.battle.nodes";
     static final String LEASE_LOST = "game.match.lease.lost";
     static final String ADMIN_REQUESTS = "game.match.admin.requests";
@@ -435,11 +438,12 @@ public final class MatchMetrics {
             }
         }
         TEAM_RESULTS.forEach((method, results) -> results.forEach(result -> teamCounter(method, result)));
-        for (int mode : List.of(MatchModes.FIVE_V_FIVE, MatchModes.ONE_V_ONE)) {
+        for (int mode : List.of(MatchModes.FIVE_V_FIVE, MatchModes.ONE_V_ONE, MatchModes.PVP_TEAM)) {
             for (RatingOutcome outcome : RatingOutcome.values()) {
                 ratingCounter(MetricLabels.mode(mode), outcome);
             }
             roundCapCounter(MetricLabels.mode(mode));
+            ratingUnpublishedCounter(MetricLabels.mode(mode));
         }
         ratingCounter(MetricLabels.UNKNOWN, RatingOutcome.DECODE_ERROR);
         for (TerminalDeliveryKind kind : TerminalDeliveryKind.values()) {
@@ -447,6 +451,8 @@ public final class MatchMetrics {
                 terminalDeliveryCounter(kind, outcome);
             }
         }
+        // 个人结算首投积压 gauge 预建为 0（无积压即 0，避免未触发前缺失序列；标签仅有 kind）
+        outcomeOutboxBacklog(TerminalDeliveryKind.FIRST, 0L, 0.0);
         for (AdminOp op : AdminOp.values()) {
             for (String status : ADMIN_STATUSES) {
                 adminCounter(op, status);
@@ -635,6 +641,20 @@ public final class MatchMetrics {
         terminalDeliveryCounter(kind, outcome).increment();
     }
 
+    /** 终局发件箱待首投（inbox_seq == 0）积压行数与最老一行年龄（秒）；读失败时调用方不更新，保留上一次读数。 */
+    public void outcomeOutboxBacklog(TerminalDeliveryKind kind, long rows, double oldestPendingAgeSeconds) {
+        String kindLabel = tag(kind);
+        outcomeOutboxBacklogRowsGauge(kindLabel).set(Math.max(0L, rows));
+        long ageMillis = oldestPendingAgeSeconds <= 0.0 || !Double.isFinite(oldestPendingAgeSeconds)
+                ? 0L : Math.round(oldestPendingAgeSeconds * 1000.0);
+        outcomeOutboxOldestAgeMillisGauge(kindLabel).set(Math.max(0L, ageMillis));
+    }
+
+    /** 评级来源停写后继续入账但未写入排行榜 outbox 的局数（不卡消费）。 */
+    public void ratingUnpublished(int mode) {
+        ratingUnpublishedCounter(MetricLabels.mode(mode)).increment();
+    }
+
     /** 一局胜负结果因「回合打满」被改按平局结算。 */
     public void ratingRoundCapDraw(int mode) {
         roundCapCounter(MetricLabels.mode(mode)).increment();
@@ -774,6 +794,43 @@ public final class MatchMetrics {
 
     private Counter roundCapCounter(String mode) {
         return counter(RATING_ROUND_CAP_DRAWS, "因回合打满被改按平局结算的计分局数", "mode", mode);
+    }
+
+    private Counter ratingUnpublishedCounter(String mode) {
+        return counter(RATING_UNPUBLISHED, "评级来源停写后评分已入账但未进排行榜 outbox 的局数", "mode", mode);
+    }
+
+    private AtomicLong outcomeOutboxBacklogRowsGauge(String kindLabel) {
+        String key = key(OUTCOME_OUTBOX_BACKLOG_ROWS, kindLabel);
+        AtomicLong holder = gauges.get(key);
+        if (holder == null) {
+            holder = gauges.computeIfAbsent(key, k -> {
+                AtomicLong atomic = new AtomicLong();
+                Gauge.builder(OUTCOME_OUTBOX_BACKLOG_ROWS, atomic, AtomicLong::get)
+                        .description("终局发件箱待投递（按类别，first 表示尚未进入收件箱的个人结算）积压行数；多实例看板按 max 聚合")
+                        .tag("kind", kindLabel)
+                        .register(registry);
+                return atomic;
+            });
+        }
+        return holder;
+    }
+
+    private AtomicLong outcomeOutboxOldestAgeMillisGauge(String kindLabel) {
+        String key = key(OUTCOME_OUTBOX_OLDEST_PENDING_AGE, kindLabel);
+        AtomicLong holder = gauges.get(key);
+        if (holder == null) {
+            holder = gauges.computeIfAbsent(key, k -> {
+                AtomicLong atomic = new AtomicLong();
+                Gauge.builder(OUTCOME_OUTBOX_OLDEST_PENDING_AGE, atomic, v -> v.get() / 1000.0)
+                        .description("终局发件箱待投递最老一行自 COMPLETE 提交以来的年龄（秒）；多实例看板按 max 聚合")
+                        .baseUnit("seconds")
+                        .tag("kind", kindLabel)
+                        .register(registry);
+                return atomic;
+            });
+        }
+        return holder;
     }
 
     private Counter adminCounter(AdminOp op, String status) {
