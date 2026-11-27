@@ -81,4 +81,21 @@ class LoginAccountServiceTest {
         assertThat(resp.getChannel()).isEqualTo("wechat");
         assertThat(resp.getOpenId()).isEqualTo("openid_real_8801");
     }
+
+    @Test
+    void 校验access_token区分有效_拒绝空串与存储故障异常() {
+        LoginAccountService full = new LoginAccountService(accountLogin, new RefreshTokenHandler(tokens),
+                tokens, store, null, null, Runnable::run);
+        String access = tokens.issue("robot_0001", "password", "").accessToken();
+        assertThat(full.resolveAccessTokenAccount(access).join()).isEqualTo("robot_0001");
+        assertThat(full.resolveAccessTokenAccount("bad-token").join()).isEmpty();
+        assertThat(full.resolveAccessTokenAccount("").join()).isEmpty();
+
+        com.game.login.token.LoginTokens broken = mock(com.game.login.token.LoginTokens.class);
+        when(broken.validateAccess("any")).thenThrow(new IllegalStateException("redis timeout"));
+        LoginAccountService brokenService = new LoginAccountService(accountLogin, new RefreshTokenHandler(tokens),
+                broken, store, null, null, Runnable::run);
+        assertThatThrownBy(() -> brokenService.resolveAccessTokenAccount("any").join())
+                .isInstanceOf(CompletionException.class).hasCauseInstanceOf(IllegalStateException.class);
+    }
 }

@@ -170,6 +170,11 @@ public final class RedisKeys {
         return prefix + "chat:{world}:log";
     }
 
+    /** 世界频道实时消息与撤回广播频道 {@code game:chat:world:events}（Redis pub/sub，game-chat 发布、各 game-gate 订阅）。 */
+    public String chatWorldTopic() {
+        return prefix + "chat:world:events";
+    }
+
     /** 私聊历史 {@code game:chat:{p:<小号>:<大号>}:log}：两个玩家号按无符号排序，A→B 与 B→A 写同一把键。 */
     public String chatPrivateLog(long a, long b) {
         long lo = Long.compareUnsigned(a, b) <= 0 ? a : b;

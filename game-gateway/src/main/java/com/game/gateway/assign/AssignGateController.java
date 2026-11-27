@@ -30,7 +30,7 @@ public class AssignGateController {
     @PostMapping("/assign-gate")
     public AssignGateResponse assignGate(@RequestBody AssignGateRequest request, HttpServletRequest http) {
         AssignGateResponse response = service.assign(ZoneIds.optionalBits(request.zoneId()), request.queueToken(),
-                ipResolver.resolve(http), request.account());
+                ipResolver.resolve(http), request.account(), request.accessToken());
         metrics.record(response);
         return response;
     }

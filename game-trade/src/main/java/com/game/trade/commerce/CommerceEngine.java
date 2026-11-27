@@ -163,8 +163,10 @@ public final class CommerceEngine {
                 if (row.getSellerPlayerId() != 0) w.setSellerIdentity(CommerceStore.roleIdentity(c, row.getSellerPlayerId()));
                 if (row.getBuyerPlayerId() != 0) w.setBuyerIdentity(CommerceStore.roleIdentity(c, row.getBuyerPlayerId()));
                 row.setWorkflowProto(w.build().toByteString());
-                CommerceStore.insert(c, "trade_commerce", row.build());
-                return row.build();
+                row.setOnOrderBook(CommerceStore.computeOnOrderBook(row));
+                TradeCommerceRow built = row.build();
+                CommerceStore.insert(c, "trade_commerce", built);
+                return built;
             });
         } catch (SQLException failure) {
             var stored = store.byRequest(requestKey);
@@ -392,12 +394,16 @@ public final class CommerceEngine {
         });
     }
 
-    public void advance(TradeCommerceRow prior, Deadline d) throws SQLException {
+    private record AdvanceOutcome(TradeCommerceRow saved, Optional<SellerCreditService.CompletedTradeFact> creditFact) {
+        static final AdvanceOutcome SKIPPED = new AdvanceOutcome(null, Optional.empty());
+    }
+
+    public TradeCommerceRow advance(TradeCommerceRow prior, Deadline d) throws SQLException {
         var pw = workflow(prior);
         store.ensureSeqs(d, prior.getSellerPlayerId(), prior.getBuyerPlayerId(), pw.getHighestBidder());
         long[] opIds = new long[8];
         for (int i = 0; i < opIds.length; i++) opIds[i] = ids.getAsLong();
-        var settledFact = store.transaction(d, c -> {
+        AdvanceOutcome outcome = store.transaction(d, c -> {
             // 旧未终局合同缺少原件时隔离，禁止以恢复时的当前owner补出“原身份”。
             if ((prior.getKind() >= 1 && prior.getKind() <= 5 || prior.getKind() == BID_KIND)
                 && (prior.getSellerPlayerId() != 0 && !pw.hasSellerIdentity()
@@ -421,7 +427,7 @@ public final class CommerceEngine {
             var current = store.lock(c, prior.getCommerceId());
             // 原身份与点锁来自prior；新版本必须等下一轮用自身原件取锁，不能借旧观察推进。
             if (current == null || current.getVersion() != prior.getVersion())
-                return Optional.<SellerCreditService.CompletedTradeFact>empty();
+                return AdvanceOutcome.SKIPPED;
             var r = current.toBuilder();
             var w = workflow(current);
             for (var l : w.getLegsList())
@@ -444,8 +450,8 @@ public final class CommerceEngine {
                     w.setStage("manual");
                     r.setStatus(MANUAL);
                     r.setWorkflowProto(w.build().toByteString()).setUpdatedMs(now);
-                    store.save(c, r);
-                    return Optional.<SellerCreditService.CompletedTradeFact>empty();
+                    TradeCommerceRow quarantined = store.save(c, r);
+                    return new AdvanceOutcome(quarantined, Optional.empty());
                 }
                 if (op.getStatus() != 1) {
                     l.setOutcome(op.getStatus());
@@ -509,14 +515,15 @@ public final class CommerceEngine {
             // 库时钟只裁决截止；updated_ms 是按引擎时钟扫描的调度键。
             r.setWorkflowProto(builtWorkflow.toByteString()).setUpdatedMs(engineNow);
             TradeCommerceRow saved = store.save(c, r);
-            if (current.getStatus() != SETTLED && saved.getStatus() == SETTLED) {
-                return SellerCreditService.settledTradeFact(saved, builtWorkflow, engineNow);
-            }
-            return Optional.<SellerCreditService.CompletedTradeFact>empty();
+            Optional<SellerCreditService.CompletedTradeFact> fact = current.getStatus() != SETTLED && saved.getStatus() == SETTLED
+                    ? SellerCreditService.settledTradeFact(saved, builtWorkflow, engineNow)
+                    : Optional.empty();
+            return new AdvanceOutcome(saved, fact);
         });
-        if (settledFact != null && settledFact.isPresent()) {
-            recordSettledCreditBestEffort(settledFact.get());
+        if (outcome != null && outcome.creditFact().isPresent()) {
+            recordSettledCreditBestEffort(outcome.creditFact().get());
         }
+        return outcome == null ? null : outcome.saved();
     }
 
     void recordSettledCreditBestEffort(SellerCreditService.CompletedTradeFact fact) {

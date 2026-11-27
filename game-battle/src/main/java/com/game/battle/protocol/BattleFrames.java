@@ -55,9 +55,18 @@ public final class BattleFrames {
                 .build();
     }
 
-    /** 握手成功：{@code success = true, battle_id}，{@code error} 不填（重复握手时 battle_id 是已绑定的那个，B1）。 */
+    /** 直连应用层心跳通告：与 gate 同口径（10s 间隔 / 30s 空闲断开，docs/design/gate-client-heartbeat.md §14）。 */
+    public static final int HEARTBEAT_INTERVAL_MS = 10_000;
+    public static final int HEARTBEAT_TIMEOUT_MS = 30_000;
+
+    /** 握手成功：{@code success = true, battle_id, heartbeat_interval_ms = 10000, heartbeat_timeout_ms = 30000}，{@code error} 不填。 */
     public static BattleTokenVerifyResponse verifyAccepted(long battleId) {
-        return BattleTokenVerifyResponse.newBuilder().setSuccess(true).setBattleId(battleId).build();
+        return BattleTokenVerifyResponse.newBuilder()
+                .setSuccess(true)
+                .setBattleId(battleId)
+                .setHeartbeatIntervalMs(HEARTBEAT_INTERVAL_MS)
+                .setHeartbeatTimeoutMs(HEARTBEAT_TIMEOUT_MS)
+                .build();
     }
 
     /** 握手失败：{@code success = false, error = 拒绝串}，{@code battle_id} 不填。 */

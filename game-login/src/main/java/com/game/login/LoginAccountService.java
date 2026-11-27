@@ -132,6 +132,19 @@ public class LoginAccountService implements AccountLoginService {
         });
     }
 
+    @Override
+    public CompletableFuture<String> resolveAccessTokenAccount(String accessToken) {
+        if (tokens == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("login tokens not wired"));
+        }
+        return onWorkers(() -> {
+            if (accessToken == null || accessToken.isBlank()) {
+                return "";
+            }
+            return tokens.validateAccess(accessToken).map(TokenData::account).orElse("");
+        });
+    }
+
     /** 实名提交（对齐 {@code SubmitRealNameLogic}）：未开防沉迷回空应答；令牌无效回 2000，其余按带内 tip。 */
     SubmitRealNameResponse handleSubmitRealName(SubmitRealNameRequest req) {
         SubmitRealNameResponse.Builder resp = SubmitRealNameResponse.newBuilder();

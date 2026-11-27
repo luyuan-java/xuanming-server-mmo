@@ -13,9 +13,14 @@ import com.game.gateway.ratelimit.RateLimitDecision;
 import com.game.gateway.ratelimit.RateLimiter;
 import com.game.gateway.store.ZoneRow;
 import com.game.gateway.zone.ZoneDirectory;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,6 +53,12 @@ public final class AssignGateService {
     public record Queueing(LoginQueue queue, QueueCapacity capacity, QueueTokens tokens, long retryAfterMs) {
     }
 
+    /** access_token 校验口：有效返回账号名；无效/过期/吊销返回空；后端存储或 RPC 故障抛 RuntimeException。 */
+    @FunctionalInterface
+    public interface AccessTokenAuthenticator {
+        Optional<String> verify(String accessToken);
+    }
+
     private final ZoneDirectory zones;
     private final GateSource gates;
     private final GateTokenIssuer issuer;
@@ -55,6 +66,9 @@ public final class AssignGateService {
     private final RateLimiter limiter;
     private final Clock clock;
     private final GateInflight inflight;
+    private final AccessTokenAuthenticator authenticator;
+    private final boolean legacyGateLoginEnabled;
+    private final Consumer<AssignGateMetrics.AuthOutcome> authObserver;
 
     /** 不排队。 */
     public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer) {
@@ -78,6 +92,13 @@ public final class AssignGateService {
 
     public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer, Queueing queueing,
                              RateLimiter limiter, Clock clock, GateInflight inflight) {
+        this(zones, gates, issuer, queueing, limiter, clock, inflight, null, true, outcome -> { });
+    }
+
+    public AssignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer, Queueing queueing,
+                             RateLimiter limiter, Clock clock, GateInflight inflight,
+                             AccessTokenAuthenticator authenticator, boolean legacyGateLoginEnabled,
+                             Consumer<AssignGateMetrics.AuthOutcome> authObserver) {
         this.zones = zones;
         this.gates = gates;
         this.issuer = issuer;
@@ -85,6 +106,9 @@ public final class AssignGateService {
         this.limiter = limiter;
         this.clock = clock;
         this.inflight = inflight;
+        this.authenticator = authenticator;
+        this.legacyGateLoginEnabled = legacyGateLoginEnabled;
+        this.authObserver = authObserver == null ? outcome -> { } : authObserver;
     }
 
     public AssignGateResponse assign(int zoneId) {
@@ -92,15 +116,19 @@ public final class AssignGateService {
     }
 
     public AssignGateResponse assign(int zoneId, String queueToken) {
-        return assign(zoneId, queueToken, null, null);
+        return assign(zoneId, queueToken, null, null, null);
+    }
+
+    public AssignGateResponse assign(int zoneId, String queueToken, String clientIp, String account) {
+        return assign(zoneId, queueToken, clientIp, account, null);
     }
 
     /**
-     * @param queueToken 客户端带来的排队令牌（可为空）
-     * @param clientIp   客户端 IP（限流用）
-     * @param account    请求体里的账号（未经认证，只当限流冷却的身份）
+     * 分配 gate：不再信任请求体自报的 {@code account}；带 {@code access_token} 时必须向 login 验权（拒绝回 401、存储故障回 500），
+     * 冷却键仅用令牌摘要（{@code tok:<sha256前16字节>}），匿名分配仅在 {@code legacyGateLoginEnabled} 开启时允许且无冷却键。
      */
-    public AssignGateResponse assign(int zoneId, String queueToken, String clientIp, String account) {
+    public AssignGateResponse assign(int zoneId, String queueToken, String clientIp, String ignoredAccount,
+                                     String accessToken) {
         AssignGateResponse rejected = admission(zoneId);
         if (rejected != null) {
             return rejected;
@@ -108,8 +136,38 @@ public final class AssignGateService {
         if (queueing != null && queueToken != null && !queueToken.isBlank()) {
             return poll(zoneId, queueToken);
         }
+        String cooldownKey = null;
+        if (accessToken != null && !accessToken.isBlank()) {
+            if (authenticator == null) {
+                authObserver.accept(AssignGateMetrics.AuthOutcome.ERROR);
+                return AssignGateResponse.rejected(AssignGateResponse.CODE_INTERNAL,
+                        AssignGateResponse.ERR_AUTH_UNAVAILABLE);
+            }
+            Optional<String> verifiedAccount;
+            try {
+                verifiedAccount = authenticator.verify(accessToken);
+            } catch (RuntimeException e) {
+                log.error("assign-gate access_token 校验故障 zone={}: {}", zoneId, e.toString());
+                authObserver.accept(AssignGateMetrics.AuthOutcome.ERROR);
+                return AssignGateResponse.rejected(AssignGateResponse.CODE_INTERNAL,
+                        AssignGateResponse.ERR_AUTH_UNAVAILABLE);
+            }
+            if (verifiedAccount == null || verifiedAccount.isEmpty() || verifiedAccount.get().isBlank()) {
+                authObserver.accept(AssignGateMetrics.AuthOutcome.TOKEN_REJECTED);
+                return AssignGateResponse.rejected(AssignGateResponse.CODE_AUTH_REJECTED,
+                        AssignGateResponse.ERR_AUTH_REJECTED);
+            }
+            authObserver.accept(AssignGateMetrics.AuthOutcome.AUTHENTICATED);
+            cooldownKey = tokenCooldownKey(accessToken);
+        } else if (!legacyGateLoginEnabled) {
+            authObserver.accept(AssignGateMetrics.AuthOutcome.ANONYMOUS_DENIED);
+            return AssignGateResponse.rejected(AssignGateResponse.CODE_AUTH_REJECTED,
+                    AssignGateResponse.ERR_AUTH_REQUIRED);
+        } else {
+            authObserver.accept(AssignGateMetrics.AuthOutcome.ANONYMOUS);
+        }
         if (limiter != null) {
-            RateLimitDecision decision = limiter.check(zoneId, clientIp, account, RateLimiter.Scope.ASSIGN);
+            RateLimitDecision decision = limiter.check(zoneId, clientIp, cooldownKey, RateLimiter.Scope.ASSIGN);
             if (decision.kind() == RateLimitDecision.Kind.QUEUE) {
                 return AssignGateResponse.rateLimitQueueing(decision.retryAfterMs(), decision.queuePos());
             }
@@ -242,6 +300,16 @@ public final class AssignGateService {
         log.info("排队领票复核重挑 gate zone={} old_node={} new_node={}",
                 zoneId, admitted.getNodeId(), repicked.get().getNodeId());
         return repicked.get();
+    }
+
+    /** 令牌冷却键：{@code tok:} + SHA-256 前 16 字节十六进制（不把令牌原文放进内存键）。 */
+    public static String tokenCooldownKey(String accessToken) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(accessToken.getBytes(StandardCharsets.UTF_8));
+            return "tok:" + HexFormat.of().formatHex(digest, 0, 16);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
     }
 
     /** 区服准入：放行回 null，否则回拒绝应答。 */

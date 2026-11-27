@@ -68,6 +68,8 @@ game:
     history-max-limit: 50
     request-id-ttl: 60s
     request-budget: 3500ms
+    world-channel-cooldown-ms: 5000
+    world-history-cache-ms: 500
 
 dubbo:
   application:

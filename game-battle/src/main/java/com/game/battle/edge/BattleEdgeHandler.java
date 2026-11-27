@@ -13,6 +13,8 @@ import com.game.net.client.ClientFrameException;
 import com.game.proto.BattleStateS2C;
 import com.game.proto.BattleTicketPayload;
 import com.game.proto.BattleTokenVerifyRequest;
+import com.game.proto.ClientHeartbeatRequest;
+import com.game.proto.ClientHeartbeatResponse;
 import com.game.proto.ClientRequest;
 import com.game.proto.GetBattleStateRequest;
 import com.game.proto.SendBattlePingRequest;
@@ -66,6 +68,12 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
     static final int MAX_CLIENT_REQUEST_BYTES = 1024;
     /** 握手被拒后的强关兜底（基线 {@code forceCloseWithDelay(0.1)}，{@code edge.cpp:273}）。 */
     static final long HANDSHAKE_REJECT_FORCE_CLOSE_MS = 100;
+    /** 应用层心跳窗口与读空闲超时（与 gate 同口径：10s / 30s，每 10s 最多回 3 条）。 */
+    static final long HEARTBEAT_INTERVAL_NANOS = TimeUnit.MILLISECONDS.toNanos(BattleFrames.HEARTBEAT_INTERVAL_MS);
+    static final long HEARTBEAT_TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(BattleFrames.HEARTBEAT_TIMEOUT_MS);
+    static final long IDLE_DEFER_THRESHOLD_NANOS = TimeUnit.SECONDS.toNanos(2);
+    static final long IDLE_DEFER_DELAY_NANOS = TimeUnit.SECONDS.toNanos(1);
+    static final int MAX_HEARTBEATS_PER_WINDOW = 3;
 
     /** 信封错误：白名单外的号、请求体解析失败（基线 {@code kInvalidParameter}）。 */
     static final int TIP_INVALID_PARAMETER = CommonErrorTip.common_error.kInvalidParameter_VALUE;
@@ -245,11 +253,14 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
             if (s == null || !s.acceptsFrames() || !ctx.channel().isActive()) {
                 return;
             }
+            noteInboundFrame(s);
             if(msg instanceof com.game.proto.match.NetworkProbeStart start){onProbeStart(s,start);}
             else if(msg instanceof com.game.proto.match.NetworkProbeEcho echo){onProbeEcho(s,echo);}
             else if (msg instanceof BattleTokenVerifyRequest verify) {
                 if(probeGrant!=null){s.forceClose(null);return;}
                 onVerify(s, verify);
+            } else if (msg instanceof ClientHeartbeatRequest heartbeat) {
+                onHeartbeat(s, heartbeat);
             } else if (msg instanceof ClientRequest request) {
                 onRequest(s, request);
             }
@@ -346,11 +357,82 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
         verifiedPayload=payload;
         metrics.handshake(HandshakeResult.OK);
         s.writeDirect(BattleFrames.verifyAccepted(battleId));
+        startLivenessTracking(s);
         log.info("battle 直连握手成功 battle_id={} player_id={} role={} gate_session={} peer={}",
                 Long.toUnsignedString(battleId), Long.toUnsignedString(playerId), payload.getRole(),
                 Integer.toUnsignedString(gateSession.getAsInt()), s.peer());
         // 必须在握手应答之后：客户端握手读到的第一个包必须是应答；只对观众推 161 首帧（edge.cpp:358-361）
         rooms.onDirectVerified(battleId, playerId, payload.getRole());
+    }
+
+    private void startLivenessTracking(DirectSession s) {
+        if (!s.livenessTracked) {
+            s.livenessTracked = true;
+            s.lastInboundNanos = edge.nanoTime();
+            metrics.heartbeat(BattleMetrics.HeartbeatResult.TRACKED);
+            scheduleIdleCheck(s, s.lastInboundNanos, HEARTBEAT_TIMEOUT_NANOS);
+        }
+    }
+
+    private void noteInboundFrame(DirectSession s) {
+        if (s.livenessTracked && !s.isClosing()) {
+            s.lastInboundNanos = edge.nanoTime();
+        }
+    }
+
+    /** 验签后按完整入站帧计 30s 读空闲：房间正在优雅排空终局包时不打断；EventLoop 迟到 >2s 推迟 1s 重判。 */
+    private void scheduleIdleCheck(DirectSession s, long scheduledAtNanos, long delayNanos) {
+        Channel ch = s.channelOrNull();
+        if (ch == null || !ch.isActive()) {
+            return;
+        }
+        long due = scheduledAtNanos + delayNanos;
+        s.armIdleTimer(ch.eventLoop().schedule(() -> {
+            Channel active = s.channelOrNull();
+            if (active == null || !active.isActive() || s.state() != DirectSession.State.VERIFIED || s.isClosing()) {
+                return;
+            }
+            long checked = edge.nanoTime();
+            if (checked - due > IDLE_DEFER_THRESHOLD_NANOS) {
+                metrics.heartbeat(BattleMetrics.HeartbeatResult.DEFERRED);
+                scheduleIdleCheck(s, checked, IDLE_DEFER_DELAY_NANOS);
+                return;
+            }
+            long remaining = HEARTBEAT_TIMEOUT_NANOS - (checked - s.lastInboundNanos);
+            if (remaining > 0) {
+                scheduleIdleCheck(s, checked, remaining);
+            } else {
+                metrics.heartbeat(BattleMetrics.HeartbeatResult.IDLE_CLOSED);
+                edge.rejectLog().record(EdgeRejectReason.CLIENT_IDLE, s.peer());
+                s.forceClose(Disconnect.CLIENT_IDLE);
+            }
+        }, Math.max(1L, delayNanos), TimeUnit.NANOSECONDS));
+    }
+
+    private void onHeartbeat(DirectSession s, ClientHeartbeatRequest heartbeat) {
+        if (probeGrant != null || s.state() != DirectSession.State.VERIFIED) {
+            metrics.heartbeat(BattleMetrics.HeartbeatResult.BEFORE_VERIFY);
+            edge.rejectLog().record(EdgeRejectReason.HEARTBEAT_BEFORE_VERIFY, s.peer());
+            s.forceClose(Disconnect.REQUEST_BEFORE_VERIFY);
+            return;
+        }
+        if (s.isClosing()) {
+            return;
+        }
+        long now = edge.nanoTime();
+        if (s.heartbeatAnswersInWindow == 0 || now - s.heartbeatWindowStartNanos >= HEARTBEAT_INTERVAL_NANOS) {
+            s.heartbeatWindowStartNanos = now;
+            s.heartbeatAnswersInWindow = 0;
+        }
+        if (s.heartbeatAnswersInWindow >= MAX_HEARTBEATS_PER_WINDOW) {
+            metrics.heartbeat(BattleMetrics.HeartbeatResult.EXCESS);
+            edge.rejectLog().record(EdgeRejectReason.HEARTBEAT_OVER_RATE, s.peer());
+            registerIllegal(s, EdgeRejectReason.HEARTBEAT_OVER_RATE);
+            return;
+        }
+        s.heartbeatAnswersInWindow++;
+        metrics.heartbeat(BattleMetrics.HeartbeatResult.ANSWERED);
+        s.writeDirect(ClientHeartbeatResponse.newBuilder().setSeq(heartbeat.getSeq()).build());
     }
 
     /** 握手被拒（R4）：回 {@code {success = false, error}}（battle_id 不填）→ 输出排空后 FIN → 0.1 s 强关兜底。 */

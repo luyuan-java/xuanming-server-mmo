@@ -71,6 +71,11 @@ final class DirectSession implements DirectLink {
     private long gateSessionId = -1;
     private int illegalPackets;
     private ScheduledFuture<?> handshakeTimer;
+    private ScheduledFuture<?> idleTimer;
+    boolean livenessTracked;
+    long lastInboundNanos;
+    long heartbeatWindowStartNanos;
+    int heartbeatAnswersInWindow;
     private Disconnect disconnectReason;
     /** 幂等守护：保证每条会话在未认证连接 O(1) 计数器里至多加一次、减一次。 */
     private final AtomicBoolean unauthCounted = new AtomicBoolean();
@@ -225,6 +230,11 @@ final class DirectSession implements DirectLink {
         this.handshakeTimer = timer;
     }
 
+    void armIdleTimer(ScheduledFuture<?> timer) {
+        cancelIdleTimer();
+        this.idleTimer = timer;
+    }
+
     boolean markUnauthEntered() {
         return unauthCounted.compareAndSet(false, true);
     }
@@ -273,6 +283,7 @@ final class DirectSession implements DirectLink {
             state = State.CLOSING;
         }
         cancelHandshakeTimer();
+        cancelIdleTimer();
         recordDisconnect(reason);
     }
 
@@ -312,6 +323,7 @@ final class DirectSession implements DirectLink {
     void onInactive() {
         state = State.CLOSED;
         cancelHandshakeTimer();
+        cancelIdleTimer();
         channel = null;
     }
 
@@ -332,6 +344,14 @@ final class DirectSession implements DirectLink {
         ScheduledFuture<?> timer = handshakeTimer;
         if (timer != null) {
             handshakeTimer = null;
+            timer.cancel(false);
+        }
+    }
+
+    private void cancelIdleTimer() {
+        ScheduledFuture<?> timer = idleTimer;
+        if (timer != null) {
+            idleTimer = null;
             timer.cancel(false);
         }
     }

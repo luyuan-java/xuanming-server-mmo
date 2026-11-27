@@ -48,6 +48,8 @@ final class EdgeTestKit {
     /** 下行只有两种类型。 */
     static final Map<String, Message> DOWNSTREAM = Map.of(
             BattleTokenVerifyResponse.getDescriptor().getFullName(), BattleTokenVerifyResponse.getDefaultInstance(),
+            com.game.proto.ClientHeartbeatResponse.getDescriptor().getFullName(),
+            com.game.proto.ClientHeartbeatResponse.getDefaultInstance(),
             MessageContent.getDescriptor().getFullName(), MessageContent.getDefaultInstance());
 
     private EdgeTestKit() {

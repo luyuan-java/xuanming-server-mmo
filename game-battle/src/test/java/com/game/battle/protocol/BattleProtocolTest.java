@@ -114,11 +114,15 @@ class BattleProtocolTest {
         BattleTokenVerifyResponse ok = BattleFrames.verifyAccepted(99);
         assertThat(ok.getSuccess()).isTrue();
         assertThat(ok.getBattleId()).isEqualTo(99);
+        assertThat(ok.getHeartbeatIntervalMs()).isEqualTo(BattleFrames.HEARTBEAT_INTERVAL_MS);
+        assertThat(ok.getHeartbeatTimeoutMs()).isEqualTo(BattleFrames.HEARTBEAT_TIMEOUT_MS);
         assertThat(ok.getError()).isEmpty();
 
         BattleTokenVerifyResponse rejected = BattleFrames.verifyRejected(BattleFrames.REJECT_NOT_IN_ROSTER);
         assertThat(rejected.getSuccess()).isFalse();
         assertThat(rejected.getBattleId()).as("battle_id 不在线上").isZero();
+        assertThat(rejected.getHeartbeatIntervalMs()).isZero();
+        assertThat(rejected.getHeartbeatTimeoutMs()).isZero();
         assertThat(rejected.getError()).isEqualTo("battle not found or player not in this battle");
         assertThat(BattleFrames.REJECT_INVALID_SIGNATURE).isEqualTo("invalid ticket signature");
         assertThat(BattleFrames.REJECT_MALFORMED_PAYLOAD).isEqualTo("malformed ticket payload");

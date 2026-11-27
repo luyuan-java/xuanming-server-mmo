@@ -292,7 +292,7 @@ class GatewayHttpApiTest {
         assertRejected(assignGate("{}"), 404, "zone_not_found");
         verifyNoInteractions(gateSource);
         assertThat(assignOutcomes(404, "zone_not_found") - before).as("标签不带 zone_id，未知区服不会造出新序列").isEqualTo(3);
-        assertThat(meters.find("game.gateway.assign.gate").counters()).as("只有预先注册的已知结局").hasSize(16);
+        assertThat(meters.find("game.gateway.assign.gate").counters()).as("只有预先注册的已知结局").hasSize(19);
     }
 
     @Test
@@ -536,10 +536,15 @@ class GatewayHttpApiTest {
     void 限流_assign排队100带ratelimit来源_429_IP取对端不信伪造的XFF_准入在前() throws Exception {
         double queuedBefore = assignOutcomes(100, "ratelimit");
         double deniedBefore = assignOutcomes(429, "IP_RATE_LIMIT");
-        when(limiter.check(eq(1), eq("127.0.0.1"), eq("acc"), eq(RateLimiter.Scope.ASSIGN)))
+        String accessToken = "valid-assign-token";
+        when(accountLogin.resolveAccessTokenAccount(accessToken))
+                .thenReturn(CompletableFuture.completedFuture("acc"));
+        when(limiter.check(eq(1), eq("127.0.0.1"),
+                eq(com.game.gateway.assign.AssignGateService.tokenCooldownKey(accessToken)), eq(RateLimiter.Scope.ASSIGN)))
                 .thenReturn(RateLimitDecision.queue(1500, 7), RateLimitDecision.deny(RateLimitDecision.IP_RATE_LIMIT));
         RequestBuilder request = post("/api/assign-gate").contentType(MediaType.APPLICATION_JSON)
-                .header("X-Forwarded-For", "6.6.6.6").content("{\"zone_id\":1,\"account\":\"acc\"}");
+                .header("X-Forwarded-For", "6.6.6.6")
+                .content("{\"zone_id\":1,\"account\":\"spoofed\",\"access_token\":\"" + accessToken + "\"}");
 
         JsonNode queued = call(request);
         assertThat(keys(queued)).as("gate_port / token_deadline 是基本类型，恒输出（见 AssignGateResponse）")

@@ -167,6 +167,8 @@ public class GatewayConfiguration {
     public AssignGateService assignGateService(ZoneDirectory zones, GateSource gates, GateTokenIssuer issuer,
                                                GatewayProperties properties, LoginQueue queue, QueueCapacity capacity,
                                                RateLimiter rateLimiter, GateInflight gateInflight,
+                                               org.springframework.beans.factory.ObjectProvider<AccountLoginService> loginProvider,
+                                               AssignGateMetrics assignGateMetrics,
                                                Environment environment, Clock clock) {
         QueueSettings settings = properties.queue();
         AssignGateService.Queueing queueing = null;
@@ -176,7 +178,20 @@ public class GatewayConfiguration {
             log.info("登录排队已打开 条目有效期={} 放行有效期={} 软上限倍数={}", settings.entryTtl(), settings.admitTtl(),
                     settings.softCapMultiplier());
         }
-        return new AssignGateService(zones, gates, issuer, queueing, rateLimiter, clock, gateInflight);
+        AccountLoginService loginService = loginProvider.getIfAvailable();
+        AssignGateService.AccessTokenAuthenticator authenticator = loginService == null ? null : token -> {
+            try {
+                String account = loginService.resolveAccessTokenAccount(token).get(3, TimeUnit.SECONDS);
+                return account == null || account.isBlank() ? java.util.Optional.empty() : java.util.Optional.of(account);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("access_token 校验被中断", e);
+            } catch (Exception e) {
+                throw new IllegalStateException("access_token 校验调用失败", e);
+            }
+        };
+        return new AssignGateService(zones, gates, issuer, queueing, rateLimiter, clock, gateInflight,
+                authenticator, Boolean.TRUE.equals(properties.legacyGateLoginEnabled()), assignGateMetrics::recordAuth);
     }
 
     /** 开服限流（关闭时 check 一律放行，不碰 Redis；存储出错 fail-open）。 */

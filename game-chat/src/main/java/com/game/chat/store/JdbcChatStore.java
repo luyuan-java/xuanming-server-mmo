@@ -60,8 +60,16 @@ public final class JdbcChatStore {
     private final int duplicateSpamMaxPerSender;
     private final int newAccountAgeHours;
     private final int newAccountDailyPrivateLimit;
+    private final long worldHistoryCacheNanos;
+    private final java.util.function.LongSupplier nanoClock;
     private final ProfileReader profileReader;
     private final Map<Long, CachedProfile> profileCache = new HashMap<>();
+    private final Object worldCacheLock = new Object();
+    private volatile WorldSnapshot worldSnapshot;
+    private long worldCacheEpoch;
+    private CompletableFuture<List<ChatMessage>> worldRefreshInFlight;
+
+    private record WorldSnapshot(List<ChatMessage> messages, long fetchedAtNanos) { }
 
     /** 防刷与世界频道最低等级所需的玩家基础档案。 */
     public record PlayerProfile(int level, long accountCreatedMs) { }
@@ -82,10 +90,15 @@ public final class JdbcChatStore {
     public record SendOutcome(Sent sent, boolean cooldown, ChatMessage message) { }
 
     public JdbcChatStore(DataSource source, ChatRoleAuthority authority, ChatProperties rules) {
-        this(source, authority, rules, null);
+        this(source, authority, rules, null, System::nanoTime);
     }
 
     public JdbcChatStore(DataSource source, ChatRoleAuthority authority, ChatProperties rules, ProfileReader profileReader) {
+        this(source, authority, rules, profileReader, System::nanoTime);
+    }
+
+    public JdbcChatStore(DataSource source, ChatRoleAuthority authority, ChatProperties rules,
+                         ProfileReader profileReader, java.util.function.LongSupplier nanoClock) {
         this.source = source;
         this.authority = authority;
         policy = new ChatPolicy(rules);
@@ -99,7 +112,17 @@ public final class JdbcChatStore {
         duplicateSpamMaxPerSender = rules.duplicateSpamMaxPerSender();
         newAccountAgeHours = rules.newAccountAgeHours();
         newAccountDailyPrivateLimit = rules.newAccountDailyPrivateLimit();
+        worldHistoryCacheNanos = Math.max(0L, rules.worldHistoryCacheMs()) * 1_000_000L;
+        this.nanoClock = nanoClock == null ? System::nanoTime : nanoClock;
         this.profileReader = profileReader;
+    }
+
+    /** 本副本世界频道写入或撤回提交后立即作废近窗快照，并递增代次阻止旧在途回填覆盖新数据。 */
+    void invalidateWorldSnapshot() {
+        synchronized (worldCacheLock) {
+            worldCacheEpoch++;
+            worldSnapshot = null;
+        }
     }
 
     public void initializePolicy() throws SQLException { policy.initialize(source); }
@@ -210,6 +233,10 @@ public final class JdbcChatStore {
                     AuthorityJdbc.u64(player), key, utf8(original.getAccount()), original.getOwnerRevision(),
                     digest, payload, message.toByteArray(), stream, ACCEPTED, now, 0);
             return new SendOutcome(new Sent(0, false), false, message);
+        }).whenComplete((outcome, err) -> {
+            if (err == null && peer == 0 && outcome != null && outcome.sent().tip() == 0 && !outcome.sent().duplicate()) {
+                invalidateWorldSnapshot();
+            }
         });
     }
 
@@ -233,6 +260,10 @@ public final class JdbcChatStore {
                     "INSERT IGNORE INTO chat_world_retraction(sender_player_id,accepted_ms,retracted_ms,reason) VALUES(?,?,?,?)",
                     AuthorityJdbc.u64(senderPlayerId), acceptedMs, now, reasonBytes);
             return new RetractResult(inserted > 0, 0);
+        }).whenComplete((res, err) -> {
+            if (err == null && res != null && res.retracted()) {
+                invalidateWorldSnapshot();
+            }
         });
     }
 
@@ -279,65 +310,125 @@ public final class JdbcChatStore {
         long player = original.getPlayerId();
         if (peer == player || limit <= 0) return CompletableFuture.failedFuture(new SecurityException("聊天读取原分区或窗口无效"));
         int boundedLimit = Math.min(Math.min(limit, ChatProperties.MAX_PULL_MESSAGES), historyMax);
-        return authority.execute(original, deadline, transaction -> {
-            policy.require(transaction);
-            byte[] stream = stream(player, peer);
-            long now = now(transaction);
-            List<Stored> rows = transaction.list("SELECT " + COLUMNS + " FROM chat_send_authority "
-                    + "WHERE stream_key=? AND state=1 AND accepted_ms<=? ORDER BY accepted_ms DESC,player_id DESC,request_id DESC LIMIT ?",
-                    JdbcChatStore::stored, stream, now, boundedLimit);
-            Set<RetractedKey> retracted = Set.of();
-            if (peer == 0 && !rows.isEmpty()) {
-                long minMs = rows.getFirst().acceptedMs();
-                for (int i = 1; i < rows.size(); i++) {
-                    if (rows.get(i).acceptedMs() < minMs) {
-                        minMs = rows.get(i).acceptedMs();
-                    }
-                }
-                List<RetractedKey> keys = transaction.list(
-                        "SELECT sender_player_id,accepted_ms FROM chat_world_retraction WHERE accepted_ms>=?",
-                        row -> new RetractedKey(AuthorityJdbc.u64(row, 1), row.getLong(2)), minMs);
-                if (!keys.isEmpty()) {
-                    retracted = new HashSet<>(keys);
+        if (peer == 0 && worldHistoryCacheNanos > 0) {
+            return pullWorldCached(original, boundedLimit, deadline);
+        }
+        return authority.execute(original, deadline, transaction -> pullInTransaction(transaction, player, peer, boundedLimit));
+    }
+
+    /** 世界频道每副本近窗快照（默认 500ms，单飞回填，防本副本提交后旧回填覆盖）；私聊不经过此处。 */
+    private CompletableFuture<List<ChatMessage>> pullWorldCached(SessionContext original, int boundedLimit, Deadline deadline) {
+        if (original.getPlayerId() == 0 || original.getAccount().isEmpty() || original.getOwnerRevision() <= 0) {
+            return CompletableFuture.failedFuture(new SecurityException("聊天缺少原账号归属身份"));
+        }
+        long nowNanos = nanoClock.getAsLong();
+        WorldSnapshot snap = worldSnapshot;
+        if (snap != null && nowNanos - snap.fetchedAtNanos() < worldHistoryCacheNanos) {
+            return CompletableFuture.completedFuture(slice(snap.messages(), boundedLimit));
+        }
+        CompletableFuture<List<ChatMessage>> shared;
+        boolean leader = false;
+        long epoch;
+        synchronized (worldCacheLock) {
+            snap = worldSnapshot;
+            if (snap != null && nanoClock.getAsLong() - snap.fetchedAtNanos() < worldHistoryCacheNanos) {
+                return CompletableFuture.completedFuture(slice(snap.messages(), boundedLimit));
+            }
+            if (worldRefreshInFlight != null) {
+                shared = worldRefreshInFlight;
+                epoch = worldCacheEpoch;
+            } else {
+                shared = new CompletableFuture<>();
+                worldRefreshInFlight = shared;
+                epoch = worldCacheEpoch;
+                leader = true;
+            }
+        }
+        if (leader) {
+            int fullWindow = Math.min(ChatProperties.MAX_PULL_MESSAGES, historyMax);
+            authority.executeInternal(deadline, tx -> pullInTransaction(tx, original.getPlayerId(), 0L, fullWindow))
+                    .whenComplete((loaded, err) -> {
+                        synchronized (worldCacheLock) {
+                            if (worldRefreshInFlight == shared) {
+                                worldRefreshInFlight = null;
+                            }
+                            if (err == null && loaded != null && worldCacheEpoch == epoch) {
+                                worldSnapshot = new WorldSnapshot(loaded, nanoClock.getAsLong());
+                            }
+                        }
+                        if (err != null) {
+                            shared.completeExceptionally(err);
+                        } else {
+                            shared.complete(loaded);
+                        }
+                    });
+        }
+        return shared.thenApply(all -> slice(all, boundedLimit));
+    }
+
+    private static List<ChatMessage> slice(List<ChatMessage> messages, int limit) {
+        return messages.size() <= limit ? messages : List.copyOf(messages.subList(0, limit));
+    }
+
+    private List<ChatMessage> pullInTransaction(AuthorityJdbc.Session transaction, long player, long peer, int boundedLimit)
+            throws SQLException {
+        policy.require(transaction);
+        byte[] stream = stream(player, peer);
+        long now = now(transaction);
+        List<Stored> rows = transaction.list("SELECT " + COLUMNS + " FROM chat_send_authority "
+                + "WHERE stream_key=? AND state=1 AND accepted_ms<=? ORDER BY accepted_ms DESC,player_id DESC,request_id DESC LIMIT ?",
+                JdbcChatStore::stored, stream, now, boundedLimit);
+        Set<RetractedKey> retracted = Set.of();
+        if (peer == 0 && !rows.isEmpty()) {
+            long minMs = rows.getFirst().acceptedMs();
+            for (int i = 1; i < rows.size(); i++) {
+                if (rows.get(i).acceptedMs() < minMs) {
+                    minMs = rows.get(i).acceptedMs();
                 }
             }
-            var messages = new ArrayList<ChatMessage>();
-            long previous = now;
-            for (Stored row : rows) {
-                if (!retracted.isEmpty() && retracted.contains(new RetractedKey(row.player(), row.acceptedMs()))) {
-                    continue;
-                }
-                validateDecision(row);
-                if (row.acceptedMs() > now || row.acceptedMs() <= 0) throw new SQLException("聊天原时间无效");
-                if (previous - row.acceptedMs() >= historyTtlMs) break;
-                previous = row.acceptedMs();
-                try {
-                    ChatMessage message = ChatMessage.parseFrom(row.message());
-                    SendChatRequest request = SendChatRequest.parseFrom(row.request());
-                    if (!Arrays.equals(digest(row.request()), row.digest()) || message.getSenderPlayerId() != row.player()
-                            || message.getSendTimeMs() != row.acceptedMs()
-                            || !message.toBuilder().setSendTimeMs(0).build().equals(request.getMessage())) {
-                        throw new SQLException("聊天SQL原消息与授权收据不符");
-                    }
-                    if (peer == 0) {
-                        if (message.getChannel() != ChatChannelType.CHAT_CHANNEL_TYPE_WORLD || message.getTargetPlayerId() != 0) {
-                            throw new SQLException("世界聊天原分区不符");
-                        }
-                    } else {
-                        boolean outgoing = row.player() == player && message.getTargetPlayerId() == peer;
-                        boolean incoming = row.player() == peer && message.getTargetPlayerId() == player;
-                        if (message.getChannel() != ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE || (!outgoing && !incoming)) {
-                            throw new SQLException("私聊原角色号与分区不符");
-                        }
-                    }
-                    messages.add(message);
-                    if (messages.size() == boundedLimit) break;
-                } catch (com.google.protobuf.InvalidProtocolBufferException invalid) {
-                    throw new SQLException("SQL聊天原件损坏，不能借缓存补全", invalid);
-                }
+            List<RetractedKey> keys = transaction.list(
+                    "SELECT sender_player_id,accepted_ms FROM chat_world_retraction WHERE accepted_ms>=?",
+                    row -> new RetractedKey(AuthorityJdbc.u64(row, 1), row.getLong(2)), minMs);
+            if (!keys.isEmpty()) {
+                retracted = new HashSet<>(keys);
             }
-            return List.copyOf(messages);
-        });
+        }
+        var messages = new ArrayList<ChatMessage>();
+        long previous = now;
+        for (Stored row : rows) {
+            if (!retracted.isEmpty() && retracted.contains(new RetractedKey(row.player(), row.acceptedMs()))) {
+                continue;
+            }
+            validateDecision(row);
+            if (row.acceptedMs() > now || row.acceptedMs() <= 0) throw new SQLException("聊天原时间无效");
+            if (previous - row.acceptedMs() >= historyTtlMs) break;
+            previous = row.acceptedMs();
+            try {
+                ChatMessage message = ChatMessage.parseFrom(row.message());
+                SendChatRequest request = SendChatRequest.parseFrom(row.request());
+                if (!Arrays.equals(digest(row.request()), row.digest()) || message.getSenderPlayerId() != row.player()
+                        || message.getSendTimeMs() != row.acceptedMs()
+                        || !message.toBuilder().setSendTimeMs(0).build().equals(request.getMessage())) {
+                    throw new SQLException("聊天SQL原消息与授权收据不符");
+                }
+                if (peer == 0) {
+                    if (message.getChannel() != ChatChannelType.CHAT_CHANNEL_TYPE_WORLD || message.getTargetPlayerId() != 0) {
+                        throw new SQLException("世界聊天原分区不符");
+                    }
+                } else {
+                    boolean outgoing = row.player() == player && message.getTargetPlayerId() == peer;
+                    boolean incoming = row.player() == peer && message.getTargetPlayerId() == player;
+                    if (message.getChannel() != ChatChannelType.CHAT_CHANNEL_TYPE_PRIVATE || (!outgoing && !incoming)) {
+                        throw new SQLException("私聊原角色号与分区不符");
+                    }
+                }
+                messages.add(message);
+                if (messages.size() == boundedLimit) break;
+            } catch (com.google.protobuf.InvalidProtocolBufferException invalid) {
+                throw new SQLException("SQL聊天原件损坏，不能借缓存补全", invalid);
+            }
+        }
+        return List.copyOf(messages);
     }
 
     private PlayerProfile loadPlayerProfile(long actor, long peer) throws Exception {

@@ -106,7 +106,23 @@ public final class CommerceStore {
             }
         }
     }
+    /** 仅由插入/重存按 workflow 现算「挂在盘口上」：kind=4 的买卖单且处于 market_open 阶段。 */
+    static boolean computeOnOrderBook(com.game.trade.store.pb.TradeCommerceRowOrBuilder row) {
+        if (row.getKind() != 4 || row.getSide() == 0 || row.getWorkflowProto().isEmpty()) {
+            return false;
+        }
+        try {
+            var workflow = com.game.proto.trade.TradeCommerceWorkflow.parseFrom(row.getWorkflowProto());
+            return "market_open".equals(workflow.getStage());
+        } catch (com.google.protobuf.InvalidProtocolBufferException ignored) {
+            return false;
+        }
+    }
+
     public static void insert(Connection c, String table, Message row) throws SQLException {
+        if (row instanceof TradeCommerceRow commerce) {
+            row = commerce.toBuilder().setOnOrderBook(computeOnOrderBook(commerce)).build();
+        }
         List<Object> values = new ArrayList<>();
         for (var f : row.getDescriptorForType().getFields()) values.add(row.getField(f));
         execute(c,
@@ -198,7 +214,7 @@ public final class CommerceStore {
                 var workflow = CommerceEngine.workflow(current).setStage("manual");
                 save(c, current.toBuilder().setStatus(CommerceRules.MANUAL).setWorkflowProto(workflow.build().toByteString()));
             } catch (CommerceEngine.CorruptContract corrupted) {
-                execute(c, "UPDATE trade_commerce SET status=?,version=version+1 WHERE commerce_id=? AND version=?",
+                execute(c, "UPDATE trade_commerce SET status=?,on_order_book=0,version=version+1 WHERE commerce_id=? AND version=?",
                     CommerceRules.MANUAL, current.getCommerceId(), current.getVersion());
             }
             return true;
@@ -230,6 +246,7 @@ public final class CommerceStore {
                     now, op.getOpId(), commerceId);
     }
     public TradeCommerceRow save(Connection c, TradeCommerceRow.Builder row) throws SQLException {
+        row.setOnOrderBook(computeOnOrderBook(row));
         long version = row.getVersion();
         row.setVersion(version + 1);
         List<String> sets = new ArrayList<>();

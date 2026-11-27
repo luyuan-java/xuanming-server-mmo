@@ -14,5 +14,15 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
  * @param zoneId 目标区服；缺省为 0。mmorpg 里 0 表示「由服务端挑区」，本批未实现，按未知区服处理
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record AssignGateRequest(@JsonDeserialize(using = ZoneIdJsonDeserializer.class) long zoneId, String account, String deviceId, String queueToken) {
+public record AssignGateRequest(
+        @JsonDeserialize(using = ZoneIdJsonDeserializer.class) long zoneId,
+        String account,
+        String deviceId,
+        String queueToken,
+        String accessToken) {
+
+    /** 兼容不带 access_token 的旧测试/调用方。 */
+    public AssignGateRequest(long zoneId, String account, String deviceId, String queueToken) {
+        this(zoneId, account, deviceId, queueToken, null);
+    }
 }

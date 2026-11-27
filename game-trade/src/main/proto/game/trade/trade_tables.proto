@@ -78,7 +78,7 @@ message TradeCommerceRow {
   option (proto2mysql.table_name) = "trade_commerce";
   option (proto2mysql.primary_key) = "commerce_id";
   option (proto2mysql.unique_key) = "request_key";
-  option (proto2mysql.index) = "status,updated_ms;seller_player_id,commerce_id;buyer_player_id,commerce_id;kind,market_id,item_config_id,side,status,unit_price,commerce_id;kind,status,expires_ms;parent_id,status;counterparty_id,status";
+  option (proto2mysql.index) = "status,updated_ms;seller_player_id,commerce_id;buyer_player_id,commerce_id;kind,market_id,item_config_id,side,status,on_order_book,unit_price,commerce_id;kind,status,expires_ms;parent_id,status;counterparty_id,status";
   option (proto2mysql.tidb_nonclustered_pk) = true;
   option (proto2mysql.tidb_shard_row_id_bits) = 4;
   option (proto2mysql.tidb_pre_split_regions) = 4;
@@ -86,7 +86,7 @@ message TradeCommerceRow {
   uint64 seller_player_id=6; uint64 buyer_player_id=7; uint32 market_id=8; uint32 item_config_id=9;
   uint32 side=10; uint64 unit_price=11; uint32 quantity=12; uint32 filled_quantity=13; uint32 currency_type=14;
   uint64 expires_ms=15; uint64 created_ms=16; uint64 updated_ms=17; uint64 version=18; bytes workflow_proto=19;
-  uint64 parent_id=20; uint64 counterparty_id=21;
+  uint64 parent_id=20; uint64 counterparty_id=21; bool on_order_book=22;
 }
 message TradeCommerceGuardRow {
   option (proto2mysql.table_name) = "trade_commerce_guard";

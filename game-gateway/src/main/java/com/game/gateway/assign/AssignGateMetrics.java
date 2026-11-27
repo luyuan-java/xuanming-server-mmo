@@ -20,16 +20,43 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class AssignGateMetrics {
 
     static final String NAME = "game.gateway.assign.gate";
+    static final String AUTH_NAME = "game.gateway.assign.gate.auth";
     static final String QUEUE_STATUS_NAME = "game.gateway.queue.status";
     static final String REASON_OK = "ok";
     static final String REASON_QUEUEING = "queueing";
     static final String REASON_RATELIMIT = "ratelimit";
 
+    /** assign-gate 鉴权结局（对齐主仓 5 类低基数标签，用于关旧路径前观测匿名占比归零）。 */
+    public enum AuthOutcome {
+        AUTHENTICATED("authenticated"),
+        ANONYMOUS("anonymous"),
+        ANONYMOUS_DENIED("anonymous_denied"),
+        TOKEN_REJECTED("token_rejected"),
+        ERROR("error");
+
+        private final String tag;
+
+        AuthOutcome(String tag) {
+            this.tag = tag;
+        }
+
+        public String tag() {
+            return tag;
+        }
+    }
+
     private final MeterRegistry registry;
     private final ConcurrentHashMap<Key, Counter> counters = new ConcurrentHashMap<>();
+    private final java.util.EnumMap<AuthOutcome, Counter> authCounters = new java.util.EnumMap<>(AuthOutcome.class);
 
     public AssignGateMetrics(MeterRegistry registry) {
         this.registry = registry;
+        for (AuthOutcome outcome : AuthOutcome.values()) {
+            authCounters.put(outcome, Counter.builder(AUTH_NAME)
+                    .description("assign-gate access_token 鉴权结局计数")
+                    .tag("result", outcome.tag())
+                    .register(registry));
+        }
         List<Key> assignKnown = List.of(
                 new Key(NAME, AssignGateResponse.CODE_OK, REASON_OK),
                 new Key(NAME, AssignGateResponse.CODE_QUEUEING, REASON_QUEUEING),
@@ -38,11 +65,14 @@ public final class AssignGateMetrics {
                 new Key(NAME, AssignGateResponse.CODE_RATE_LIMITED, RateLimitDecision.ACCOUNT_COOLDOWN),
                 new Key(NAME, AssignGateResponse.CODE_QUEUE_EXPIRED, AssignGateResponse.ERR_QUEUE_TOKEN_EXPIRED),
                 new Key(NAME, AssignGateResponse.CODE_BAD_REQUEST, AssignGateResponse.ERR_BAD_REQUEST),
+                new Key(NAME, AssignGateResponse.CODE_AUTH_REJECTED, AssignGateResponse.ERR_AUTH_REJECTED),
+                new Key(NAME, AssignGateResponse.CODE_AUTH_REJECTED, AssignGateResponse.ERR_AUTH_REQUIRED),
                 new Key(NAME, AssignGateResponse.CODE_ZONE_NOT_FOUND, AssignGateResponse.ERR_ZONE_NOT_FOUND),
                 new Key(NAME, AssignGateResponse.CODE_ZONE_UNAVAILABLE, AssignGateResponse.ERR_ZONE_MAINTENANCE),
                 new Key(NAME, AssignGateResponse.CODE_ZONE_UNAVAILABLE, AssignGateResponse.ERR_ZONE_CLOSED),
                 new Key(NAME, AssignGateResponse.CODE_ZONE_UNAVAILABLE, AssignGateResponse.ERR_ZONE_NOT_OPEN),
                 new Key(NAME, AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_ZONE_ADMISSION_UNAVAILABLE),
+                new Key(NAME, AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_AUTH_UNAVAILABLE),
                 new Key(NAME, AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_NO_GATE_AVAILABLE),
                 new Key(NAME, AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_GATE_DIRECTORY_UNAVAILABLE),
                 new Key(NAME, AssignGateResponse.CODE_INTERNAL, AssignGateResponse.ERR_QUEUE_UNAVAILABLE),
@@ -63,6 +93,13 @@ public final class AssignGateMetrics {
     /** 记一次 assign-gate 的结局。 */
     public void record(AssignGateResponse response) {
         counter(new Key(NAME, response.code(), reason(response))).increment();
+    }
+
+    /** 记一次 assign-gate 的 access_token 鉴权结局。 */
+    public void recordAuth(AuthOutcome outcome) {
+        if (outcome != null) {
+            authCounters.get(outcome).increment();
+        }
     }
 
     /** 记一次排队轮询（{@code /api/queue-status}）的结局。 */

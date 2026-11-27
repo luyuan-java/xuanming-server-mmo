@@ -361,7 +361,7 @@ public final class CommerceClientService {
             for (int side : new int[] {1, 2})
                 try (var q = c.prepareStatement(
                          "SELECT unit_price,SUM(quantity-filled_quantity) FROM trade_commerce WHERE kind=4 AND side=? "
-                         + "AND market_id=1 AND item_config_id=? AND currency_type=? AND status=3 AND "
+                         + "AND market_id=1 AND item_config_id=? AND currency_type=? AND status=3 AND on_order_book=1 AND "
                          + "filled_quantity<quantity GROUP BY unit_price ORDER BY unit_price "
                          + (side == 1 ? "DESC" : "ASC") + " LIMIT ?")) {
                     q.setQueryTimeout(2);

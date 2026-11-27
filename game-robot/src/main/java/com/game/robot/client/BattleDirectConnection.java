@@ -54,6 +54,8 @@ public final class BattleDirectConnection implements AutoCloseable {
 
     static final Map<String, Message> ACCEPTED_DOWNSTREAM = Map.of(
             BattleTokenVerifyResponse.getDescriptor().getFullName(), BattleTokenVerifyResponse.getDefaultInstance(),
+            com.game.proto.ClientHeartbeatResponse.getDescriptor().getFullName(),
+            com.game.proto.ClientHeartbeatResponse.getDefaultInstance(),
             MessageContent.getDescriptor().getFullName(), MessageContent.getDefaultInstance());
 
     /** 建连 + 握手的总预算（基线 {@code bdc.go:51}；Unity 也是建连 10 s）。 */
@@ -255,6 +257,8 @@ public final class BattleDirectConnection implements AutoCloseable {
     static final class Handler extends SimpleChannelInboundHandler<Message> {
 
         private final BattleInbox inbox;
+        private java.util.concurrent.ScheduledFuture<?> heartbeat;
+        private long heartbeatSequence;
 
         Handler(BattleInbox inbox) {
             this.inbox = inbox;
@@ -264,15 +268,41 @@ public final class BattleDirectConnection implements AutoCloseable {
         protected void channelRead0(ChannelHandlerContext ctx, Message msg) {
             long now = System.nanoTime();
             if (msg instanceof BattleTokenVerifyResponse verify) {
+                if (verify.getSuccess() && verify.getHeartbeatIntervalMs() != 0 && heartbeat == null) {
+                    startHeartbeat(ctx, Integer.toUnsignedLong(verify.getHeartbeatIntervalMs()));
+                }
                 inbox.addVerify(verify, now);
+            } else if (msg instanceof com.game.proto.ClientHeartbeatResponse) {
+                // 战斗直连应用层心跳回包不进业务收件箱，避免干扰战斗推包与应答时序。
             } else {
                 inbox.addContent((MessageContent) msg, now);
+            }
+        }
+
+        private void startHeartbeat(ChannelHandlerContext ctx, long intervalMillis) {
+            if (!ctx.channel().isActive()) {
+                return;
+            }
+            heartbeat = ctx.executor().scheduleWithFixedDelay(() -> {
+                if (ctx.channel().isActive()) {
+                    ctx.writeAndFlush(com.game.proto.ClientHeartbeatRequest.newBuilder()
+                                    .setSeq(++heartbeatSequence).build())
+                            .addListener(io.netty.channel.ChannelFutureListener.CLOSE_ON_FAILURE);
+                }
+            }, intervalMillis, intervalMillis, java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
+
+        private void stopHeartbeat() {
+            if (heartbeat != null) {
+                heartbeat.cancel(false);
+                heartbeat = null;
             }
         }
 
         @Override
         public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
             if (evt instanceof ChannelInputShutdownEvent) {
+                stopHeartbeat();
                 inbox.markClosed(BattleFrame.FIN, System.nanoTime());
                 ctx.close();
                 return;
@@ -282,14 +312,21 @@ public final class BattleDirectConnection implements AutoCloseable {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+            stopHeartbeat();
             inbox.markClosed(cause instanceof IOException ? BattleFrame.RESET : "error:" + cause, System.nanoTime());
             ctx.close();
         }
 
         @Override
         public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+            stopHeartbeat();
             inbox.markClosed(BattleFrame.CLOSED, System.nanoTime());
             super.channelInactive(ctx);
+        }
+
+        @Override
+        public void handlerRemoved(ChannelHandlerContext ctx) {
+            stopHeartbeat();
         }
     }
 }

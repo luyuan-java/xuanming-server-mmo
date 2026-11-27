@@ -158,9 +158,10 @@ public final class CommerceRuntime implements AutoCloseable {
             settleHeldBid(row, budget);
             return;
         }
-        e.advance(row, budget);
-        if (row.getKind() == 4 && row.getSide() != 0)
-            matching.match(row, budget);
+        TradeCommerceRow advanced = e.advance(row, budget);
+        TradeCommerceRow candidate = advanced != null ? advanced : row;
+        if (candidate.getKind() == 4 && candidate.getSide() != 0 && candidate.getOnOrderBook())
+            matching.match(candidate, budget);
     }
     private void settleHeldBid(TradeCommerceRow row, Deadline budget) throws SQLException {
         var parent = e.store.get(row.getParentId());

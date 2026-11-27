@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-27 万象残局坊 V1（玩家自创回合残局解谜工坊 · 公平固定模板 + 作者自证发布 + `#PUZ` 约战分享与标准解法录像，RPC `575..581`）
+
+| 范围 | C++ / Go 权威版 | Java / Unity 客户端版 | 状态 |
+|---|---|---|---|
+| **① 零日常 / 零战力通胀 / 零可交易产出 UGC 回合解谜闭环**：新增 `Dungeon 314`（`boss_trial_kind=10`、`scene_id=17` 满足外键且跨图放行）、`PlayMode 475`、`MatchService` 7 条 RPC（`575=ListTacticalPuzzles`、`576=GetTacticalPuzzle`、`577=SaveTacticalPuzzleDraft`、`578=DeleteTacticalPuzzle`、`579=StartTacticalPuzzleBattle`、`580=LikeTacticalPuzzle`、`581=GetTacticalPuzzleSolutionReplay`）、`match_error` Tip `16064..16072`、`MessageLimiter` `575..581` 与双权威表（`match_tactical_puzzle` / `match_tactical_puzzle_clear`），`match_formation` 扩列 `tactical_puzzle_context`。<br>**② 严格公平模板与作者自证铁律**：所有挑战者统一借用固定 3×3 免费预设（角色 `101..103`、灵宠 `0/201..203` 支持单人无宠、阵法 `0..5`、回合上限 `1..6`、我方初血/蓝/盾/不利状态 `100031/130051/100190`、1–3 名演武敌 `311..316` 初血 `10..150%`/护盾/先手速修 `±30%`/开场增益 `100140/100160/100250/110070` 物理反震）；仅作者验题局开启受控 PVE 录播（`BattleReplayPolicy`）与 `(puzzle_id, spec_revision)` 确定性 SplitMix64 种子，作者亲手打赢 1 局并存下 `verified_battle_id` 录像后方自动转 `PUBLISHED`，改题自动升 `spec_revision` 回退草稿重验；`ContentGuard`（`TEXT_SCENE_GUILD_NAME`）fail-closed 拦截题名/提示违规词；删角 `RoleFencePurge` 彻底清库；仅限通关后单次幂等点赞与纯零战力荣誉称谓。<br>**③ 10 张 V2 手绘无字透明 PNG-32 切片全量落地**：验收图仓 Azure 提交 `5e3edf364082`（`tactical-puzzle-workshop-v1` V2），SHA-256、尺寸与九宫格 `spriteBorder` 逐项核对后导入 `Assets/Resources/UI/Ugui/TacticalPuzzleV1/`，打通归元城齐问锋入口、双列大厅 + 五页签 + 6 标签筛选 + 左右双栏摆盘编辑器、世界聊天 `#PUZ:<id>#` 交互卡片、战斗回合上限/残局角标 HUD 与结算嵌入式「再试一次 / 看标准解 / 点赞 / 分享 / 返回残局坊」 | 策划：`docs/planning/tactical-puzzle-workshop-v1.md`；协议与表：5 份 `.proto` + `Dungeon`/`PlayMode`/`Tip`/`MessageLimiter.xlsx`（`dev.bat gen` exit 0，83 表）；C++ `battle`/`scene`（`tactical_puzzle_rules.h`、`turn_battle_engine.{h,cpp}`、`player_battle.cpp`、`trial_journal_battle_test.cpp`）；Go `match`（`internal/puzzle/spec{,_test}.go`、`internal/authority/{tactical_puzzle,schema,store,completion,role_fence_purge}.go`、`internal/constants/errors{,_test}.go`、`internal/logic/{tactical_puzzle_logic,tactical_puzzle_logic_test,battle_replay_policy,gather,global_match}.go`、`internal/server/matchserviceserver.go`）。验证：`test_cpp_no_raw_pointer_member.py` **13/13**、`test_cpp_thread_sources.py` **5/5**、`check_log_text_english.py` **exit 0**；串行 MSBuild `/m:1` `turn_battle_engine_test.exe` / `scene.exe` / `battle.exe` 全 **0 错误**，`turn_battle_engine_test --gtest_filter=*TacticalPuzzle*` **1/1 PASS**，`bin/scene.exe --validate-tables ../generated/tables` **PASS**（version=104，83 表）；Go `match` 5 包 **369+362 PASS / 0 fail** | Java：`game-battle-engine`（`TacticalPuzzleRules`、`TurnBattleEngine`、`TacticalPuzzleBattleEngineTest` **1/1 PASS**）；`game-scene`（`RankedPresetRules` 支持 `allowEmptyPet`、`PlayerBattleService` 放行 `Dungeon 314` 跨图开局，`PrepareBattleTest` **52/52 PASS**）；`game-match`（`match_feature_tables.proto`/`global_match_tables.proto`、`MatchFeatureTables`、`MatchMethods` 58 方法、`BattleReplayPolicy`、`GatherPlan`/`GatherPipeline`、`GlobalMatchService`/`GlobalMatchStore`、`com.game.match.puzzle.{TacticalPuzzleSpecValidator,TacticalPuzzleStore,TacticalPuzzleService}`、`MatchFeatureConfiguration`、`TacticalPuzzleParityTest`+`MatchMethodsTest`+`LeaseLostTest`+`BattleReplayPolicyTest`+`MatchApplicationContextTest` **66/66 PASS**）；`game-gate`（`MessageRoutesTest` `MatchService` 路由对齐通过）；18 模块 `test-compile` **BUILD SUCCESS**。Unity：`RpcGuard`、`GameClient.TacticalPuzzle`、`TacticalPuzzle{Models,Client}`、`TacticalPuzzle{UiArt,Window,UiRoot,BattleResultHint}`、`CityNpcWindow`、`Social{UiRoot,Window,Window.Fidelity}`、`Battle{UiRoot,Screen,ResultPanel}`、`TacticalPuzzleClientTests` 及 10 张 V2 切片+`.meta`；验证：`sync_tables.ps1`+`gen_messageids.ps1` exit 0、`client_compile_check.ps1` **825/825 0 错误**、离线 Roslyn+NUnit `TacticalPuzzleClientTests` **4/4 PASS**（`TEMP_LEFTOVER_COUNT=0`）、全仓 `12,636/12,636` `.meta` GUID 唯一无冲突（注：Python 仓移植留待后续按需同步） | 已对齐（C++/Go + Java + Unity + 美术全绿） |
+
 ## 2026-11-27 战前技能禁选 V2（每方 3 禁 + 1 保「护招破禁」+「队友已带」防误禁 + 开局亮牌揭示，零新 RPC / 零新配表列，5 枚重做切片落地）
 
 | 范围 | C++ / Go 权威版 | Java / Python 版 | 状态 |
@@ -1261,26 +1267,15 @@ Java 版待做：
 
 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
 
-### 2026-11-06 世界频道每副本近窗快照(Java 待做)
+### 2026-11-06 世界频道每副本近窗快照（Java 已对齐）
 
 主仓设计见 `docs/design/chat-world-channel-fanout.md`(缺口清单第 19 条)。
 
-- **主仓第一批(11-06 落码,未编译)**:chat 每个副本持有世界频道最新一窗的快照,过期才重读,重读单飞,拉取语义与直读相同。代价是最长 `WorldHistoryCacheMs`(缺省 500ms)的跨副本滞后,本副本提交后快照立刻作废。不改客户端契约。
-- **Java 版现状**:`game-chat` 的 `JdbcChatStore` 每次拉取都按 `stream_key` 读库(约 117 行),世界频道读量随在线人数增长,问题同源。
-- **Java 版待做**:按同一口径给世界频道加每副本快照,私聊仍直读。
-- **主仓第二批推送扇出(11-06 落码,未编译)**:
-  - 客户端契约新增下行方法 `ClientPlayerChat.NotifyWorldChat(ChatMessage)`,标 `CLIENT_RPC_PUSH`,消息号由生成器分配。
-  - chat 首次提交后经 Kafka `chat-world-bcast_g<N>`(4 分区)广播一条;每台 gate 读全部分区,按每台每秒 10 条、突发 20 条的预算推给本机已绑定会话。
-  - 推送至多一次,真相仍是拉历史。
-- **Java 版待做(客户端契约,两版要同批)**:
-  - Java 网关 / gate 要能下发同一个消息号;
-  - Java chat 首次提交后,按 Java 自己的通道广播;
-  - 没做之前,接 Java 服的客户端收不到这条推送,只能靠拉历史。
-- **2026-11-11~12 补(主仓第三批与客户端,未编译;主仓 commit 未提交,Java 版本 `0.1.0-SNAPSHOT` 待做)**,说明见主仓 `docs/PROGRESS.md` 2026-11-12「世界频道第三批」,设计见同一设计稿 §4「客户端」与 §5:
-  - **共用客户端已改**(`../mmorpg-client` 的 `SocialClient` / `SocialState`):订阅 `NotifyWorldChat`(消息号 383),历史与推送按(发送者、发送时刻、正文)合并去重。客户端本来就不定时轮询,只在打开面板、切频道、点刷新、发送成功后各拉一次。所以 Java 版没做推送之前,接 Java 服的玩家要手动刷新才看得到别人的新消息;这就是上面「两版要同批」那一条现在的实际影响。
-  - **世界频道发言间隔**(客户端可见行为):同一名玩家相邻两条世界频道消息至少隔 5 秒(主仓 `WorldChannelCooldownMs`),被挡的请求回 `kRateLimitExceeded`、不落库、不占 request_id;私聊不受它约束。客户端对这个码提示「发言太频繁,请稍等几秒再发」。Java 要做同一条规则,间隔取同一个缺省值。
-  - **原件保留期**(服务端内部):主仓聊天原件保留 30 天,用 TiDB 表的 TTL 属性在库里删,应用账号不给 DELETE;历史可见窗口因此不得超过 29 天。Java 核对 `game-chat` 的聊天表是不是只增不减,是的话按 Java 的存储方式定保留期。
-  - **世界频道写入分段**(服务端内部):主仓把世界流键按发送者 `player_id % 8` 分成 8 段,读时合并,拆开 TiDB 上的索引追加热点。Java 核对 `JdbcChatStore` 的世界频道是不是单一 `stream_key`,是的话按同一口径处理;内部实现不必照抄。
+- **2026-11-27 Java 对齐完成**：
+  - **每副本近窗快照**：`game-chat` `ChatProperties` 新增 `worldHistoryCacheMs`（默认 `500` ms，范围 `0..60_000`；`application.yaml` 同步配置 `world-history-cache-ms: 500` 与 `world-channel-cooldown-ms: 5000`）；`JdbcChatStore` 为世界频道拉取实现单飞（single-flight）近窗快照与代次防陈旧回填，本副本提交/撤回世界消息立即作废快照，私聊保持直读。
+  - **世界频道实时广播与撤回全服推送**：`game-discovery` `RedisKeys.chatWorldTopic()` 新增 `<prefix>chat:world:events`；`game-chat` `ChatConfiguration.redisWorldPublisher` 在首次提交世界消息（`NotifyWorldChat` 383）及撤回（`NotifyWorldChatRetracted` 435）时异步广播；`game-gate` 新增 `WorldChatSubscriber`（接入 `GateNode` 启停与 `ClientDispatcher.deliverWorldChat`），对 383 按每机每秒 10 条 / 突发 20 条令牌桶限速扇出给本机已绑定会话，对合规关键的 435 撤回通知绝不限速。
+  - **世界发言间隔**：`application.yaml` 与 `ChatProperties` 默认 5s，被拒回 `kRateLimitExceeded` 且不落库不占 `request_id`；原件保留期与 8 段流键为 TiDB 运维/热分片内部策略，不阻塞客户端行为对齐（按需在库表层补 TTL/分片）。
+  - **验证**：`game-discovery` `clean install` BUILD SUCCESS；`game-chat` 58/58 PASS（含新增 `WorldChatCacheAndPublisherTest` 2/2，6 项外部夹具跳过）；`game-gate` `GatePushSubscriberTest` 12/12 + `WorldChatSubscriberTest` 2/2 = 14/14 PASS。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
@@ -1735,21 +1730,14 @@ Java 版 `0.1.0-SNAPSHOT` 待做,做同一组行为。Java 的冻结与锁模型
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-10 战斗直连应用层心跳(C++ 已落码未编译,Java 待做)
+### 2026-11-10 战斗直连应用层心跳（Java 已对齐）
 
-C++ 版(未编译,待 Codex 验证):客户端 ↔ battle 的战斗直连按大厅连接同一份心跳契约实现,设计见 C++ 仓 `docs/design/gate-client-heartbeat.md` §14。客户端可见的改动:`proto/battle/player_battle.proto` 的 `BattleTokenVerifyResponse` 加 `heartbeat_interval_ms = 4`、`heartbeat_timeout_ms = 5`,心跳消息复用 `message.proto` 的 `ClientHeartbeatRequest` / `ClientHeartbeatResponse`。
+C++ 版设计见 C++ 仓 `docs/design/gate-client-heartbeat.md` §14。
 
-Java 版 `0.1.0-SNAPSHOT` 待做(现在 battle 直连只有 10 秒 `game.battle.handshake-timeout`,验签后没有存活检测):
-
-1. ContractSync 同步 `player_battle.proto` 的两个新字段。
-2. 握手成功应答填 10000 / 30000,与 gate 同值;重复握手的成功应答同样带。
-3. 直连 pipeline 收 `ClientHeartbeatRequest`:握手前断开;每 10 秒窗口最多回 3 条,超出的不回、计入非法包阈值;其余回显 seq。
-4. 从握手成功应答起按完整入站帧计 30 秒读空闲,到期只关连接,断开后照常解绑直连;事件循环迟到 2 秒以上推迟一轮;房间收尾已在排空终局包的连接不打断。
-5. Java robot 的战斗连接按通告发心跳、跳过回包,与大厅连接同一套。
-
-没做之前不影响互通:Java battle 不通告,新客户端在那边不发心跳。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- **2026-11-27 Java 对齐完成**：
+  - `game-battle`：`BattleFrames.verifyAccepted` 填充 `heartbeat_interval_ms = 10_000`、`heartbeat_timeout_ms = 30_000`；`BattleEdgeServer` 放行 `ClientHeartbeatRequest`；`DirectSession` 管理空闲定时器并在关闭/断开时取消；`BattleEdgeHandler` 握手前收心跳直接断开不回包（`HEARTBEAT_BEFORE_VERIFY` / `REQUEST_BEFORE_VERIFY`），验签后 10s 窗口最多回 3 条（原样回显 `seq`，超限不回且计非法包），自验签起按完整入站帧计 30s 读空闲（EventLoop 迟到 >2s 推迟 1s 重判，正在优雅排空终局包时不打断），`BattleMetrics` 增加 `Disconnect.CLIENT_IDLE` 与 `game.battle.client.heartbeat{result}`。
+  - `game-robot`：`BattleDirectConnection` 解析 `heartbeat_interval_ms > 0` 自动周期发 `ClientHeartbeatRequest`、静默吞掉 `ClientHeartbeatResponse` 并在关闭时取消定时任务。
+  - **验证**：`game-battle` `BattleEdgeHeartbeatTest` 4/4 + `BattleEdgeHandlerTest` + `BattleMetricsTest` 5/5 + `OutboxMetricsTest` 6/6 + `BattleProtocolTest` 8/8 = **70/70 PASS**；`game-robot` `BattleDirectConnectionTest` **10/10 PASS**。
 
 ### 2026-11-10 交易合同按事件唤醒（主仓已落码未编译，Java 待做；补 11-06「交易合同推进按片分工、没变化不重存」）
 
@@ -1760,27 +1748,15 @@ Java 版 `0.1.0-SNAPSHOT` 待做(现在 battle 直连只有 10 秒 `game.battle.
 - **Java 待做**：与 11-06 那条一起做。Java 版若也是每轮复查在途合同，按同一口径改：终结提交后唤醒，在途合同改为兜底复查；唤醒只把下次到期提前，不改版本。
 - 本条只登记待做，没有修改 Java 代码，也没有运行 Java 构建或测试。
 
-### 2026-11-10 聚宝斋材料盘口只收已托管订单(主仓已落码未编译,Java 待做)
+### 2026-11-10 聚宝斋材料盘口只收已托管订单（Java 已对齐）
 
-主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待做。主要是服务端内部改动,客户端可见的变化只有深度:托管还没完成的订单不再算进挂单量。设计见主仓 `docs/design/jubaozhai-market.md` §15.9,交接见主仓 `docs/handoff/mixed-version-persist-handoff-20261019.md` §23。
+主仓设计见 `docs/design/jubaozhai-market.md` §15.9。
 
-**问题**:撮合选对手单只按 `status=3` 过滤,托管阶段(`stage=escrow`)的材料订单 status 也是 3。
-
-- 它价格更优时被选成对手单,撮合事务锁内发现阶段不对就不成交,排在后面已上盘、可成交的订单都撮不上。
-- 材料订单的托管腿没有截止,扣款一直回 RETRY 时整本盘口一直撮不动。
-- 深度查询同样把托管中的订单算进挂单量。
-- Java 是同样的写法:`game-trade` 的 `CommerceMatching` 选单 SQL 只有 `status=3`,锁内再判 `market_open`;`CommerceClientService` 的深度查询也只按 `status=3`。
-
-**主仓做法**(Java 按自己的存储写法对齐,不照抄):
-
-1. 合同表加一列「挂在盘口上」:kind=4 的买卖单、stage=market_open。只由写合同的两条语句(插入、按版本重存)按 workflow 现算,与 workflow 同一条语句写出。盘口索引在 status 之后加这一列。
-2. 选对手单(预读与锁内重读)和深度都按这一列过滤。
-3. 不在盘口上的订单不发起撮合:不发成交号,不抢盘口 guard 行锁。
-4. 提交点照旧在锁内按 workflow 复核两边都在 market_open。
-5. 不改状态列:它是客户端可见的 `CommerceOrderState`。
-6. 回归要覆盖:价格更优的卖单还在托管时,买单照常与已上盘的卖单按 maker 价成交;托管中的订单自己不发起撮合;它托管完成、进盘口的那一步再撮合。
-
-同批主仓还把交易代码里三处币种数字换成取值表常量,行为不变,Java 不登记。
+- **2026-11-27 Java 对齐完成**：
+  - `game-trade/src/main/proto/game/trade/trade_tables.proto`：`TradeCommerceRow` 新增 `bool on_order_book = 22`，盘口索引 `idx_trade_commerce_3` 扩展为 `(kind,market_id,item_config_id,side,status,on_order_book,unit_price,commerce_id)`（不改客户端可见 `status`）。
+  - `CommerceStore` 新增 `computeOnOrderBook`（`kind == 4 && side != 0 && "market_open".equals(stage)`），在 `insert`/`save` 中由 workflow 现算写入，坏行隔离路径显式清零。
+  - `CommerceEngine.advance` 返回保存后的最新合同行；`CommerceRuntime.step` 仅在 `candidate.getOnOrderBook()` 时才调用撮合；`CommerceMatching.match` 入口拦截非上盘订单（不发成交号、不抢 `trade_commerce_guard` 行锁），预读/锁内重读与 `CommerceClientService.depth` SQL 均追加 `AND on_order_book=1`。
+  - **验证**：`game-trade` `OrderBookFilterTest` 4/4 + `TradeTablesTest` 6/6 + `CommerceRuntimeTest` 9/9（1 项 TiDB IT 跳过）+ `CommerceRulesTest` 3/3 = **22/22 PASS**。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
@@ -2491,27 +2467,14 @@ Java 版按同一口径要做的事(只登记,没改 Java 代码):
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-13 分配 gate 凭 access token 鉴权,不再收自报的账号名(主仓已落码未编译,Java 待做)
+### 2026-11-13 分配 gate 凭 access token 鉴权,不再收自报的账号名（Java 已对齐）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。说明见主仓 `docs/design/login-queue-2026-05.md` §5 末尾「2026-11-12 更正」,
-验证命令见主仓 `docs/PROGRESS.md` 2026-11-13「分配 gate 凭 access token 鉴权」。
+主仓设计见 `docs/design/login-queue-2026-05.md` §5 末尾「2026-11-12 更正」。
 
-**客户端契约(两版同批)**:`POST /api/assign-gate` 的请求体去掉 `account`,改带 `access_token`(`/api/login` 签发的那一个);排队重入照旧带 `queue_token`。
-令牌不能用(格式不对、未知、过期、所在令牌家族已吊销)回 **HTTP 401**,客户端提示重新登录、不重试;令牌存储故障回 500(可重试)。
-Unity 客户端已按这个契约改(`GameClient.BuildAssignGateRequest`、`AssignGateResult.CodeAuthRejected = 401`),Java 版网关要同批改,否则新客户端分配 gate 一律走匿名。
-
-**要对齐的行为**:
-
-1. 分配 gate 时的账号只从 access token 解出,不信请求正文。「已有在线会话、免排队」的判定与排队身份都用这个账号。原来按自报的账号名判,报出别人的账号名就能插队。
-2. 不带令牌 = 匿名分配,只在旧 gate 凭据登录(主仓 `LegacyGateLoginEnabled`)开着时允许;匿名分配不免排队,排队身份为空。旧路径关了就回 401。
-3. 令牌被拒与令牌存储故障分开:前者 401,后者 500。主仓在令牌校验里加了专门的拒绝错误(`token.ErrAccessRejected`),用 access token 登录的 provider 也按它分类,存储故障不再被当成「凭证无效」。
-4. 网关账号冷却键改用 access token 的 SHA-256 摘要(`tok:` + 前 16 字节十六进制)@IP,不把令牌原文放进内存键;匿名分配没有冷却键。
-5. 指标:按鉴权结果计数(已鉴权 / 匿名 / 匿名被拒 / 令牌被拒 / 故障),关旧路径之前看匿名降到零。
-
-**验证**(Java 仓口径):对应主仓 `go/login/internal/logic/loginpregate/assigngate_auth_test.go`(令牌账号、匿名开关、令牌被拒、存储故障)、
-`go/login/internal/logic/pkg/token/access_rejected_test.go`(拒绝与故障分开),以及本仓 `java/gateway_node` 的 `AssignGateServiceAuthTest`、`AssignGateRequestProtoTest`。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- **2026-11-27 Java 对齐完成**：
+  - `game-api` `AccountLoginService` 新增 `resolveAccessTokenAccount(String accessToken)`；`game-login` `LoginAccountService` 通过 `TokenStore.validateAccess` 实现并区分令牌被拒（返回空串）与存储故障（失败 Future）。
+  - `game-gateway`：`AssignGateRequest` 接收 `access_token`（忽略自报 `account`）；`AssignGateResponse` 新增 `401`（`ERR_AUTH_REJECTED`/`ERR_AUTH_REQUIRED`）与 `500`（`ERR_AUTH_UNAVAILABLE`）；`GatewayProperties` 新增 `legacyGateLoginEnabled`（默认 `true`）；`AssignGateService` 校验 `access_token` 解析权威账号、匿名路径受旧登录开关门控、冷却键改用 `"tok:" + sha256Prefix16Hex(accessToken)`（匿名无冷却键）；`AssignGateMetrics` 增加 `game.gateway.assign.gate.auth{result}`（`authenticated`/`anonymous`/`anonymous_denied`/`token_rejected`/`error`）及 19 项预注册结果计数。
+  - **验证**：`game-api` `clean install` BUILD SUCCESS；`game-login` `LoginAccountServiceTest` **5/5 PASS**；`game-gateway` **112/112 PASS**（含新增 `AssignGateServiceAuthTest` 与 `GatewayHttpApiTest`，12 项 Redis/MySQL IT 跳过）。
 
 ### 2026-11-13 Apple / Google 登录(主仓已落码未编译,Java 待做)
 
@@ -2992,28 +2955,15 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
 
-### 2026-11-20 冷启动目录回滚、寄售标题审核、角色/帮会改名、联系方式识别与微信/抖音内容安全 + 世界频道异步撤回/举报/防刷（主仓与 Unity 已落码，Java 待做）
+### 2026-11-20 冷启动目录回滚、寄售标题审核、角色/帮会改名、联系方式识别与微信/抖音内容安全 + 世界频道异步撤回/举报/防刷（Java 已对齐）
 
-主仓 `xuanming-server-mmo-cpp` `main` 工作区与客户端 `mmorpg-client` `main` 工作区已完成服务端、数据库、部署脚本与客户端代码及单测落码（未执行协议代码生成、编译与运行，交 Codex 执行）；Java 独立全服务版 `0.1.0-SNAPSHOT` 仅登记待做，本轮未改 Java 代码、不跑 Java 构建或测试。
+主仓与 Unity 闭环内容见上文 2026-11-23 各汇总表；2026-11-27 补齐 `game-chat` + `game-gate` 世界频道撤回广播（`NotifyWorldChatRetracted` 435）与实时世界推送（`NotifyWorldChat` 383）后本条全部闭环：
 
-- **主仓与客户端本次闭环内容**：
-  1. **冷启动 SQL Catalog 回滚与重试**：`go/shared/authoritysql`、`go/data_service/cmd/writer_authority` 支持冷启动未生成 catalog 时的事务回滚与重试。
-  2. **人民币寄售标题内容审核**：`go/trade`、`go/content_guard` 接入 `CreateRmbConsignmentRequest.title` 的 `TEXT_SCENE_TRADE_TITLE` 强一致审核与拒绝提示。
-  3. **角色改名与帮会改名全链路**：
-     - 角色改名：`SceneClientPlayerCommon.RenamePlayer` / `NotifyPlayerRenamed`（`PlayerRenameSystem` C++、`DataService.RenameRole`、Unity `GameClient.RoleRename` + `AttributeUiRoot` / `CharacterSupportWindow` + `RoleRenameClientTests`）。
-     - 帮会改名：`GuildService.RenameGuild` / `GUILD_CHANGE_KIND_RENAMED` / `GuildNameHoldRecord`（`go/guild` + Unity `GuildClient.Rename` + `GuildWindow`/`GuildUiRoot` 帮主改名入口 + `GuildRenameClientTests`）。
-  4. **渠道身份档案与外部平台内容安全审核**：
-     - `account_channel_identity` 表与 `DataService.{UpsertAccountChannelIdentity, GetPlayerChannelIdentity}`，由 `go/login` 在登录解析后写入 `(account, channel, open_id)` 并向 `content_guard` 与 `chat` 提供查询。
-     - `go/content_guard` 新增混淆广告/联系方式启发式识别（`internal/contact`）、微信 `msgSecCheck` v2 与抖音 `antidirt` 适配器（含 token 自动刷新重试，密钥只经环境变量注入）、以及 `CheckPlatformText` RPC 与 `AsyncPlatform`/`PendingPlatformReview` 协议字段；`k8s_deploy.ps1` 与 `etc/content_guard.yaml` 已将 `CheckPlatformText` 纳入 `StatConf.IgnoreContentMethods`。
-  5. **聊天防刷、举报与世界频道异步撤回（无 Redis 依赖，追加写 SQL）**：
-     - `go/chat` 新增 append-only 表 `chat_world_retraction`、`chat_report`、`chat_repeat_event`、`chat_private_daily_target`（TiDB TTL + 运行账号 `SELECT, INSERT` 最小权限，`deploy/sql/chat_runtime_role.sql` 同步），实现世界频道最低等级门槛（`WorldMinLevel`）、跨副本归一化摘要重复刷屏拦截（`DuplicateSpamWindowMs`/`MaxSenders`/`MaxPerSender`）、新账号每日私聊人数上限（`NewAccountAgeHours`/`NewAccountDailyPrivateLimit`）、消息举报（`ReportChat`）、世界频道消息撤回（`RetractWorldChat` + `NotifyWorldChatRetracted` 经 `chat-world-bcast` 全服推客户端移除）及 `content_guard` 短超时后后台 `safego` 异步补审自动撤回。
-     - Unity 客户端：`SocialState`、`SocialClient`、`RpcGuard`、`SocialWindow` / `SocialWindow.Fidelity`、`SocialUiRoot` 接入 `NotifyWorldChatRetracted` 实时移除、世界消息「举报」按钮与原因弹窗及全部 `chat_error` 提示映射，新增 `SocialTests` EditMode 用例；并生成 `apple_signin_button` / `apple_logo` 与 `google_signin_button` / `google_logo` 精灵资源更新 `QdaoServerSelectView.Visuals.cs`。
-- **Java 独立全服务版待做**：
-  1. `game-data` / `game-login`：落地 `account_channel_identity` 表与 `Upsert`/`GetPlayerChannelIdentity` 等价接口，登录流程落库渠道与 `open_id`。
-  2. `game-content-guard`（或同职责审核模块）：补齐混淆联系方式/URL 启发式检测、微信 `msgSecCheck` v2 与抖音 `antidirt` 外部复审，以及世界频道短超时先放行后异步复审语义；配置寄售标题审核与 `CheckPlatformText` 日志脱敏。
-  3. `game-guild` / `game-scene` / `game-chat`：对齐帮会改名、角色改名冷却/占位窗口、`chat` 最小等级门槛、跨副本重复摘要防刷屏、新号每日私聊上限、`ReportChat` 举报持久化、以及 `RetractWorldChat` + `NotifyWorldChatRetracted` 全服推送移除（沿用 Java 的 Dubbo/Redis 架构语义并保持强一致）。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- `game-content-guard`（2026-11-23）：本地 Trie + 联系方式启发式 + 微信 `msgSecCheck` v2 / 抖音 `antidirt` 外部平台适配器与世界频道异步复检。
+- `game-login` / `game-player-store`（2026-11-23）：`account_channel_identity` 落库（`AccountLogin.recordChannelIdentityQuietly`）、建角内容安全与 `player_name_hold`。
+- `game-trade`：`CommerceClientService` 人民币寄售标题接入 `TextGuard`（`TEXT_SCENE_TRADE_TITLE`）。
+- `game-scene` / `game-guild`（2026-11-23）：角色改名（428/429）、宠物改名审核、帮会改名（439）与内容安全全部落地。
+- `game-chat` / `game-gate`（2026-11-23 + 2026-11-27）：4 张追加表（防刷/举报/撤回/私聊日限）+ 后台异步复检自动撤回 + Redis Pub/Sub `chat:world:events` 全服推送 383/435（435 撤回通知不受网关限速桶拦截）；`game-chat` 58/58 PASS、`game-gate` `WorldChatSubscriberTest` + `GatePushSubscriberTest` 14/14 PASS。
 
 
 ### 2026-11-20 战斗状态机 / 行为树 / 位图互斥矩阵 / 规范化状态表 / 副本怪物 AI 三端对齐（C++ / Go / Java 源码与单测已全部落码，待 Codex 导表同步与构建验收）
@@ -3143,7 +3093,9 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
    - 登录时:本次身份令牌判出来就拒绝登录、回上面的提示码(网关 401、`message` 为 `upstream_err=<码>`,同现有渠道凭证被拒);不论放不放行,都吊销改密之前的旧会话。
    - 刷新时:这一家族判出来就不续期,吊销并踢线,回令牌失效的码;核对放在轮换之前,吊销失败也不续期。
    - 通行证故障:登录、刷新照常放行并计数告警,不让通行证故障把在线玩家都踢下线。
-6. 通行证回调入口(主仓设计 §3.7,同日补):网关 `POST /internal/passport/events`(Casdoor 侧的契约,路径与状态码两版同):请求头 `X-Passport-Webhook-Secret` 按摘要常量时间比较(至少 32 字节,没配回 404);请求体上限 64 KiB;200 处理完、400 请求体不是 Casdoor 记录、401 密钥不对、503 暂时处理不了(Casdoor 会重投)。处理:从记录的 `extendedUser`、组织与用户、`object` 里取用户(跳过 `built-in`,最多 4 个),逐个现查通行证,按第 5 条落地;回调只用来找人,不信内容。Java 版内部怎么接(网关转 login 还是直接处理)按自己的方式。
+   - 申请注销的重新认证(第 3 条之前那一步)也过这道核对:登录会被拒的身份令牌拿去申请注销同样拒,回同一个提示码(11-27 补)。
+   - 踢线在吊销之后放到后台做(带时限、与请求脱钩),不占登录 / 刷新的请求时间:登录时身份令牌已一次性消费,超时了玩家得重走授权;账号从没进过游戏(没有账号行)时没有角色可踢,不算失败(11-27 补)。
+6. 通行证回调入口(主仓设计 §3.7,同日补):网关 `POST /internal/passport/events`(Casdoor 侧的契约,路径与状态码两版同):请求头 `X-Passport-Webhook-Secret` 按摘要常量时间比较(至少 32 字节,没配回 404);请求体上限 64 KiB;200 处理完、400 请求体不是 Casdoor 记录、401 密钥不对、503 暂时处理不了(Casdoor 会重投)。处理:从记录的 `extendedUser`、组织与用户、`object` 里取用户(跳过 `built-in`,最多 4 个),逐个现查通行证,按第 5 条落地;回调只用来找人,不信内容。名字里带 `/` 的引用跳过:那是 Casdoor 的应用伪用户(应用凭据发起的操作记成 `app/<应用名>`,注销时删通行证用户就是),拿去查 Casdoor 会 panic、整条回调被一直重投(11-27 补)。Java 版内部怎么接(网关转 login 还是直接处理)按自己的方式。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
@@ -3164,20 +3116,14 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 
 主仓缺口清单第 27 条前一半，设计见主仓 `docs/design/mail-system.md`「2026-11-05 活动名单导入」。2026-11-27 已对齐：`game-mail` `MailStore.importRecipients` 已改为按 `COALESCE(SUM(recipient_count),0) FROM mail_campaign_shard` 统计已导入人数、一片收件人用单条多行 `INSERT INTO mail_campaign_recipient` 写入（禁用 `INSERT IGNORE` / `ON DUPLICATE KEY UPDATE`），捕获唯一键冲突（`SQLIntegrityConstraintViolationException` / 1062 / SQLState `23000`/`23505`）转 `Reject(CONFLICT)` 整笔回滚，重放同时核对 `shard_hash` 与 `recipient_count`；`game-mail` 10/10 PASS（含 `MailCampaignAndQuotaTest` 3/3）。
 
-### 2026-11-26 未成年人到点由战斗服断开战斗直连(主仓已落码未编译,Java 待做)
+### 2026-11-26 未成年人到点由战斗服断开战斗直连（Java 已对齐）
 
-主仓设计 `docs/design/real-name-anti-addiction.md` §5.4 末条与 `docs/design/turn-based-battle-server.md` §18.9。接上面「未成年人到点立即下线、离线托管不越过截止时刻」一节末尾说的「另登记」。客户端代码不用改;客户端可见协议 `proto/battle/battle_data.proto` 的 `BattlePlayerSnapshot` 加了第 33 号字段,客户端重新生成即可。
+主仓设计 `docs/design/real-name-anti-addiction.md` §5.4 末条与 `docs/design/turn-based-battle-server.md` §18.9。
 
-- **主仓做法**:
-  1. match 成局时从玩家会话记录取 `PlayerSession.minor_play_deadline_ms`(Unix 毫秒,0 = 不限),盖到参战者快照 `BattlePlayerSnapshot.minor_play_deadline_ms`;L0 观战时放进 `AddObserverRequest.minor_play_deadline_ms`(第 8 号字段)。两份都随原件冻结。成局时会话记录读失败:这一局不开、不定罪;没有会话记录:按不在线定罪。都在冻结玩家之前判。
-  2. 战斗服房间按人记截止时刻。票据期限取房间作废期限与截止前 5 秒里较早的一个;开局、观战、补签同一处签,补签请求不带截止时刻。
-  3. 到点(截止前 5 秒,与 gate 关大厅连接同一时点)由房间的一次性定时器关掉他那一条直连;之后本场拒绝他握手。「已截止」只升不降,墙钟回拨也不放开。
-  4. 战斗不变:断开后按现有的直连断开处理(参战者回合超时自动出手,观众进重连宽限、期满回收席位);不判负、不移出名单、不改结算。L1 / L2 观众经大厅连接,由 gate 到点关掉。
-- **Java 待做**:
-  1. 核对 Java 版有没有客户端直连战斗服的第二条连接,票据期限是否同样等于房间期限、可反复重连。有就按上面 1~4 做。
-  2. 没有直连、战斗流量都经网关的话,大厅连接到点关掉就够了,把本条改成不适用。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- **2026-11-27 Java 对齐完成（提交 `a325035e`）**：
+  - `game-discovery` / `game-gate`：`PlayerPresence` 追加 `minor_play_deadline_ms(8)`，`PresenceRecorder` / `GatePresence` / `ClientDispatcher` 在首登与跨节点交接时写入未成年人截止时刻。
+  - `game-scene` / `game-match`：`PlayerBattleService`（`PrepareBattle`）将 `ScenePlayer.minorPlayDeadlineMs` 写入 `BattlePlayerSnapshot.minor_play_deadline_ms(33)`，`WatchBattleService` / `GlobalWatchService` / `LocalObserverOperation` 将在线目录截止时刻透传至 `AddObserverRequest.minor_play_deadline_ms(8)`。
+  - `game-battle`：新增 `BattleMinorPlayDeadline` 纯判定规则，`BattleRoom` / `BattleRoomServiceImpl` 对参战者与 L0 观众首签/补签票据按提前 5 秒封顶、挂载房间一次性到点断直连定时器、单调置位 `ended` 抗墙钟回拨并拒绝后续重连握手；验证 `BattleMinorPlayDeadlineTest` 6/6 PASS、`game-battle`(44)、`game-gate`(121)、`game-match`(297)、`game-scene`(52) 全绿。
 
 ### 2026-11-26 后台管理员身份(OIDC)与高风险动作双人复核(主仓批 1~6 与批 7 告警已落码未编译,Java 待做)
 
@@ -3204,6 +3150,13 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
   4. Java 独立仓 game-mall 没有商城人工单处置(数据覆写审计 r2 第 4 轮核对过),要先补人工单,再按上面第 6、7 条接入;game-data 的商城管理面(X-Game-Admin-Token)改由管理端流水发起。
   5. Java 版邮件的管理发信、账号类、回收、榜单删除按上面第 6、8、9 条接入;各服务加「不带批准记录被接受」计数与告警。
   6. Java 版网关 / game-data 的管理面按第 10 条收口(写操作要个人操作人、统一留痕、机器调用单独口令)。
+- **主仓批 7 剩余(11-27 补,设计稿 §11.4;K8s 部分落码未运行,本机转发没做)**:
+  12. 后台上 K8s:infra namespace 一份、只在集群内(ClusterIP、不建 Ingress,经 port-forward 打开,回调地址用回环地址)、只走 OIDC;一个镜像两个容器(后端 + 前端 nginx);管理库与 Redis 的连接信息由运维预置 Secret,部署脚本只核键。后台自己有一份拒绝其它 Pod 入站的准入策略;后台调到的服务的准入名单加上后台。
+  13. 各管理入口的口令 / 密钥只给后台与资源服务本身,全部可空(没设 = 入口关闭);资源服务的配置只在真注入时写变量名;同一把在 infra-up 与 zone-up 之间保持同值。
+  14. staging / prod 部署在写之前拒绝把「不带批准记录也受理」的应急开关提交成 true。
+- **Java 待做(补充)**:
+  7. Java 版管理端上 K8s 时照第 12、13 条:只在集群内、只走 OIDC,管理口令只挂给管理端与资源服务本身,管理端自身拒绝集群内其它 Pod 入站。
+  8. Java 版各服务的应急开关(若有)同样在部署侧拒绝非 dev 档打开(第 14 条)。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 

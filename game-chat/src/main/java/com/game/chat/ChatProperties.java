@@ -26,6 +26,7 @@ import org.springframework.boot.context.properties.bind.ConstructorBinding;
  * @param newAccountAgeHours         新账号私聊限制的账号年龄阈值（小时，缺省 0 = 关闭；上限 720）
  * @param newAccountDailyPrivateLimit 新账号每日私聊不同目标上限（缺省 0 = 不限；上限 1000）
  * @param contentGuardEnabled        是否启用内容安全 Dubbo 服务（缺省 false）
+ * @param worldHistoryCacheMs        世界频道每副本近窗快照有效期（毫秒，缺省 500，0 = 关闭直读；上限 60000）
  */
 @ConfigurationProperties("game.chat")
 public record ChatProperties(
@@ -45,11 +46,14 @@ public record ChatProperties(
         Integer duplicateSpamMaxPerSender,
         Integer newAccountAgeHours,
         Integer newAccountDailyPrivateLimit,
-        Boolean contentGuardEnabled) {
+        Boolean contentGuardEnabled,
+        Integer worldHistoryCacheMs) {
 
     public static final Duration MAX_REQUEST_BUDGET = Duration.ofMillis(4000);
     /** 单次读窗硬预算；历史容量可配置，不能使一轮SQL读取无界。 */
     public static final int MAX_PULL_MESSAGES = 200;
+    /** 世界频道近窗快照默认有效期（与主仓 WorldHistoryCacheMs=500ms 同口径）。 */
+    public static final int DEFAULT_WORLD_HISTORY_CACHE_MS = 500;
 
     @ConstructorBinding
     public ChatProperties {
@@ -82,9 +86,36 @@ public record ChatProperties(
         newAccountAgeHours = rangeOr(newAccountAgeHours, 0, 720, "new-account-age-hours");
         newAccountDailyPrivateLimit = rangeOr(newAccountDailyPrivateLimit, 0, 1_000, "new-account-daily-private-limit");
         contentGuardEnabled = Boolean.TRUE.equals(contentGuardEnabled);
+        worldHistoryCacheMs = worldHistoryCacheMs == null ? DEFAULT_WORLD_HISTORY_CACHE_MS
+                : rangeOr(worldHistoryCacheMs, 0, 60_000, "world-history-cache-ms");
     }
 
-    /** 保留既有 9 参构造器（兼容单测与旧装配）。 */
+    /** 保留既有 17 参构造器（兼容单测直读夹具，关闭世界快照缓存）。 */
+    public ChatProperties(
+            Integer maxContentBytes,
+            Integer rateLimitPerSecond,
+            Integer historyMaxEntries,
+            Duration historyTtl,
+            Integer historyDefaultLimit,
+            Integer historyMaxLimit,
+            Duration requestIdTtl,
+            Duration requestBudget,
+            List<String> sensitiveWords,
+            Integer worldChannelCooldownMs,
+            Integer worldMinLevel,
+            Integer duplicateSpamWindowMs,
+            Integer duplicateSpamMaxSenders,
+            Integer duplicateSpamMaxPerSender,
+            Integer newAccountAgeHours,
+            Integer newAccountDailyPrivateLimit,
+            Boolean contentGuardEnabled) {
+        this(maxContentBytes, rateLimitPerSecond, historyMaxEntries, historyTtl, historyDefaultLimit,
+                historyMaxLimit, requestIdTtl, requestBudget, sensitiveWords, worldChannelCooldownMs, worldMinLevel,
+                duplicateSpamWindowMs, duplicateSpamMaxSenders, duplicateSpamMaxPerSender, newAccountAgeHours,
+                newAccountDailyPrivateLimit, contentGuardEnabled, 0);
+    }
+
+    /** 保留既有 9 参构造器（兼容单测与旧装配，关闭世界快照缓存）。 */
     public ChatProperties(
             Integer maxContentBytes,
             Integer rateLimitPerSecond,
@@ -96,7 +127,7 @@ public record ChatProperties(
             Duration requestBudget,
             List<String> sensitiveWords) {
         this(maxContentBytes, rateLimitPerSecond, historyMaxEntries, historyTtl, historyDefaultLimit,
-                historyMaxLimit, requestIdTtl, requestBudget, sensitiveWords, 0, 0, 0, 0, 0, 0, 0, false);
+                historyMaxLimit, requestIdTtl, requestBudget, sensitiveWords, 0, 0, 0, 0, 0, 0, 0, false, 0);
     }
 
     private static int rangeOr(Integer value, int min, int max, String name) {

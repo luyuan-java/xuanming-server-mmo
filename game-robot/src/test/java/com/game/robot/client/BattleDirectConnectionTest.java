@@ -237,12 +237,29 @@ class BattleDirectConnectionTest {
     }
 
     @Test
-    void 下行只收握手应答与信封_别的类型记非法帧并关闭() {
+    void 下行只收握手应答与信封_别的类型记非法帧并关闭() throws Exception {
         BattleInbox inbox = new BattleInbox();
         EmbeddedChannel ch = embedded(inbox);
-        ch.writeInbound(ClientFrames.encode(ByteBufAllocator.DEFAULT, BattleTokenVerifyResponse.newBuilder().setSuccess(true).setBattleId(9).build()));
+        ch.writeInbound(ClientFrames.encode(ByteBufAllocator.DEFAULT, BattleTokenVerifyResponse.newBuilder()
+                .setSuccess(true).setBattleId(9).setHeartbeatIntervalMs(10_000).setHeartbeatTimeoutMs(30_000).build()));
+        ch.writeInbound(ClientFrames.encode(ByteBufAllocator.DEFAULT,
+                com.game.proto.ClientHeartbeatResponse.newBuilder().setSeq(1).build()));
         ch.writeInbound(ClientFrames.encode(ByteBufAllocator.DEFAULT, MessageContent.newBuilder().setMessageId(139).build()));
-        assertThat(inbox.snapshot(0)).extracting(BattleFrame::label).containsExactly("verify-ok:9", "push:139");
+        assertThat(inbox.snapshot(0)).as("心跳回包静默吞掉不进业务收件箱")
+                .extracting(BattleFrame::label).containsExactly("verify-ok:9", "push:139");
+
+        // 到点自动发 ClientHeartbeatRequest
+        ch.advanceTimeBy(10, java.util.concurrent.TimeUnit.SECONDS);
+        ch.runScheduledPendingTasks();
+        ByteBuf hbFrame = ch.readOutbound();
+        assertThat(hbFrame).isNotNull();
+        try {
+            Message decoded = ClientFrames.decodeBody(hbFrame.slice(4, hbFrame.readableBytes() - 4),
+                    Map.of("ClientHeartbeatRequest", com.game.proto.ClientHeartbeatRequest.getDefaultInstance()));
+            assertThat(decoded).isEqualTo(com.game.proto.ClientHeartbeatRequest.newBuilder().setSeq(1).build());
+        } finally {
+            hbFrame.release();
+        }
 
         ch.writeInbound(ClientFrames.encode(ByteBufAllocator.DEFAULT, ClientTokenVerifyResponse.newBuilder().setSuccess(true).build()));
         assertThat(inbox.closedBy()).startsWith("invalid-frame:");

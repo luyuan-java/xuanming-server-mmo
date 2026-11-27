@@ -8,14 +8,21 @@ import com.game.chat.store.JdbcChatStore;
 import com.game.common.token.DubboCallAuth;
 import com.game.contract.MessageIdRegistry;
 import com.game.discovery.RedisKeys;
+import com.game.proto.MessageContent;
+import com.game.proto.chat.ChatMessage;
+import com.game.proto.chat.ChatRetractedNotify;
 import com.game.proto.content_guard.CheckTextRequest;
 import com.game.proto.content_guard.CheckTextResponse;
 import com.game.proto.content_guard.TextScene;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.dubbo.config.annotation.DubboReference;
+import org.redisson.api.RTopic;
+import org.redisson.api.RedissonClient;
+import org.redisson.client.codec.ByteArrayCodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -34,6 +41,58 @@ public class ChatConfiguration {
     @Bean
     public ChatMetrics chatMetrics(MeterRegistry meterRegistry) {
         return new ChatMetrics(meterRegistry);
+    }
+
+    /** 生产世界频道实时消息与撤回广播发布器（经 Redis pub/sub 投递各 game-gate；至多一次，失败不阻塞 SQL 主链路）。 */
+    @Bean
+    @ConditionalOnMissingBean(ChatService.WorldPublisher.class)
+    public ChatService.WorldPublisher redisWorldPublisher(ObjectProvider<RedissonClient> redissonProvider,
+                                                          RedisKeys keys, MessageIdRegistry registry) {
+        RedissonClient redisson = redissonProvider.getIfAvailable();
+        if (redisson == null) {
+            return ChatService.WorldPublisher.NOOP;
+        }
+        int notifyWorldChatId = registry.requireId("ClientPlayerChat", "NotifyWorldChat");
+        int notifyWorldChatRetractedId = registry.requireId("ClientPlayerChat", "NotifyWorldChatRetracted");
+        RTopic topic = redisson.getTopic(keys.chatWorldTopic(), ByteArrayCodec.INSTANCE);
+        return redisWorldPublisher(topic, notifyWorldChatId, notifyWorldChatRetractedId);
+    }
+
+    static ChatService.WorldPublisher redisWorldPublisher(RTopic topic, int notifyWorldChatId, int notifyWorldChatRetractedId) {
+        return new ChatService.WorldPublisher() {
+            @Override
+            public void publishMessage(ChatMessage message) {
+                if (message == null) {
+                    return;
+                }
+                publishEnvelope(topic, notifyWorldChatId, message.toByteString());
+            }
+
+            @Override
+            public void publishRetracted(ChatRetractedNotify notify) {
+                if (notify == null) {
+                    return;
+                }
+                publishEnvelope(topic, notifyWorldChatRetractedId, notify.toByteString());
+            }
+        };
+    }
+
+    private static void publishEnvelope(RTopic topic, int messageId, com.google.protobuf.ByteString payload) {
+        byte[] encoded = MessageContent.newBuilder()
+                .setMessageId(messageId)
+                .setSerializedMessage(payload)
+                .build()
+                .toByteArray();
+        try {
+            topic.publishAsync(encoded).whenComplete((receivers, err) -> {
+                if (err != null) {
+                    log.warn("world chat pub/sub publish failed message_id={}: {}", messageId, err.toString());
+                }
+            });
+        } catch (RuntimeException e) {
+            log.warn("world chat pub/sub publish failed message_id={}: {}", messageId, e.toString());
+        }
     }
 
     @Bean(destroyMethod = "close")

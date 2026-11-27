@@ -63,6 +63,8 @@ public final class BattleEdgeServer implements DirectEdge {
     static final Map<String, Message> ACCEPTED = Map.of(
             BattleTokenVerifyRequest.getDescriptor().getFullName(), BattleTokenVerifyRequest.getDefaultInstance(),
             ClientRequest.getDescriptor().getFullName(), ClientRequest.getDefaultInstance(),
+            com.game.proto.ClientHeartbeatRequest.getDescriptor().getFullName(),
+            com.game.proto.ClientHeartbeatRequest.getDefaultInstance(),
             com.game.proto.match.NetworkProbeStart.getDescriptor().getFullName(),com.game.proto.match.NetworkProbeStart.getDefaultInstance(),
             com.game.proto.match.NetworkProbeEcho.getDescriptor().getFullName(),com.game.proto.match.NetworkProbeEcho.getDefaultInstance());
 

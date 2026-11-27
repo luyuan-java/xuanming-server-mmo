@@ -50,4 +50,12 @@ public interface AccountLoginService {
     default CompletableFuture<GetPlayerChannelIdentityResponse> getPlayerChannelIdentity(GetPlayerChannelIdentityRequest request) {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("getPlayerChannelIdentity not implemented"));
     }
+
+    /**
+     * 校验客户端 {@code access_token} 并返回对应账号名（供 game-gateway {@code /api/assign-gate} 鉴权）：
+     * 有效返回非空账号名；格式不对/未知/过期/家族吊销返回空串 {@code ""}；令牌存储不可用时以异常结束 future（由网关区分 401 与 500）。
+     */
+    default CompletableFuture<String> resolveAccessTokenAccount(String accessToken) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("resolveAccessTokenAccount not implemented"));
+    }
 }

@@ -128,7 +128,8 @@ public final class CommerceMatching {
         });
     }
     public void match(TradeCommerceRow taker, Deadline d) throws SQLException {
-        if (taker.getKind() != 4 || taker.getSide() == 0 || taker.getQuantity() == taker.getFilledQuantity())
+        if (taker.getKind() != 4 || taker.getSide() == 0 || !taker.getOnOrderBook()
+                || taker.getQuantity() == taker.getFilledQuantity())
             return;
         long matchId = e.ids.getAsLong();
         e.store.transaction(d, c -> {
@@ -151,7 +152,7 @@ public final class CommerceMatching {
             String price = taker.getSide() == 1 ? "unit_price<=? ORDER BY unit_price ASC,created_ms,commerce_id"
                                                 : "unit_price>=? ORDER BY unit_price DESC,created_ms,commerce_id";
             var candidates = e.store.list(c,
-                "kind=4 AND side=? AND market_id=? AND item_config_id=? AND currency_type=? AND status=3 AND "
+                "kind=4 AND side=? AND market_id=? AND item_config_id=? AND currency_type=? AND status=3 AND on_order_book=1 AND "
                     + "filled_quantity<quantity AND seller_player_id<>? AND " + price + " LIMIT 1",
                 opposite, taker.getMarketId(), taker.getItemConfigId(), taker.getCurrencyType(),
                 taker.getSellerPlayerId(), taker.getUnitPrice());

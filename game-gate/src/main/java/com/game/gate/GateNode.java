@@ -16,6 +16,7 @@ import com.game.discovery.presence.PlayerPresenceDirectory;
 import com.game.discovery.spectate.SpectateFrameChannel;
 import com.game.gate.presence.GatePresence;
 import com.game.gate.presence.GatePushSubscriber;
+import com.game.gate.presence.WorldChatSubscriber;
 import com.game.gate.link.LinkHellos;
 import com.game.gate.link.LinkSettings;
 import com.game.gate.link.NettyLinkConnector;
@@ -133,6 +134,7 @@ public final class GateNode {
     private volatile GatePresence presence;
     /** 本 gate 的服务端推送频道订阅。 */
     private volatile GatePushSubscriber pushSubscriber;
+    private volatile WorldChatSubscriber worldChatSubscriber;
     /** 观战订阅凭证的验签（{@link #withSpectateTickets}；缺省一律拒绝）。 */
     private SpectateTickets spectateTickets = SpectateTickets.disabled();
     private ExecutorService spectateThread;
@@ -241,6 +243,12 @@ public final class GateNode {
                 redis.getTopic(keys.gatePushTopic(zoneId, identity.nodeId()), ByteArrayCodec.INSTANCE),
                 instanceId, registry, dispatcher, metrics);
         pushSubscriber.start();
+        worldChatSubscriber = new WorldChatSubscriber(
+                redis.getTopic(keys.chatWorldTopic(), ByteArrayCodec.INSTANCE),
+                registry, dispatcher,
+                messageIdRegistry.requireId("ClientPlayerChat", "NotifyWorldChat"),
+                messageIdRegistry.requireId("ClientPlayerChat", "NotifyWorldChatRetracted"));
+        worldChatSubscriber.start();
         presence.start(scheduler);
         // 状态量由抓取线程读：会话表与链路表都是并发容器，size() 线程安全、不阻塞。
         metrics.bindSessionCount(registry::size);
@@ -442,6 +450,10 @@ public final class GateNode {
         GatePushSubscriber subscriber = pushSubscriber;
         if (subscriber != null) {
             subscriber.stop();
+        }
+        WorldChatSubscriber worldChat = worldChatSubscriber;
+        if (worldChat != null) {
+            worldChat.stop();
         }
     }
 

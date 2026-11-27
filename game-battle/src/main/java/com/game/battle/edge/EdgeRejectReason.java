@@ -20,6 +20,12 @@ enum EdgeRejectReason {
     HANDSHAKE_TIMEOUT,
     /** 握手前发 {@code ClientRequest}（闸 G4）。 */
     REQUEST_BEFORE_VERIFY,
+    /** 握手前发 {@code ClientHeartbeatRequest}。 */
+    HEARTBEAT_BEFORE_VERIFY,
+    /** 已验证直连每 10 秒心跳超过 3 条（不回包、计非法包）。 */
+    HEARTBEAT_OVER_RATE,
+    /** 验签后连续 30 秒无完整入站帧，读空闲断开。 */
+    CLIENT_IDLE,
     /** 类型名合法但直连面不收（例：把大厅的 {@code ClientTokenVerifyRequest} 发错了连接；闸 G4′，§11 N9 解码器立即关）。 */
     UNKNOWN_FRAME,
     /** 其余解码失败：长度 / 校验和 / 类型名长度 / 消息体解析（解码器清空缓冲、立即关，不回包）。 */

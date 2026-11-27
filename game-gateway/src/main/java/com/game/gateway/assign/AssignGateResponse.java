@@ -45,12 +45,16 @@ public record AssignGateResponse(
     public static final int CODE_QUEUEING = 100;
     public static final int CODE_QUEUE_EXPIRED = 410;
     public static final int CODE_BAD_REQUEST = 400;
+    public static final int CODE_AUTH_REJECTED = 401;
     public static final int CODE_ZONE_NOT_FOUND = 404;
     public static final int CODE_INTERNAL = 500;
     public static final int CODE_ZONE_UNAVAILABLE = 503;
     public static final int CODE_RATE_LIMITED = 429;
 
     public static final String ERR_BAD_REQUEST = "bad_request";
+    public static final String ERR_AUTH_REJECTED = "auth_rejected";
+    public static final String ERR_AUTH_REQUIRED = "auth_required";
+    public static final String ERR_AUTH_UNAVAILABLE = "auth_unavailable";
     public static final String ERR_ZONE_NOT_FOUND = "zone_not_found";
     public static final String ERR_ZONE_MAINTENANCE = "zone_maintenance";
     public static final String ERR_ZONE_CLOSED = "zone_closed";

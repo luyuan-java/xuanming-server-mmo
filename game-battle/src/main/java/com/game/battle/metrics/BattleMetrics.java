@@ -67,6 +67,7 @@ public final class BattleMetrics {
     static final String CLIENT_REQUESTS = "game.battle.client.requests";
     static final String INVALID_FRAMES = "game.battle.invalid.frames";
     static final String DISCONNECTS = "game.battle.disconnects";
+    static final String HEARTBEAT = "game.battle.client.heartbeat";
     static final String PUSHES = "game.battle.pushes";
     static final String LOBBY_PUSH_OUTCOMES = "game.battle.lobby.push.outcomes";
     static final String TICKETS = "game.battle.tickets";
@@ -209,8 +210,20 @@ public final class BattleMetrics {
         REPLACED,
         /** 房间收尾、作废、退出观战、观众被清退（优雅关闭）。 */
         BATTLE_CLOSED,
+        /** 验签后连续 30s 未收到完整入站帧（读空闲断开）。 */
+        CLIENT_IDLE,
         /** 停机。 */
         SHUTDOWN
+    }
+
+    /** 战斗直连应用层心跳结局（{@code game_battle_client_heartbeat_total{result}}，与 gate 同口径）。 */
+    public enum HeartbeatResult {
+        TRACKED,
+        ANSWERED,
+        BEFORE_VERIFY,
+        EXCESS,
+        DEFERRED,
+        IDLE_CLOSED
     }
 
     /** 大厅公告经 gate 回落的结局（{@code game_battle_lobby_push_outcomes_total{outcome}}）：{@code PlayerPushes} 的结局 + 异常。 */
@@ -363,6 +376,7 @@ public final class BattleMetrics {
     private final Map<String, Map<RequestResult, Counter>> clientRequests;
     private final Map<ClientFrameException.Reason, Counter> invalidFrames;
     private final Map<Disconnect, Counter> disconnects;
+    private final Map<HeartbeatResult, Counter> heartbeats;
     private final ConcurrentHashMap<String, Counter> pushes = new ConcurrentHashMap<>();
     private final Map<LobbyOutcome, Counter> lobbyPushOutcomes;
     private final Map<TicketPath, Map<Boolean, Counter>> tickets;
@@ -410,6 +424,7 @@ public final class BattleMetrics {
         this.invalidFrames = counters(ClientFrameException.Reason.class, INVALID_FRAMES, "非法帧（解码失败即断开，不回包）", "reason",
                 BattleMetrics::lower);
         this.disconnects = counters(Disconnect.class, DISCONNECTS, "服务端主动断开直连", "reason", BattleMetrics::lower);
+        this.heartbeats = counters(HeartbeatResult.class, HEARTBEAT, "battle 直连应用层心跳与读空闲结局", "result", BattleMetrics::lower);
         this.wsHandshakeAccepted = Counter.builder(WEBSOCKET_HANDSHAKES).description("battle 直连 WebSocket 升级握手")
                 .tag("result", "accepted").register(registry);
         this.wsHandshakeRejected = Counter.builder(WEBSOCKET_HANDSHAKES).description("battle 直连 WebSocket 升级握手")
@@ -557,6 +572,10 @@ public final class BattleMetrics {
 
     public void disconnect(Disconnect reason) {
         disconnects.get(reason).increment();
+    }
+
+    public void heartbeat(HeartbeatResult result) {
+        heartbeats.get(result).increment();
     }
 
     // ---------------------------------------------------------------- 推送与签票
