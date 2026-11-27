@@ -20,8 +20,10 @@ public final class GlobalPlacementStore implements PlacementStore {
             var create=CreateBattleRequest.parseFrom(f.getCreateRequest());
             var placement=BattlePlacement.newBuilder().setBattleId(battle).setMode(f.getMode()).setBattleConfigId(f.getConfigId())
                     .setCreatedAtMs(f.getCreatedMs()).setDeadlineMs(f.getDeadlineMs()).setBattleNodeId(f.getNodeId()).setBattleInstanceId(f.getInstanceId())
-                    .setRpcHost(f.getHost()).setRpcPort(f.getPort()).setAttempt(1).setSpectateVisibility(create.getSpectateVisibilityValue());
-            create.getPlayersList().forEach(p->placement.addPlayerNames(p.getPlayerName()));return new Read.Found(placement.build());
+                    .setRpcHost(f.getHost()).setRpcPort(f.getPort()).setAttempt(1)
+                    .setSpectateVisibility(create.getSpectateVisibilityValue())
+                    .setSpectateChatEnabled(create.getSpectateChatEnabled());
+            create.getPlayersList().forEach(p->{placement.addPlayerNames(p.getPlayerName());placement.addPlayerIds(p.getPlayerId());});return new Read.Found(placement.build());
         }catch(Exception e){return new Read.Failed("SQL 成局落点暂不可用");}
     }
 }

@@ -3515,7 +3515,8 @@ public final class TurnBattleEngine {
                 .setEscalationStacks(escalationStacks())
                 .setEscalationStartRound(escalationStartRound())
                 .setSurrenderUnlockRound(surrenderUnlockRound())
-                .setSummonPetUnlockRound(summonPetUnlockRound());
+                .setSummonPetUnlockRound(summonPetUnlockRound())
+                .setSpectateChatEnabled(request.getSpectateChatEnabled());
         if (request.hasTournamentContext() && request.getTournamentContext().getMatchId() != 0L) {
             state.setTournamentContext(request.getTournamentContext());
         }

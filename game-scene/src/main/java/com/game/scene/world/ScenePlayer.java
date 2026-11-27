@@ -142,6 +142,8 @@ public final class ScenePlayer {
     private final PlayerBattle battle = new PlayerBattle();
     /** 角色名（存档列 player.name；战斗快照的 player_name）。 */
     private String name = "";
+    /** 个人局外人观战交流偏好（0=未设置，1=允许，2=禁止观战期间交流，绝不禁止观战）。 */
+    private int spectateChatPref;
     /** 上次角色改名成功时刻（Unix 毫秒，存档列 player.renamed_ms；0 = 从未改名）。 */
     private long renamedMs;
     /** 角色改名在途标记（逻辑线程内存态，不持久化）。 */
@@ -269,6 +271,7 @@ public final class ScenePlayer {
         this.realtimeBuffs = state.hasSavedBuffs()
                 ? PlayerRealtimeBuffs.fromSaved(state.getSavedBuffs())
                 : PlayerRealtimeBuffs.empty();
+        this.spectateChatPref = state.getSpectateChatPref();
     }
 
     public long playerId() {
@@ -668,6 +671,9 @@ public final class ScenePlayer {
         if (!realtimeBuffs.isPristine()) {
             state.setSavedBuffs(realtimeBuffs.toState());
         }
+        if (spectateChatPref != 0) {
+            state.setSpectateChatPref(spectateChatPref);
+        }
         return state.build();
     }
 
@@ -991,6 +997,14 @@ public final class ScenePlayer {
      */
     public boolean frozen() {
         return switching != null && switching.phase() == SwitchPhase.FREEZING;
+    }
+
+    public int spectateChatPref() {
+        return spectateChatPref;
+    }
+
+    public void setSpectateChatPref(int pref) {
+        this.spectateChatPref = pref;
     }
 
     PlayerSwitch switching() {

@@ -36,7 +36,9 @@ public record SceneMessageIds(
         int teamFollow,
         int notifyTeamFollowState,
         int getSyncDigest,
-        int notifySyncDigest) {
+        int notifySyncDigest,
+        int getSpectateChatSetting,
+        int setSpectateChatSetting) {
 
     private static final String SCENE_SERVICE = "SceneSceneClientPlayer";
     private static final String SKILL_SERVICE = "SceneSkillClientPlayer";
@@ -72,7 +74,9 @@ public record SceneMessageIds(
                 registry.requireId(MOVEMENT_SERVICE, "TeamFollow"),
                 registry.requireId(MOVEMENT_SERVICE, "NotifyTeamFollowState"),
                 registry.requireId(SCENE_SERVICE, "GetSyncDigest"),
-                registry.requireId(SCENE_SERVICE, "NotifySyncDigest"));
+                registry.requireId(SCENE_SERVICE, "NotifySyncDigest"),
+                registry.requireId(SCENE_SERVICE, "GetSpectateChatSetting"),
+                registry.requireId(SCENE_SERVICE, "SetSpectateChatSetting"));
     }
 
     /** 服务端主动推送：{@code MessageContent.id} 不设（0），与基线 GateSendMessageToPlayer 一致。 */

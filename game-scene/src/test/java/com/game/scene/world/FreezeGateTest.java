@@ -282,6 +282,8 @@ class FreezeGateTest {
         expected.put("SceneSceneClientPlayerEnterScene", FreezePolicy.ALLOW);
         expected.put("SceneSceneClientPlayerSceneInfoC2S", FreezePolicy.READ_ONLY);
         expected.put("SceneSceneClientPlayerGetSyncDigest", FreezePolicy.READ_ONLY);
+        expected.put("SceneSceneClientPlayerGetSpectateChatSetting", FreezePolicy.READ_ONLY);
+        expected.put("SceneSceneClientPlayerSetSpectateChatSetting", FreezePolicy.REJECT);
         // 批次 5.4：226 自己判在途（冻结中回 13000，zone-travel-spec §5.10）
         expected.put("SceneSceneClientPlayerTravelToZone", FreezePolicy.ALLOW);
         expected.put("SceneMovementClientPlayerMoveStart", FreezePolicy.DROP);
@@ -611,6 +613,12 @@ class FreezeGateTest {
                 PUSH_ONLY));
         probes.add(new Probe("SceneSceneClientPlayer", "GetSyncDigest",
                 com.game.proto.GetSyncDigestRequest.getDefaultInstance(), PUSH_SYNC_DIGEST));
+        probes.add(new Probe("SceneSceneClientPlayer", "GetSpectateChatSetting",
+                com.game.proto.GetSpectateChatSettingRequest.getDefaultInstance(), 0));
+        probes.add(new Probe("SceneSceneClientPlayer", "SetSpectateChatSetting",
+                com.game.proto.SetSpectateChatSettingRequest.newBuilder()
+                        .setPreference(com.game.proto.eSpectateChatPreference.SPECTATE_CHAT_PREF_FORBID).build(),
+                CHANGING_SCENE));
         // 批次 5.4：226 自己判在途，交出冻结中回 13000（zone-travel-spec §5.10），不改任何状态
         probes.add(new Probe("SceneSceneClientPlayer", "TravelToZone", TravelToZoneRequest.newBuilder().setTargetZoneId(2).build(),
                 TRANSFER_IN_PROGRESS));

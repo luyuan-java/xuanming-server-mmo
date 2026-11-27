@@ -42,4 +42,8 @@ message BattlePlacement {
   // 论剑 V7 正式排位实时围观元数据（非正式排位为 0）。
   uint32 ranked_team_size = 13;
   int64 ranked_peak_rating_centi = 14;
+  // 本局是否开启局外人观战交流（开局由 SpectateChatPolicy 冻结，抄自 CreateBattleRequest.spectate_chat_enabled）。
+  bool spectate_chat_enabled = 15;
+  // 参战真人玩家 ID 列表（与 player_names 同序），供观战交流室权威区分参战方与局外观众。
+  repeated uint64 player_ids = 16;
 }

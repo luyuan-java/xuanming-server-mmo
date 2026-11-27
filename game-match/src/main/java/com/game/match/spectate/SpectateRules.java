@@ -118,6 +118,7 @@ public final class SpectateRules {
                 .setCreatedAtMs(placement.getCreatedAtMs())
                 .setRankedTeamSize(placement.getRankedTeamSize())
                 .setRankedPeakRatingCenti(placement.getRankedPeakRatingCenti())
+                .setSpectateChatEnabled(placement.getSpectateChatEnabled())
                 .build();
     }
 

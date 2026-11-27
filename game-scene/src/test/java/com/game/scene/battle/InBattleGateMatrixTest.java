@@ -249,6 +249,8 @@ class InBattleGateMatrixTest {
             // ALLOW：只读
             new Row(43, SCENE, "SceneInfoC2S", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(253, SCENE, "GetSyncDigest", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(589, SCENE, "GetSpectateChatSetting", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
+            new Row(590, SCENE, "SetSpectateChatSetting", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(314, MYSTERY_MERCHANT, "GetMysteryMerchantInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(509, SPIRIT_SHOP, "GetSpiritShopInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
             new Row(540, REWARDED_AD, "GetRewardedAdInfo", BattlePolicy.ALLOW, SAME_AS_NOT_IN_BATTLE),
@@ -628,6 +630,9 @@ class InBattleGateMatrixTest {
                 .setSceneId(s.world().scene2.sceneId()).setSceneConfigId(s.world().scene2.configId())).build());
         out.put(SCENE + "SceneInfoC2S", s -> SceneInfoRequest.getDefaultInstance());
         out.put(SCENE + "GetSyncDigest", s -> com.game.proto.GetSyncDigestRequest.getDefaultInstance());
+        out.put(SCENE + "GetSpectateChatSetting", s -> com.game.proto.GetSpectateChatSettingRequest.getDefaultInstance());
+        out.put(SCENE + "SetSpectateChatSetting", s -> com.game.proto.SetSpectateChatSettingRequest.newBuilder()
+                .setPreference(com.game.proto.eSpectateChatPreference.SPECTATE_CHAT_PREF_FORBID).build());
         // 不在队（夹具的在队检查缺省回「不在队」）：不在战斗时受理 {0}，之后挂在选目标上
         out.put(SCENE + "TravelToZone", s -> TravelToZoneRequest.newBuilder().setTargetZoneId(OTHER_ZONE).build());
         // 技能 2：范围技能、无前摇无冷却（正式配表），不在战斗时一定放得出

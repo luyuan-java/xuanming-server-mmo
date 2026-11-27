@@ -312,6 +312,103 @@ public final class ClientDispatcher {
         return metrics;
     }
 
+    GateLimits limits() {
+        return limits;
+    }
+
+    LongSupplier nanoClock() {
+        return nanoClock;
+    }
+
+    /**
+     * P2-4 票据先行验签：验签通过且占票成功后才发会话号、建 {@link ClientSession}（继承建连代次）；
+     * 验签失败或票据已被另一条在线连接占用时不发号、不建会话，直接回拒绝应答并关闭连接。
+     */
+    ClientSession verifyPreAuth(io.netty.channel.Channel channel, String clientIp, long connectionGeneration,
+                                long acceptedNanos, ClientTokenVerifyRequest request) {
+        GateTokens.Verdict verdict = tokens.verify(request.getPayload(), request.getSignature(),
+                identity.nodeId(), identity.zoneId(), clock.instant().getEpochSecond());
+        if (!verdict.ok()) {
+            logPreAuthRejection("token_" + verdict.failure(), clientIp);
+            metrics.handshake(HandshakeResult.of(verdict.failure()));
+            metrics.disconnected(DisconnectReason.HANDSHAKE_REJECTED);
+            sendThenCloseChannel(channel, ClientTokenVerifyResponse.newBuilder()
+                    .setSuccess(false)
+                    .setError(clientError(verdict.failure()))
+                    .build());
+            return null;
+        }
+        String ticketKey = request.getSignature().toStringUtf8();
+        SessionRegistry.OpenOutcome opened = registry.openVerified(channel, clientIp, connectionGeneration, ticketKey);
+        if (opened.status() == SessionRegistry.OpenStatus.TICKET_IN_USE) {
+            logPreAuthRejection("token_in_use", clientIp);
+            metrics.disconnected(DisconnectReason.HANDSHAKE_REJECTED);
+            sendThenCloseChannel(channel, ClientTokenVerifyResponse.newBuilder()
+                    .setSuccess(false)
+                    .setError("token already in use")
+                    .build());
+            return null;
+        }
+        if (opened.status() == SessionRegistry.OpenStatus.ID_EXHAUSTED || opened.session() == null) {
+            log.warn("会话号已耗尽，拒绝验签通过的新连接 peer={}", clientIp);
+            metrics.disconnected(DisconnectReason.SESSION_ID_EXHAUSTED);
+            channel.close();
+            return null;
+        }
+        ClientSession s = opened.session();
+        s.verified = true;
+        s.ticketPlayerId = verdict.payload().getPlayerId();
+        s.ticketTargetZoneId = verdict.payload().getTargetZoneId();
+        s.ticketAccountDigest = verdict.payload().getAccountDigest();
+        metrics.handshake(HandshakeResult.OK);
+        long elapsedNanos = Math.max(0L, nanoClock.getAsLong() - acceptedNanos);
+        metrics.recordHandshakeDurationMs(elapsedNanos / 1_000_000.0);
+        sendVerified(s);
+        return s;
+    }
+
+    /** 未验签连接收到心跳包：直接关连接，不建会话、不通知 login/scene。 */
+    void onPreAuthHeartbeat(io.netty.channel.Channel channel, String clientIp) {
+        metrics.heartbeat(GateMetrics.HeartbeatResult.BEFORE_VERIFY);
+        metrics.disconnected(DisconnectReason.NO_HANDSHAKE);
+        logPreAuthRejection("heartbeat_before_token_verify", clientIp);
+        channel.close();
+    }
+
+    /** 未验签连接收到业务包：直接关连接，不回包、不建会话、不通知 login/scene。 */
+    void onPreAuthRequest(io.netty.channel.Channel channel, String clientIp) {
+        logPreAuthRejection("request_before_token_verify", clientIp);
+        metrics.handshake(HandshakeResult.MISSING);
+        metrics.disconnected(DisconnectReason.NO_HANDSHAKE);
+        channel.close();
+    }
+
+    /** 未验签连接握手超时：记握手超时指标并正常关连接（调用方已先从预认证池删除记录）。 */
+    void onPreAuthHandshakeTimeout(io.netty.channel.Channel channel, String clientIp) {
+        logPreAuthRejection("handshake_timeout", clientIp);
+        metrics.handshake(HandshakeResult.TIMEOUT);
+        metrics.disconnected(DisconnectReason.HANDSHAKE_TIMEOUT);
+        metrics.heartbeat(GateMetrics.HeartbeatResult.HANDSHAKE_TIMEOUTS);
+        channel.close();
+    }
+
+    private void logPreAuthRejection(String reason, String clientIp) {
+        long n = securityRejections.getAndIncrement();
+        if ((n & 0x3FF) == 0) {
+            log.info("未验签客户端被拒（每 1024 次采样一条） reason={} peer={} total={}", reason, clientIp, n + 1);
+        } else {
+            log.debug("未验签客户端被拒 reason={} peer={}", reason, clientIp);
+        }
+    }
+
+    private static void sendThenCloseChannel(io.netty.channel.Channel channel, Message message) {
+        if (channel.isActive()) {
+            channel.writeAndFlush(message).addListener(io.netty.channel.ChannelFutureListener.CLOSE);
+        } else {
+            channel.close();
+        }
+    }
+
     // ================================================================ 连接生命周期
 
     public void onConnected(ClientSession s) {
@@ -373,6 +470,7 @@ public final class ClientDispatcher {
         // 在 gate 拒只会在 login 留下残留会话。普通登录令牌的 player_id 为 0
         s.ticketPlayerId = verdict.payload().getPlayerId();
         s.ticketTargetZoneId = verdict.payload().getTargetZoneId();
+        s.ticketAccountDigest = verdict.payload().getAccountDigest();
         s.cancelHandshakeTimeout();
         metrics.handshake(HandshakeResult.OK);
         sendVerified(s);
@@ -1952,7 +2050,7 @@ public final class ClientDispatcher {
      * BuildSessionDetails」（inventory gate.md:330，基线曾漏掉一种）。票据的持票者与目标 zone（8 / 9 号字段）也在这里带上。
      */
     private SessionContext context(ClientSession s) {
-        return SessionContext.newBuilder()
+        SessionContext.Builder b = SessionContext.newBuilder()
                 .setGateNodeId(identity.nodeId())
                 .setGateInstanceId(identity.instanceId())
                 .setSessionId(s.sessionId())
@@ -1963,8 +2061,11 @@ public final class ClientDispatcher {
                 .setOwnerRevision(s.ownerRevision)
                 .setClientIp(s.clientIp())
                 .setTicketPlayerId(s.ticketPlayerId)
-                .setTicketTargetZoneId(s.ticketTargetZoneId)
-                .build();
+                .setTicketTargetZoneId(s.ticketTargetZoneId);
+        if (s.ticketAccountDigest != null && !s.ticketAccountDigest.isEmpty()) {
+            b.setTicketAccountDigest(s.ticketAccountDigest);
+        }
+        return b.build();
     }
 
     /** 会话已不在会话表里时的上下文：只有本 gate 的身份与帧里的会话号（login 只拿它打日志），不带票据字段。 */

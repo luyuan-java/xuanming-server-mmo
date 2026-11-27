@@ -73,6 +73,8 @@ message PlayerState {
   SkillCooldownListState skill_cooldowns = 26;
   // 实时下线保留 Buff（仅 keep_on_logout=1 的条目，按 buff_table_id 升序写出，UTC 绝对到期毫秒，0=永久；含未知字段与查不到表行的原样带回）。
   SavedBuffListState saved_buffs = 27;
+  // 个人局外人观战交流偏好（0=未设置按服端默认允许，1=允许，2=禁止观战期间交流，绝不禁止观战）。
+  uint32 spectate_chat_pref = 28;
 }
 
 message SkillCooldownEntryState {

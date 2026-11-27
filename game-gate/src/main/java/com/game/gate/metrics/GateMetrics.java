@@ -1,10 +1,13 @@
 package com.game.gate.metrics;
 
 import com.game.api.proto.NodeLinkFrame;
+import com.game.common.net.ConnectionAdmissionController;
 import com.game.common.token.GateTokens;
 import com.game.common.token.SpectateTickets;
 import com.game.net.client.ClientFrameException;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -52,6 +55,11 @@ public final class GateMetrics {
     static final String SPECTATE_CHANNEL_FAILURES = "game.gate.spectate.channel.failures";
     static final String WEBSOCKET_HANDSHAKES = "game.gate.websocket.handshakes";
     static final String WEBSOCKET_PROTOCOL_CLOSED = "game.gate.websocket.protocol.closed";
+    /** 与主仓 deploy/k8s/gate-connection-alerts.yaml 共享同名 Prometheus 指标。 */
+    static final String ADMISSION_REJECTED = "gate.rejected";
+    static final String HANDSHAKE_DURATION_MS = "gate.handshake.duration.ms";
+    private static final double[] HANDSHAKE_DURATION_BUCKETS_MS = {
+            10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000};
 
     /** 不在客户端白名单里的消息号（以及没有路由的请求）统一用的标签值。 */
     public static final String UNKNOWN = "unknown";
@@ -330,6 +338,8 @@ public final class GateMetrics {
     private final Map<NodeLinkFrame.BodyCase, Counter> framesIn;
     private final Map<LoginCall, Timer> loginCallsOk;
     private final Map<LoginCall, Timer> loginCallsFailed;
+    private final Map<ConnectionAdmissionController.RejectReason, Counter> admissionRejects;
+    private final DistributionSummary handshakeDurationMs;
     /** login 以外的后端：键 = backend + "/ok" 或 "/error"（只有 gate 配置的几个后端）。 */
     private final Map<String, Timer> backendTimers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<RequestKey, Counter> requests = new ConcurrentHashMap<>();
@@ -389,6 +399,17 @@ public final class GateMetrics {
         this.framesIn = frameCounters("in");
         this.loginCallsOk = loginTimers("ok");
         this.loginCallsFailed = loginTimers("error");
+        this.admissionRejects = new EnumMap<>(ConnectionAdmissionController.RejectReason.class);
+        for (ConnectionAdmissionController.RejectReason reason : ConnectionAdmissionController.RejectReason.values()) {
+            admissionRejects.put(reason, Counter.builder(ADMISSION_REJECTED)
+                    .description("gate 连接准入拒绝计数（按 reason 区分）")
+                    .tag("reason", reason.tag())
+                    .register(registry));
+        }
+        this.handshakeDurationMs = DistributionSummary.builder(HANDSHAKE_DURATION_MS)
+                .description("gate 建连到票据验签通过耗时（毫秒）")
+                .serviceLevelObjectives(HANDSHAKE_DURATION_BUCKETS_MS)
+                .register(registry);
     }
 
     /** 不导出任何指标的实例（测试 / 不关心指标的装配用）：没有子注册表的 {@link CompositeMeterRegistry} 上计量器都是空操作。 */
@@ -397,6 +418,58 @@ public final class GateMetrics {
     }
 
     // ================================================================ 状态量（启动装配时绑定一次）
+
+    /** 绑定连接准入指标（同名对齐主仓 gate-connection-alerts.yaml）。 */
+    public void bindAdmission(ConnectionAdmissionController<?> admission) {
+        if (admission == null) {
+            return;
+        }
+        var p = admission.policy();
+        Gauge.builder("gate.connections.current", admission, ConnectionAdmissionController::totalConnections)
+                .description("gate 当前总连接数（已验签会话 + 未验签连接）").register(registry);
+        Gauge.builder("gate.connections.max", p, x -> x.maxConnections())
+                .description("gate 连接数上限").register(registry);
+        Gauge.builder("gate.unauthenticated.connections", admission, ConnectionAdmissionController::preAuthCount)
+                .description("gate 未验签连接池大小").register(registry);
+        FunctionCounter.builder("gate.accepted", admission, ConnectionAdmissionController::acceptedTotal)
+                .description("gate 准入放行的累计连接数").register(registry);
+        Gauge.builder("gate.accept.rate.limit.per.second", p, x -> x.acceptRatePerSecond())
+                .description("gate 全局新建连接持续速率上限").register(registry);
+        Gauge.builder("gate.accept.burst", p, x -> x.acceptBurst())
+                .description("gate 全局新建连接桶深").register(registry);
+        FunctionCounter.builder("gate.preauth.reaped", admission, ConnectionAdmissionController::preAuthReapedTotal)
+                .description("gate 未验签握手超时收割累计连接数").register(registry);
+        FunctionCounter.builder("gate.preauth.evicted", admission, ConnectionAdmissionController::preAuthEvictedTotal)
+                .description("gate 承压期按建连先后淘汰的未验签连接累计值").register(registry);
+        Gauge.builder("gate.preauth.budget", p, x -> x.preAuthBudget())
+                .description("gate 未验签连接池预算上限").register(registry);
+        Gauge.builder("gate.preauth.early.drop.start", p, x -> x.preAuthEarlyDropStart())
+                .description("gate 未验签连接池早拒起点").register(registry);
+        Gauge.builder("gate.preauth.evictable.age.ms", p, x -> x.preAuthEvictableAgeMs())
+                .description("gate 未验签连接可淘汰最短建连年龄（毫秒）").register(registry);
+        Gauge.builder("gate.source.rate.limit.per.second", p, x -> x.sourceRatePerSecond())
+                .description("gate 公网来源前缀限速持续速率").register(registry);
+        Gauge.builder("gate.source.burst", p, x -> x.sourceBurst())
+                .description("gate 公网来源前缀限速桶深").register(registry);
+        Gauge.builder("gate.source.rate.active", admission, a -> a.isSourceRateActive() ? 1.0 : 0.0)
+                .description("gate 公网来源前缀限速是否处于承压激活态（0/1）").register(registry);
+        Gauge.builder("gate.source.tracked", admission, a -> a.sourceRateLimiter().trackedPrefixes())
+                .description("gate 当前追踪的公网来源前缀数").register(registry);
+        FunctionCounter.builder("gate.source.untracked", admission, a -> a.sourceRateLimiter().untrackedTotal())
+                .description("gate 来源前缀表满 fail-open 放行的累计连接数").register(registry);
+    }
+
+    public void admissionRejected(ConnectionAdmissionController.RejectReason reason) {
+        if (reason != null) {
+            admissionRejects.get(reason).increment();
+        }
+    }
+
+    public void recordHandshakeDurationMs(double durationMs) {
+        if (durationMs >= 0 && !Double.isNaN(durationMs)) {
+            handshakeDurationMs.record(durationMs);
+        }
+    }
 
     /** 在线会话数（{@code game.gate.sessions.active}）。{@code sessions} 在抓取线程上调用，必须线程安全、不阻塞。 */
     public void bindSessionCount(IntSupplier sessions) {

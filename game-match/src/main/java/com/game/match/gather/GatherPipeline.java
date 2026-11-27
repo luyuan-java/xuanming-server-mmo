@@ -428,9 +428,12 @@ public final class GatherPipeline {
                                 : tc)
                         .ifPresent(create::setTrialContext);
             }
-            // 观战可见性与战报录制标记在建房时决定一次、随建房原件冻结；落点记录抄同一份可见性
+            // 观战可见性、局外人观战交流与战报录制标记在建房时决定一次、随建房原件冻结；落点记录抄同一份冻结值
             create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext(),
                     create.hasCustomDuelRules() ? create.getCustomDuelRules() : null, rankedContext));
+            create.setSpectateChatEnabled(com.game.match.spectate.SpectateChatPolicy.decide(
+                    mode, create.getSpectateVisibility(), create.getPlayersList(),
+                    com.game.match.spectate.SpectateChatPolicy.Config.DEFAULT));
             create.setRecordReplay(com.game.match.report.BattleReplayPolicy.decideForBattle(
                     mode,
                     create.hasTrialContext() ? create.getTrialContext() : null,
@@ -439,7 +442,9 @@ public final class GatherPipeline {
                 create.addAllTeamScripts(scriptResolver.resolveForBattle(battleId, mode.getNumber(), plan.battleConfigId(), create.getPlayersList()));
             }
             CreateBattleRequest createRequest = create.build();
-            record.setSpectateVisibility(createRequest.getSpectateVisibilityValue());
+            record.setSpectateVisibility(createRequest.getSpectateVisibilityValue())
+                    .setSpectateChatEnabled(createRequest.getSpectateChatEnabled());
+            createRequest.getPlayersList().forEach(s -> record.addPlayerIds(s.getPlayerId()));
             if (rankedContext != null && !rankedContext.getUseFreePreset() && rankedContext.getSeasonId() != 0) {
                 record.setRankedTeamSize(rankedContext.getTeamSize())
                         .setRankedPeakRatingCenti(rankedContext.getPeakRatingCenti());

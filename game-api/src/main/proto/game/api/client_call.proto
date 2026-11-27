@@ -31,6 +31,8 @@ message SessionContext {
   uint32 ticket_target_zone_id = 9;
   // 登录提交确认的账号归属修订；随原会话原样传播，不随场景 epoch 变化或借当前SQL补填。
   uint64 owner_revision = 10;
+  // 票据绑定的账号摘要（16 字节，来自 GateTokenPayload.account_digest = 7）；gate 验签后原样透传，login 在认证出账号后核对。
+  bytes ticket_account_digest = 11;
 }
 
 message ClientCall {

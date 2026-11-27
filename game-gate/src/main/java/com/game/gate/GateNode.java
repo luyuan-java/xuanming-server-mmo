@@ -123,6 +123,9 @@ public final class GateNode {
     private volatile NodeIdLease lease;
     /** 租约丢失回调在调度线程上读它，所以 volatile。 */
     private volatile SessionRegistry registry;
+    /** 连接准入总控与未验签连接池（P1 / P0-2 / P2-2 / P2-4）。 */
+    private volatile com.game.common.net.ConnectionAdmissionController<Channel> admission;
+    private volatile ScheduledFuture<?> admissionBeatTask;
     private SceneLinkManager links;
     private SupersessionSweep supersessionSweep;
     private EventLoopGroup bossGroup;
@@ -258,9 +261,27 @@ public final class GateNode {
         bossGroup = com.game.net.client.NettyServerTransports.newEventLoopGroup(1, "gate-accept", useEpoll);
         workerGroup = com.game.net.client.NettyServerTransports.newEventLoopGroup(properties.workerThreads(), "gate-io", useEpoll);
         SessionRegistry sessions = registry;
-        com.game.common.net.SourcePrefixRateLimiter sourceRateLimiter =
-                new com.game.common.net.SourcePrefixRateLimiter(20.0, 200.0);
-        int maxConnections = properties.maxConnections();
+        var admissionPolicy = com.game.common.net.ConnectionAdmissionPolicy.fromEnv(
+                "GATE_", properties.maxConnections(), properties.handshakeTimeout().toMillis());
+        var admissionController = new com.game.common.net.ConnectionAdmissionController<Channel>(
+                admissionPolicy, sessions::size);
+        this.admission = admissionController;
+        metrics.bindAdmission(admissionController);
+        admissionController.stallDetector().recordBeat(System.nanoTime());
+        admissionBeatTask = workerGroup.next().scheduleAtFixedRate(() -> {
+            admissionController.stallDetector().recordBeat(System.nanoTime());
+            admissionController.sweepExpired(e -> {
+                Channel ch = e.attachment();
+                if (ch != null && ch.isOpen()) {
+                    ch.eventLoop().execute(() -> {
+                        metrics.handshake(GateMetrics.HandshakeResult.TIMEOUT);
+                        metrics.disconnected(GateMetrics.DisconnectReason.HANDSHAKE_TIMEOUT);
+                        metrics.heartbeat(GateMetrics.HeartbeatResult.HANDSHAKE_TIMEOUTS);
+                        ch.close();
+                    });
+                }
+            });
+        }, 1, 1, TimeUnit.SECONDS);
         ServerBootstrap bootstrap = com.game.net.client.NettyServerTransports.configureServer(
                 new ServerBootstrap().group(bossGroup, workerGroup),
                 useEpoll, com.game.net.client.NettyServerTransports.DEFAULT_TCP_DEFER_ACCEPT_SECONDS);
@@ -271,7 +292,7 @@ public final class GateNode {
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
-                        ClientPipeline.install(ch.pipeline(), sessions, dispatcher, maxConnections, sourceRateLimiter);
+                        ClientPipeline.install(ch.pipeline(), sessions, dispatcher, admissionController, false, true);
                     }
                 })
                 .bind(properties.clientPort())
@@ -386,6 +407,14 @@ public final class GateNode {
 
     private void stopAccepting(boolean removeDirectoryEntry) {
         acceptingStopped = true;
+        var adm = admission;
+        if (adm != null) {
+            adm.setShuttingDown(true);
+        }
+        ScheduledFuture<?> beat = admissionBeatTask;
+        if (beat != null) {
+            beat.cancel(false);
+        }
         ScheduledFuture<?> task = publishTask;
         if (task != null) {
             task.cancel(false);
@@ -393,6 +422,14 @@ public final class GateNode {
         Channel server = serverChannel;
         if (server != null) {
             server.close().syncUninterruptibly();
+        }
+        if (adm != null) {
+            adm.closeAllPreAuth(e -> {
+                Channel ch = e.attachment();
+                if (ch != null && ch.isOpen()) {
+                    ch.eventLoop().execute(ch::close);
+                }
+            });
         }
         synchronized (directoryIoLock) {
             if (removeDirectoryEntry && lease != null && !lease.isLost()) {

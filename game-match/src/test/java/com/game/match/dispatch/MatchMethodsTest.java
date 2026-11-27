@@ -68,7 +68,8 @@ class MatchMethodsTest {
                 MatchMethods.LIST_TACTICAL_PUZZLES, MatchMethods.GET_TACTICAL_PUZZLE,
                 MatchMethods.SAVE_TACTICAL_PUZZLE_DRAFT, MatchMethods.DELETE_TACTICAL_PUZZLE,
                 MatchMethods.START_TACTICAL_PUZZLE_BATTLE, MatchMethods.LIKE_TACTICAL_PUZZLE,
-                MatchMethods.GET_TACTICAL_PUZZLE_SOLUTION_REPLAY)) {
+                MatchMethods.GET_TACTICAL_PUZZLE_SOLUTION_REPLAY,
+                MatchMethods.SEND_BATTLE_SPECTATE_CHAT, MatchMethods.PULL_BATTLE_SPECTATE_CHAT)) {
             expected.put(tournamentMethod, REGISTRY.requireId(MatchMethods.SERVICE, tournamentMethod));
         }
 

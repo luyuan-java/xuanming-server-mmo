@@ -247,14 +247,15 @@ public final class GlobalWatchAuthority {
             var p=BattlePlacement.newBuilder().setBattleId(f.getBattleId()).setMode(f.getMode()).setBattleConfigId(f.getConfigId()).setCreatedAtMs(f.getCreatedMs())
                 .setDeadlineMs(f.getDeadlineMs()).setBattleNodeId(f.getNodeId()).setBattleInstanceId(f.getInstanceId()).setRpcHost(f.getHost()).setRpcPort(f.getPort()).setAttempt(1);
             var create=com.game.proto.CreateBattleRequest.parseFrom(f.getCreateRequest());
-            create.getPlayersList().forEach(v->p.addPlayerNames(v.getPlayerName()));
+            create.getPlayersList().forEach(v->{p.addPlayerNames(v.getPlayerName());p.addPlayerIds(v.getPlayerId());});
             if (create.hasRankedContext() && !create.getRankedContext().getUseFreePreset()
                     && create.getRankedContext().getSeasonId() != 0) {
                 p.setRankedTeamSize(create.getRankedContext().getTeamSize())
                         .setRankedPeakRatingCenti(create.getRankedContext().getPeakRatingCenti());
             }
-            // 带上建房原件里冻结的可见性：163 按 id 观战与 164 列表据此拒私密局
-            return p.setSpectateVisibility(create.getSpectateVisibilityValue()).build();
+            // 带上建房原件里冻结的可见性与观战交流开关：163 按 id 观战与 164 列表据此拒私密局并展示交流标识
+            return p.setSpectateVisibility(create.getSpectateVisibilityValue())
+                    .setSpectateChatEnabled(create.getSpectateChatEnabled()).build();
         }catch(com.google.protobuf.InvalidProtocolBufferException bad){throw new SQLException("SQL固定建房原件损坏",bad);}
     }
     public SpectateStore.Listed list(int limit,Deadline deadline) {

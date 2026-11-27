@@ -671,4 +671,67 @@ public class MatchFeatureConfiguration {
     public MatchMethodHandler getTacticalPuzzleSolutionReplayHandler(com.game.match.puzzle.TacticalPuzzleService service) {
         return service.clientHandlers().get(6);
     }
+
+    @Bean
+    public com.game.match.spectate.SpectateChatHub spectateChatHub(
+            ObjectProvider<org.redisson.api.RedissonClient> redisProvider,
+            ObjectProvider<com.game.discovery.RedisKeys> redisKeysProvider) {
+        org.redisson.api.RedissonClient redis = redisProvider.getIfAvailable();
+        com.game.discovery.RedisKeys keys = redisKeysProvider.getIfAvailable();
+        if (redis != null && keys != null) {
+            return new com.game.match.spectate.SpectateChatHub(
+                    com.game.match.spectate.SpectateChatHub.Config.DEFAULT, redis, keys);
+        }
+        return new com.game.match.spectate.SpectateChatHub(
+                com.game.match.spectate.SpectateChatHub.Config.DEFAULT);
+    }
+
+    @Bean
+    public com.game.match.spectate.SpectateChatService spectateChatService(
+            com.game.match.placement.PlacementStore placements,
+            com.game.match.spectate.SpectateChatHub hub,
+            ObjectProvider<TournamentService.TextGuard> tournamentTextGuard,
+            ObjectProvider<DataSource> dataSourceProvider,
+            ObjectProvider<com.game.common.RunMode> runModeProvider) {
+        TournamentService.TextGuard guard = tournamentTextGuard.getIfAvailable();
+        com.game.common.RunMode runMode = runModeProvider.getIfAvailable(() -> com.game.common.RunMode.PROD);
+        com.game.match.spectate.SpectateChatService.TextGuard chatGuard;
+        if (guard != null) {
+            chatGuard = guard::check;
+        } else if (runMode == com.game.common.RunMode.PROD) {
+            log.warn("[spectate-chat] prod 模式下未启用 game.match.content-guard-enabled，观战交流 UGC 审核将 fail-closed 拒收");
+            chatGuard = (scene, playerId, text) -> {
+                throw new IllegalStateException("content guard disabled in prod");
+            };
+        } else {
+            chatGuard = null;
+        }
+        DataSource source = dataSourceProvider.getIfAvailable();
+        java.util.function.BiFunction<Long, Deadline, String> publicNames;
+        if (source != null) {
+            com.game.common.player.PlayerProfiles.ConnectionSource connections =
+                    source instanceof com.alibaba.druid.pool.DruidDataSource pool
+                            ? pool::getConnection
+                            : wait -> source.getConnection();
+            var profiles = new com.game.common.player.PlayerProfiles(connections, 1);
+            publicNames = (playerId, deadline) -> {
+                var profile = profiles.load(List.of(playerId), deadline).get(playerId);
+                return profile == null ? "" : profile.name();
+            };
+        } else {
+            publicNames = (playerId, deadline) -> "";
+        }
+        return new com.game.match.spectate.SpectateChatService(
+                placements, hub, chatGuard, publicNames, System::currentTimeMillis);
+    }
+
+    @Bean
+    public MatchMethodHandler sendBattleSpectateChatHandler(com.game.match.spectate.SpectateChatService service) {
+        return service.clientHandlers().get(0);
+    }
+
+    @Bean
+    public MatchMethodHandler pullBattleSpectateChatHandler(com.game.match.spectate.SpectateChatService service) {
+        return service.clientHandlers().get(1);
+    }
 }

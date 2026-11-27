@@ -90,8 +90,11 @@ public final class MatchMethods {
     public static final String START_TACTICAL_PUZZLE_BATTLE = "StartTacticalPuzzleBattle";
     public static final String LIKE_TACTICAL_PUZZLE = "LikeTacticalPuzzle";
     public static final String GET_TACTICAL_PUZZLE_SOLUTION_REPLAY = "GetTacticalPuzzleSolutionReplay";
+    /** 局外人观战公开交流室（587..588）。 */
+    public static final String SEND_BATTLE_SPECTATE_CHAT = "SendBattleSpectateChat";
+    public static final String PULL_BATTLE_SPECTATE_CHAT = "PullBattleSpectateChat";
 
-    /** 全部 58 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
+    /** 全部 60 个客户端方法（顺序无意义）。契约里的 {@code MatchService} 多出或少了方法时，{@code MatchMethodsTest} 会失败。 */
     public static final List<String> ALL = List.of(JOIN_QUEUE, CANCEL_QUEUE, GET_QUEUE_STATUS, CHALLENGE_PLAYER, RESPOND_CHALLENGE,
             NOTIFY_CHALLENGE_INVITE, NOTIFY_CHALLENGE_RESULT, WATCH_BATTLE, LIST_WATCHABLE_BATTLES, REQUEST_BATTLE_TICKET,
             GET_NETWORK_PROBE_PLAN, COMMIT_NETWORK_PROBE,
@@ -108,7 +111,8 @@ public final class MatchMethods {
             LIST_JIANGHU_GRUDGES, DISMISS_JIANGHU_GRUDGE, NOTIFY_JIANGHU_DUEL_INVITE, NOTIFY_JIANGHU_DUEL_STATUS,
             CREATE_TRIAL_CHALLENGE_CARD, GET_TRIAL_CHALLENGE_CARD, GET_SHARED_TRIAL_REPLAY,
             LIST_TACTICAL_PUZZLES, GET_TACTICAL_PUZZLE, SAVE_TACTICAL_PUZZLE_DRAFT, DELETE_TACTICAL_PUZZLE,
-            START_TACTICAL_PUZZLE_BATTLE, LIKE_TACTICAL_PUZZLE, GET_TACTICAL_PUZZLE_SOLUTION_REPLAY);
+            START_TACTICAL_PUZZLE_BATTLE, LIKE_TACTICAL_PUZZLE, GET_TACTICAL_PUZZLE_SOLUTION_REPLAY,
+            SEND_BATTLE_SPECTATE_CHAT, PULL_BATTLE_SPECTATE_CHAT);
 
     private MatchMethods() {
     }

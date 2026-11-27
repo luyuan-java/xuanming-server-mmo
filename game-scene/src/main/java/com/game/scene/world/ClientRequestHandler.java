@@ -162,6 +162,45 @@ public final class ClientRequestHandler {
         // 组队跟随声明（TeamFollowC2S，单向无应答；冻结期拒改意图，战斗中允许挂/摘意图由队形统一处理）
         register(ids.teamFollow(), com.game.proto.TeamFollowC2S.class, FreezePolicy.REJECT, BattlePolicy.ALLOW,
                 (call, req) -> world.handleTeamFollow(call.player(), req.getFollow()));
+        // 589/590 局外人观战交流个人偏好：只读允许冻结/战斗中查询，写入拒交出冻结期、允许战斗中修改（下次进战斗生效）
+        register(ids.getSpectateChatSetting(), com.game.proto.GetSpectateChatSettingRequest.class,
+                FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, this::getSpectateChatSetting);
+        register(ids.setSpectateChatSetting(), com.game.proto.SetSpectateChatSettingRequest.class,
+                FreezePolicy.REJECT, BattlePolicy.ALLOW, this::setSpectateChatSetting);
+    }
+
+    private void getSpectateChatSetting(PlayerCall call, com.game.proto.GetSpectateChatSettingRequest ignored) {
+        int raw = call.player().spectateChatPref();
+        var pref = com.game.proto.eSpectateChatPreference.forNumber(raw);
+        if (pref == null) {
+            pref = com.game.proto.eSpectateChatPreference.SPECTATE_CHAT_PREF_UNSPECIFIED;
+        }
+        boolean effectiveAllow = pref != com.game.proto.eSpectateChatPreference.SPECTATE_CHAT_PREF_FORBID;
+        call.reply(com.game.proto.GetSpectateChatSettingResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setPreference(pref)
+                .setEffectiveAllow(effectiveAllow)
+                .build());
+    }
+
+    private void setSpectateChatSetting(PlayerCall call, com.game.proto.SetSpectateChatSettingRequest req) {
+        int raw = req.getPreferenceValue();
+        var pref = com.game.proto.eSpectateChatPreference.forNumber(raw);
+        if (pref == null) {
+            call.reply(com.game.proto.SetSpectateChatSettingResponse.newBuilder()
+                    .setErrorMessage(tip(CommonErrorTip.common_error.kInvalidParameter_VALUE))
+                    .build());
+            return;
+        }
+        ScenePlayer player = call.player();
+        player.setSpectateChatPref(pref.getNumber());
+        world.requestSave(player);
+        boolean effectiveAllow = pref != com.game.proto.eSpectateChatPreference.SPECTATE_CHAT_PREF_FORBID;
+        call.reply(com.game.proto.SetSpectateChatSettingResponse.newBuilder()
+                .setErrorMessage(tip(0))
+                .setPreference(pref)
+                .setEffectiveAllow(effectiveAllow)
+                .build());
     }
 
     @SuppressWarnings("unchecked")

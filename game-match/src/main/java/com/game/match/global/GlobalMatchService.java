@@ -800,12 +800,15 @@ public final class GlobalMatchService implements AutoCloseable {
                                 : tc)
                         .ifPresent(request::setTrialContext);
             }
-            // 观战可见性与战报录制标记建房时决定一次，随 formation 持久的 create_request 冻结
+            // 观战可见性、局外人观战交流与战报录制标记建房时决定一次，随 formation 持久的 create_request 冻结
             var mode = MatchMode.forNumber(f.getMode());
             request.setSpectateVisibility(com.game.match.spectate.SpectateVisibilityPolicy.decide(mode,
                     request.hasActivityContext() ? request.getActivityContext() : null,
                     request.hasCustomDuelRules() ? request.getCustomDuelRules() : null,
                     rankedContext));
+            request.setSpectateChatEnabled(com.game.match.spectate.SpectateChatPolicy.decide(
+                    mode, request.getSpectateVisibility(), snapshots,
+                    com.game.match.spectate.SpectateChatPolicy.Config.DEFAULT));
             request.setRecordReplay(com.game.match.report.BattleReplayPolicy.decideForBattle(
                     mode,
                     request.hasTrialContext() ? request.getTrialContext() : null,
@@ -893,9 +896,10 @@ public final class GlobalMatchService implements AutoCloseable {
     private void project(GlobalFormationRow f,CreateBattleRequest request) {
         var p=BattlePlacement.newBuilder().setBattleId(f.getBattleId()).setMode(f.getMode()).setBattleConfigId(f.getConfigId()).setCreatedAtMs(f.getCreatedMs())
                 .setDeadlineMs(f.getDeadlineMs()).setBattleNodeId(f.getNodeId()).setBattleInstanceId(f.getInstanceId()).setRpcHost(f.getHost()).setRpcPort(f.getPort()).setAttempt(1);
-        request.getPlayersList().forEach(s->p.addPlayerNames(s.getPlayerName()));
-        // 投影抄建房原件里冻结的可见性：开局钩子据此只公开公开局（私密局的投影照写，补签靠它定位）
-        p.setSpectateVisibility(request.getSpectateVisibilityValue());
+        request.getPlayersList().forEach(s->{p.addPlayerNames(s.getPlayerName());p.addPlayerIds(s.getPlayerId());});
+        // 投影抄建房原件里冻结的可见性与观战交流开关：开局钩子据此只公开公开局（私密局的投影照写，补签靠它定位）
+        p.setSpectateVisibility(request.getSpectateVisibilityValue())
+                .setSpectateChatEnabled(request.getSpectateChatEnabled());
         projections.write(p.build());try{hooks.onStarted(p.build());}catch(RuntimeException e){log.warn("观战展示投影稍后恢复",e);}
     }
     public RequestBattleTicketResponse reissue(long player,long battle) {

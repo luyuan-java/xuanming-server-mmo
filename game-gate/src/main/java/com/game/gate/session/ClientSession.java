@@ -30,11 +30,17 @@ public final class ClientSession {
     private final int sessionId;
     private final Channel channel;
     private final String clientIp;
+    /** 建连时分配的单调代次（P2-4：验签建会话时原样继承未验签记录的代次）。 */
+    private final long connectionGeneration;
+    /** 本会话占用的 gate 票据键（一张票同一时刻只允许一条连接；断线释放会话时归还）。 */
+    private final String ticketKey;
 
     // ---------------------------------------------------------------- 以下只在 channel.eventLoop() 上读写
 
     /** 已通过 gate 令牌校验。 */
     boolean verified;
+    /** 票据绑定的账号摘要（GateTokenPayload.account_digest = 7 -> SessionContext.ticket_account_digest = 11）。 */
+    com.google.protobuf.ByteString ticketAccountDigest = com.google.protobuf.ByteString.EMPTY;
     /**
      * 握手时出示的 gate 票据里的持票者（{@code GateTokenPayload.player_id}，批次 5.4）：重定向票据（226 传送、登录期重定向，
      * scene-manager 签）非 0，普通登录令牌为 0。验票通过时抄下一次、之后不再改（已验证的会话再次 verify 不覆盖），
@@ -146,14 +152,29 @@ public final class ClientSession {
     private ScheduledFuture<?> sessionRenewTask;
 
     ClientSession(int sessionId, Channel channel, String clientIp) {
+        this(sessionId, channel, clientIp, 0L, null);
+    }
+
+    ClientSession(int sessionId, Channel channel, String clientIp, long connectionGeneration, String ticketKey) {
         this.sessionId = sessionId;
         this.channel = channel;
         this.clientIp = clientIp;
+        this.connectionGeneration = connectionGeneration;
+        this.ticketKey = ticketKey;
     }
 
     /** uint32 会话号（按位存进 int；日志里用 {@link Integer#toUnsignedString}）。 */
     public int sessionId() {
         return sessionId;
+    }
+
+    /** 建连时分配的单调代次（验签前未验签记录与验签后会话共享同一代次）。 */
+    public long connectionGeneration() {
+        return connectionGeneration;
+    }
+
+    String ticketKey() {
+        return ticketKey;
     }
 
     public String clientIp() {

@@ -132,7 +132,12 @@ class MatchClientMessageServiceTest {
             MatchMethods.RESPOND_JIANGHU_DUEL_INVITE, MatchMethods.LIST_JIANGHU_GRUDGES,
             MatchMethods.DISMISS_JIANGHU_GRUDGE,
             MatchMethods.CREATE_TRIAL_CHALLENGE_CARD, MatchMethods.GET_TRIAL_CHALLENGE_CARD,
-            MatchMethods.GET_SHARED_TRIAL_REPLAY);
+            MatchMethods.GET_SHARED_TRIAL_REPLAY,
+            MatchMethods.LIST_TACTICAL_PUZZLES, MatchMethods.GET_TACTICAL_PUZZLE,
+            MatchMethods.SAVE_TACTICAL_PUZZLE_DRAFT, MatchMethods.DELETE_TACTICAL_PUZZLE,
+            MatchMethods.START_TACTICAL_PUZZLE_BATTLE, MatchMethods.LIKE_TACTICAL_PUZZLE,
+            MatchMethods.GET_TACTICAL_PUZZLE_SOLUTION_REPLAY,
+            MatchMethods.SEND_BATTLE_SPECTATE_CHAT, MatchMethods.PULL_BATTLE_SPECTATE_CHAT);
 
     private static final List<String> INLINE = List.of(
             MatchMethods.NOTIFY_CHALLENGE_INVITE, MatchMethods.NOTIFY_CHALLENGE_RESULT,

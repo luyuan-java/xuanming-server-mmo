@@ -544,7 +544,8 @@ public final class RankedPresetRules {
                 .setRouting(routing)
                 .setTeamIndex(0)
                 .setTableFingerprint(battleTables.fingerprint())
-                .setPetCaptureSlots(0);
+                .setPetCaptureSlots(0)
+                .setSpectateChatPrefValue(player.spectateChatPref());
         if (petSnapshot != null) {
             snap.addPets(petSnapshot);
         }

@@ -94,7 +94,8 @@ public final class BattleSnapshots {
                 .addAllPets(pets)
                 .setRouting(routing)
                 .setTeamIndex(0)
-                .setTableFingerprint(tables.fingerprint());
+                .setTableFingerprint(tables.fingerprint())
+                .setSpectateChatPrefValue(player.spectateChatPref());
         if (activeSeasonId != 0) {
             snapshot.setActiveSeasonId(activeSeasonId);
         }

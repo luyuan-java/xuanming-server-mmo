@@ -765,6 +765,27 @@ public final class RedisKeys {
         return prefix + "spectate:state:{" + Long.toUnsignedString(battleId) + "}";
     }
 
+    /** 局外人观战公开交流室五把同槽键（共享 hash tag {@code {<battle_id>}}，供 game-match 单槽原子 Lua 读写）。 */
+    public String matchSpectateChatSeq(long battleId) {
+        return prefix + "spectate:chat:{" + Long.toUnsignedString(battleId) + "}:seq";
+    }
+
+    public String matchSpectateChatMessages(long battleId) {
+        return prefix + "spectate:chat:{" + Long.toUnsignedString(battleId) + "}:msgs";
+    }
+
+    public String matchSpectateChatCooldown(long battleId) {
+        return prefix + "spectate:chat:{" + Long.toUnsignedString(battleId) + "}:cd";
+    }
+
+    public String matchSpectateChatRate(long battleId) {
+        return prefix + "spectate:chat:{" + Long.toUnsignedString(battleId) + "}:rate";
+    }
+
+    public String matchSpectateChatClosed(long battleId) {
+        return prefix + "spectate:chat:{" + Long.toUnsignedString(battleId) + "}:closed";
+    }
+
     private static String queueSuffix(int mode, int config) {
         if (mode < 0) {
             throw new IllegalArgumentException("匹配模式不能为负: " + mode);

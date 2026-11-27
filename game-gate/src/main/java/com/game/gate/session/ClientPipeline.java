@@ -44,8 +44,19 @@ public final class ClientPipeline {
 
     public static void install(ChannelPipeline pipeline, SessionRegistry registry, ClientDispatcher dispatcher,
                                int maxConnections, com.game.common.net.SourcePrefixRateLimiter sourceRateLimiter) {
+        installHandler(pipeline, dispatcher, new ClientChannelHandler(registry, dispatcher, maxConnections, sourceRateLimiter));
+    }
+
+    public static void install(ChannelPipeline pipeline, SessionRegistry registry, ClientDispatcher dispatcher,
+                               com.game.common.net.ConnectionAdmissionController<io.netty.channel.Channel> admission,
+                               boolean devSkipVerify, boolean externalSweepDriven) {
+        installHandler(pipeline, dispatcher,
+                new ClientChannelHandler(registry, dispatcher, admission, devSkipVerify, externalSweepDriven));
+    }
+
+    private static void installHandler(ChannelPipeline pipeline, ClientDispatcher dispatcher,
+                                       ClientChannelHandler handler) {
         GateMetrics metrics = dispatcher.metrics();
-        ClientChannelHandler handler = new ClientChannelHandler(registry, dispatcher, maxConnections, sourceRateLimiter);
         pipeline.addLast("wsMux", new com.game.net.client.WebSocketMuxHandler(
                 () -> handler.isVerified()
                         ? com.game.net.client.WebSocketMuxHandler.DEFAULT_MAX_PAYLOAD_BYTES
