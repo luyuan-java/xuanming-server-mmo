@@ -29,7 +29,11 @@ import org.springframework.web.server.ResponseStatusException;
 /** 管理库中的两阶段冻结命令账本与不可变审计日志；不持有游戏资产，绝不在数据库事务内执行网络调用。 */
 public final class GmCommandJournal {
 
+    private static final org.slf4j.Logger auditLog = org.slf4j.LoggerFactory.getLogger("game.audit.gm");
+
     public static final long PLAYER_DRAFT_TTL_MS = 300_000L;
+    /** 双人复核申请 24 小时有效期（对齐 admin-identity-and-dual-control.md）。 */
+    public static final long APPROVAL_EXPIRY_MS = 24L * 3600_000L;
     private static final int MAX_PAGE = 10_000;
     private static final int MAX_PAGE_SIZE = 100;
     private static final int CAMPAIGN_SAMPLE_LIMIT = 20;
@@ -37,16 +41,22 @@ public final class GmCommandJournal {
     private static final long CAMPAIGN_LEASE_MS = 120_000L;
     private static final List<String> FROZEN_MAIL_FIELDS = List.of(
             "requestId", "request_id", "expireMs", "expire_ms",
-            "auth", "recipient_player_id", "campaignId", "campaign_id",
+            "auth", "approval", "recipient_player_id", "campaignId", "campaign_id",
             "manifestGeneration", "manifest_generation");
-    private static final Set<String> MAIL_STATUSES = Set.of("DRAFT", "SENDING", "DELIVERED", "REJECTED", "UNKNOWN");
-    private static final Set<String> PLAYER_STATUSES = Set.of("DRAFT", "SENDING", "EXECUTED", "REJECTED", "UNKNOWN");
+    private static final Set<String> MAIL_STATUSES = Set.of("DRAFT", "APPROVED", "REJECTED_APPROVAL", "WITHDRAWN", "SENDING", "DELIVERED", "REJECTED", "UNKNOWN");
+    private static final Set<String> PLAYER_STATUSES = Set.of("DRAFT", "APPROVED", "REJECTED_APPROVAL", "WITHDRAWN", "SENDING", "EXECUTED", "REJECTED", "UNKNOWN");
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
     private final TransactionTemplate tx;
     private final Clock clock;
     private final LongSupplier ids;
+    private volatile boolean dualControlRequired;
+
+    public GmCommandJournal withDualControlRequired(boolean required) {
+        this.dualControlRequired = required;
+        return this;
+    }
 
     public GmCommandJournal(JdbcTemplate jdbc, ObjectMapper mapper, PlatformTransactionManager manager) {
         this(jdbc, mapper, manager, Clock.systemUTC(), new SecureRandom()::nextLong);
@@ -147,9 +157,10 @@ public final class GmCommandJournal {
             }
             try {
                 return tx.execute(status -> {
-                    jdbc.update("INSERT INTO gm_command (id,command_type,operator_name,client_request_id,player_id,reason,input_json,"
-                                    + "request_json,status,attempt,created_ms,updated_ms) VALUES (?,?,?,?,?,?,?,?,'DRAFT',0,?,?)",
-                            id, kind, bytes(operator), bytes(clientRequestId), playerId, reason,
+                    long expiresAt = Math.addExact(now, APPROVAL_EXPIRY_MS);
+                    jdbc.update("INSERT INTO gm_command (id,command_type,operator_name,expires_at_ms,client_request_id,player_id,reason,input_json,"
+                                    + "request_json,status,attempt,created_ms,updated_ms) VALUES (?,?,?,?,?,?,?,?,?,'DRAFT',0,?,?)",
+                            id, kind, bytes(operator), expiresAt, bytes(clientRequestId), playerId, reason,
                             original.toString(), request.toString(), now, now);
                     audit(id, operator, "DRAFT", 0, null, now);
                     return get(id);
@@ -217,7 +228,7 @@ public final class GmCommandJournal {
         pageArgs.add((long) (page - 1) * pageSize);
         ObjectNode result = mapper.createObjectNode();
         var records = result.putArray("records");
-        jdbc.query("SELECT id,command_type,operator_name,player_id,reason,request_json,status,result_json,created_ms,updated_ms FROM gm_command "
+        jdbc.query("SELECT id,command_type,operator_name,approver_name,approved_at_ms,expires_at_ms,player_id,reason,request_json,status,result_json,created_ms,updated_ms FROM gm_command "
                 + where + " ORDER BY created_ms DESC,id DESC LIMIT ? OFFSET ?", this::mapView, pageArgs.toArray()).forEach(records::add);
         Long total = jdbc.queryForObject("SELECT COUNT(*) FROM gm_command " + where, Long.class, filterArgs.toArray());
         result.put("total", total == null ? 0L : total);
@@ -247,6 +258,93 @@ public final class GmCommandJournal {
                     return entry;
                 }, id).forEach(records::add);
         return result;
+    }
+
+    /**
+     * 双人复核批准：第二个人批准 DRAFT 命令，Java 与 SQL UPDATE 条件各判一次「两人不同」，
+     * 仅首次批准记录批准人与批准时刻，24 小时过期申请拒绝批准；提交后同步打审计日志。
+     */
+    public ObjectNode approve(String id, String approver) {
+        check(id != null && id.matches("[1-9][0-9]{0,19}"), "命令 ID 非法");
+        check(approver != null && !approver.isBlank() && bytes(approver).length <= 512, "批准人非法");
+        ObjectNode view = tx.execute(status -> {
+            Row current = row(id, true);
+            String proposer = current.view.path("operator").asText();
+            if (proposer.equals(approver)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "双人复核禁止自批：批准人必须与发起人不同");
+            }
+            if (!"DRAFT".equals(current.view.path("status").asText())) {
+                throw conflict("仅 DRAFT 状态命令可批准");
+            }
+            long now = clock.millis();
+            if (current.expiresAtMs > 0L && now > current.expiresAtMs) {
+                throw conflict("申请已超过 24 小时有效期，请重新发起");
+            }
+            int changed = jdbc.update(
+                    "UPDATE gm_command SET status='APPROVED',approver_name=?,approved_at_ms=?,updated_ms=? "
+                            + "WHERE id=? AND status='DRAFT' AND operator_name<>? AND approver_name IS NULL",
+                    bytes(approver), now, now, id, bytes(approver));
+            if (changed != 1) {
+                throw conflict("命令已被批准、自批冲突或状态已变更");
+            }
+            audit(id, approver, "APPROVED", current.attempt, null, now);
+            return get(id);
+        });
+        auditLog.info("[GmDualControl] event=APPROVED command_id={} proposer={} approver={} approved_at_ms={}",
+                id, view.path("operator").asText(), approver, view.path("approvedAtMs").asLong());
+        return view;
+    }
+
+    /** 双人复核驳回 DRAFT 命令。 */
+    public ObjectNode reject(String id, String reviewer, String rejectReason) {
+        check(id != null && id.matches("[1-9][0-9]{0,19}"), "命令 ID 非法");
+        check(reviewer != null && !reviewer.isBlank() && bytes(reviewer).length <= 512, "驳回人非法");
+        check(rejectReason != null && !rejectReason.isBlank() && rejectReason.length() <= 500, "驳回原因不能为空");
+        ObjectNode view = tx.execute(status -> {
+            Row current = row(id, true);
+            if (!"DRAFT".equals(current.view.path("status").asText())) {
+                throw conflict("仅 DRAFT 状态命令可驳回");
+            }
+            long now = clock.millis();
+            ObjectNode detail = mapper.createObjectNode().put("rejectedBy", reviewer).put("reason", rejectReason);
+            int changed = jdbc.update(
+                    "UPDATE gm_command SET status='REJECTED_APPROVAL',result_json=?,updated_ms=? WHERE id=? AND status='DRAFT'",
+                    detail.toString(), now, id);
+            if (changed != 1) {
+                throw conflict("命令状态已变更，无法驳回");
+            }
+            audit(id, reviewer, "REJECTED_APPROVAL", current.attempt, detail, now);
+            return get(id);
+        });
+        auditLog.info("[GmDualControl] event=REJECTED_APPROVAL command_id={} reviewer={} reason={}",
+                id, reviewer, rejectReason);
+        return view;
+    }
+
+    /** 发起人撤回自己的 DRAFT 命令。 */
+    public ObjectNode withdraw(String id, String proposer) {
+        check(id != null && id.matches("[1-9][0-9]{0,19}"), "命令 ID 非法");
+        check(proposer != null && !proposer.isBlank(), "撤回人非法");
+        ObjectNode view = tx.execute(status -> {
+            Row current = row(id, true);
+            if (!proposer.equals(current.view.path("operator").asText())) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅发起人可撤回草稿");
+            }
+            if (!"DRAFT".equals(current.view.path("status").asText())) {
+                throw conflict("仅 DRAFT 状态命令可撤回");
+            }
+            long now = clock.millis();
+            int changed = jdbc.update(
+                    "UPDATE gm_command SET status='WITHDRAWN',updated_ms=? WHERE id=? AND status='DRAFT' AND operator_name=?",
+                    now, id, bytes(proposer));
+            if (changed != 1) {
+                throw conflict("命令状态已变更，无法撤回");
+            }
+            audit(id, proposer, "WITHDRAWN", current.attempt, null, now);
+            return get(id);
+        });
+        auditLog.info("[GmDualControl] event=WITHDRAWN command_id={} proposer={}", id, proposer);
+        return view;
     }
 
     public ObjectNode send(String id, String operator, Function<ObjectNode, ObjectNode> sender) {
@@ -281,32 +379,45 @@ public final class GmCommandJournal {
             if (!current.view.path("operator").asText().equals(operator)) {
                 throw new ResponseStatusException(HttpStatus.FORBIDDEN, "仅草稿创建者可发送");
             }
-            if (current.view.path("status").asText().equals(complete)) {
+            String st = current.view.path("status").asText();
+            if (st.equals(complete)) {
                 return current;
             }
+            if (dualControlRequired) {
+                if ("DRAFT".equals(st)) {
+                    throw new ResponseStatusException(HttpStatus.PRECONDITION_FAILED, "高风险命令需第二名管理员批准后方可执行");
+                }
+                if (current.approver == null || current.approver.isEmpty() || current.approver.equals(operator)
+                        || current.approvedAtMs <= 0L) {
+                    throw new ResponseStatusException(HttpStatus.PRECONDITION_FAILED, "双人复核批准记录缺失或无效");
+                }
+            }
             long now = clock.millis();
-            if (mailKind && current.view.path("status").asText().equals("DRAFT")) {
+            boolean initialReady = "DRAFT".equals(st) || "APPROVED".equals(st);
+            if (mailKind && initialReady) {
                 JsonNode mailNode = kind.equals("MAIL_CAMPAIGN") ? current.fullRequest.path("mail") : current.fullRequest;
                 long expireMs = parsePositiveLong(mailNode.path("expireMs").asText(""));
                 if (expireMs <= now) {
                     throw conflict("邮件草稿已过设定到期时间，请重新创建草稿");
                 }
             }
-            if (kind.equals("PLAYER") && current.view.path("status").asText().equals("DRAFT")) {
+            if (kind.equals("PLAYER") && initialReady) {
                 long issuedAtMs = parsePositiveLong(current.fullRequest.path("issuedAtMs").asText(""));
                 long age = now - issuedAtMs;
-                if (issuedAtMs <= 0 || age < 0 || age > PLAYER_DRAFT_TTL_MS) {
+                long ttlLimit = "APPROVED".equals(st) ? APPROVAL_EXPIRY_MS : PLAYER_DRAFT_TTL_MS;
+                if (issuedAtMs <= 0 || age < 0 || age > ttlLimit) {
                     throw conflict("草稿已过期，请重新创建并核对");
                 }
             }
             int changed;
+            String allowedInitial = dualControlRequired ? "'APPROVED'" : "'DRAFT','APPROVED'";
             if (mailKind) {
                 changed = jdbc.update("UPDATE gm_command SET status='SENDING',attempt=attempt+1,updated_ms=? "
-                                + "WHERE id=? AND attempt=? AND (status IN ('DRAFT','UNKNOWN') OR (status='SENDING' AND updated_ms<?))",
+                                + "WHERE id=? AND attempt=? AND (status IN (" + allowedInitial + ",'UNKNOWN') OR (status='SENDING' AND updated_ms<?))",
                         now, id, current.attempt, now - leaseMs);
             } else {
                 changed = jdbc.update("UPDATE gm_command SET status='SENDING',attempt=attempt+1,updated_ms=? "
-                        + "WHERE id=? AND attempt=? AND status='DRAFT'", now, id, current.attempt);
+                        + "WHERE id=? AND attempt=? AND status IN (" + allowedInitial + ")", now, id, current.attempt);
             }
             if (changed != 1) {
                 throw conflict("命令正在发送或已拒绝，请核对当前状态");
@@ -319,8 +430,16 @@ public final class GmCommandJournal {
         }
         ObjectNode outcome;
         String state;
+        ObjectNode payload = claimed.fullRequest.deepCopy();
+        if (claimed.approver != null && !claimed.approver.isEmpty() && claimed.approvedAtMs > 0L) {
+            payload.putObject("approval")
+                    .put("approvalId", id)
+                    .put("proposer", operator)
+                    .put("approver", claimed.approver)
+                    .put("approvedAtMs", claimed.approvedAtMs);
+        }
         try {
-            outcome = Objects.requireNonNull(sender.apply(claimed.fullRequest.deepCopy()));
+            outcome = Objects.requireNonNull(sender.apply(payload));
             state = complete;
         } catch (GmGamePort.CallFailure error) {
             outcome = mapper.createObjectNode().put("code", error.getCode()).put("tipId", error.getTipId())
@@ -416,7 +535,10 @@ public final class GmCommandJournal {
     private Row map(ResultSet rs, int index) throws SQLException {
         String commandType = rs.getString("command_type");
         ObjectNode fullRequest = parse(rs.getString("request_json"));
-        return new Row(buildView(rs, commandType, fullRequest), fullRequest, parse(rs.getString("input_json")), rs.getLong("attempt"));
+        byte[] approverBytes = rs.getBytes("approver_name");
+        String approver = approverBytes == null ? "" : new String(approverBytes, StandardCharsets.UTF_8);
+        return new Row(buildView(rs, commandType, fullRequest), fullRequest, parse(rs.getString("input_json")),
+                rs.getLong("attempt"), approver, rs.getLong("approved_at_ms"), rs.getLong("expires_at_ms"));
     }
 
     private ObjectNode buildView(ResultSet rs, String commandType, ObjectNode fullRequest) throws SQLException {
@@ -429,6 +551,15 @@ public final class GmCommandJournal {
                 .put("reason", rs.getString("reason"))
                 .put("createdAt", Instant.ofEpochMilli(rs.getLong("created_ms")).toString())
                 .put("updatedAt", Instant.ofEpochMilli(rs.getLong("updated_ms")).toString());
+        byte[] approverBytes = rs.getBytes("approver_name");
+        if (approverBytes != null && approverBytes.length > 0) {
+            view.put("approver", new String(approverBytes, StandardCharsets.UTF_8));
+            view.put("approvedAtMs", rs.getLong("approved_at_ms"));
+        }
+        long expiresAt = rs.getLong("expires_at_ms");
+        if (expiresAt > 0L) {
+            view.put("expiresAtMs", expiresAt);
+        }
         view.set("request", commandType.equals("MAIL_CAMPAIGN") ? compactCampaignRequest(fullRequest) : fullRequest.deepCopy());
         if (commandType.equals("PLAYER")) {
             view.put("operation", fullRequest.path("operation").asText());
@@ -496,6 +627,7 @@ public final class GmCommandJournal {
         return new ResponseStatusException(HttpStatus.CONFLICT, message);
     }
 
-    private record Row(ObjectNode view, ObjectNode fullRequest, ObjectNode original, long attempt) {
+    private record Row(ObjectNode view, ObjectNode fullRequest, ObjectNode original, long attempt,
+                       String approver, long approvedAtMs, long expiresAtMs) {
     }
 }

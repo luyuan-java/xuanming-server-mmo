@@ -20,6 +20,9 @@ public final class MailProvider implements MailAdminService, AutoCloseable {
     private final ServiceCallSignatures signatures;
     private final MailNotifications notifications;
     private final ThreadPoolExecutor admin;
+    private volatile boolean dualControlRequired = true;
+    private volatile io.micrometer.core.instrument.Counter unapprovedCounter;
+
     public MailProvider(MailStore store, ServiceCallSignatures signatures, MailNotifications notifications) {
         this.store = store;
         this.signatures = signatures;
@@ -27,10 +30,18 @@ public final class MailProvider implements MailAdminService, AutoCloseable {
         admin = new ThreadPoolExecutor(4, 4, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(256),
                 Thread.ofPlatform().name("mail-admin-", 0).daemon(true).factory(), new ThreadPoolExecutor.AbortPolicy());
     }
+
+    /** 配置管理发信（仅 caller="admin"）的双人复核开关与应急告警计数器（系统生产方 match/rank/guild 不受限制）。 */
+    public MailProvider withDualControl(boolean required, io.micrometer.core.instrument.MeterRegistry meters) {
+        this.dualControlRequired = required;
+        this.unapprovedCounter = com.game.discovery.serviceauth.AdminApprovals.unapprovedCounter(meters, "mail", "send_mail");
+        return this;
+    }
+
     static int error(Throwable failure) {
         if (failure instanceof MailStore.Reject reject)
             return reject.tip;
-        if (failure instanceof IllegalArgumentException)
+        if (failure instanceof IllegalArgumentException || failure instanceof SecurityException)
             return CommonErrorTip.common_error.kInvalidParameter_VALUE;
         return CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     }
@@ -62,6 +73,7 @@ public final class MailProvider implements MailAdminService, AutoCloseable {
     }
     public CompletableFuture<SendMailResponse> sendPersonalMail(SendMailRequest r) {
         return invoke(PERSONAL_METHOD, r, SendMailResponse.getDefaultInstance(), (c, d) -> {
+            checkAdminApproval(c, r, "send_personal");
             var response = store.send(c, 1, r, d);
             if (!response.getDuplicated())
                 notifications.personal(r.getRecipientPlayerId(), response.getMailId());
@@ -69,10 +81,25 @@ public final class MailProvider implements MailAdminService, AutoCloseable {
         });
     }
     public CompletableFuture<SendMailResponse> sendSystemMail(SendMailRequest r) {
-        return invoke(SYSTEM_METHOD, r, SendMailResponse.getDefaultInstance(), (c, d) -> store.send(c, 2, r, d));
+        return invoke(SYSTEM_METHOD, r, SendMailResponse.getDefaultInstance(), (c, d) -> {
+            checkAdminApproval(c, r, "send_system");
+            return store.send(c, 2, r, d);
+        });
     }
     public CompletableFuture<SendMailResponse> sendGuildMail(SendMailRequest r) {
-        return invoke(GUILD_METHOD, r, SendMailResponse.getDefaultInstance(), (c, d) -> store.send(c, 3, r, d));
+        return invoke(GUILD_METHOD, r, SendMailResponse.getDefaultInstance(), (c, d) -> {
+            checkAdminApproval(c, r, "send_guild");
+            return store.send(c, 3, r, d);
+        });
+    }
+
+    private void checkAdminApproval(String caller, SendMailRequest r, String action) {
+        // 仅对后台 admin 调用方强验双人复核（approval_id == request_id），系统生产方（rank/match/guild/trade）不受影响
+        if ("admin".equals(caller)) {
+            com.game.discovery.serviceauth.AdminApprovals.requireForRequestId(
+                    r.getApproval(), Long.toUnsignedString(r.getRequestId()),
+                    dualControlRequired, unapprovedCounter, "mail", action);
+        }
     }
     public CompletableFuture<ImportMailRecipientsResponse> importMailRecipients(ImportMailRecipientsRequest r) {
         return invoke(IMPORT_METHOD, r, ImportMailRecipientsResponse.getDefaultInstance(), (c, d) -> store.importRecipients(c, r, d));

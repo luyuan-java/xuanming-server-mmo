@@ -13,16 +13,27 @@ public final class RankProvider implements RankAdminService, AutoCloseable {
     private final RankStore store;
     private final ServiceCallSignatures signatures;
     private final ThreadPoolExecutor admin;
+    private volatile boolean dualControlRequired = true;
+    private volatile io.micrometer.core.instrument.Counter unapprovedCounter;
+
     public RankProvider(RankStore store, ServiceCallSignatures signatures) {
         this.store = store;
         this.signatures = signatures;
         admin = new ThreadPoolExecutor(4, 4, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(256),
                 Thread.ofPlatform().name("rank-admin-", 0).daemon(true).factory(), new ThreadPoolExecutor.AbortPolicy());
     }
+
+    /** 配置管理删榜（仅 caller="admin"）的双人复核开关与告警计数器（match 自动删榜不受限制）。 */
+    public RankProvider withDualControl(boolean required, io.micrometer.core.instrument.MeterRegistry meters) {
+        this.dualControlRequired = required;
+        this.unapprovedCounter = com.game.discovery.serviceauth.AdminApprovals.unapprovedCounter(meters, "rank", "remove_entry");
+        return this;
+    }
+
     static int error(Throwable failure) {
         if (failure instanceof RankStore.Reject reject)
             return reject.tip;
-        if (failure instanceof IllegalArgumentException)
+        if (failure instanceof IllegalArgumentException || failure instanceof SecurityException)
             return CommonErrorTip.common_error.kInvalidParameter_VALUE;
         return CommonErrorTip.common_error.kServiceUnavailable_VALUE;
     }
@@ -63,12 +74,22 @@ public final class RankProvider implements RankAdminService, AutoCloseable {
     }
     public CompletableFuture<RankAdminResponse> removeRankEntry(RemoveRankEntryRequest r) {
         return invoke(REMOVE_METHOD, r, RankAdminResponse.getDefaultInstance(), (c, d) -> {
+            if ("admin".equals(c) || r.hasApproval()) {
+                com.game.discovery.serviceauth.AdminApprovals.requireForRequestId(
+                        r.getApproval(), Long.toUnsignedString(r.getRequestId()),
+                        dualControlRequired || r.hasApproval(), unapprovedCounter, "rank", "remove_entry");
+            }
             store.remove(c, r, false, d);
             return RankAdminResponse.getDefaultInstance();
         });
     }
     public CompletableFuture<RankAdminResponse> deleteRankGeneration(RemoveRankEntryRequest r) {
         return invoke(DELETE_METHOD, r, RankAdminResponse.getDefaultInstance(), (c, d) -> {
+            if ("admin".equals(c) || r.hasApproval()) {
+                com.game.discovery.serviceauth.AdminApprovals.requireForRequestId(
+                        r.getApproval(), Long.toUnsignedString(r.getRequestId()),
+                        dualControlRequired || r.hasApproval(), unapprovedCounter, "rank", "delete_generation");
+            }
             store.remove(c, r, true, d);
             return RankAdminResponse.getDefaultInstance();
         });

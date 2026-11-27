@@ -43,11 +43,21 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
             KillSwitchAdminController.PATH, "killswitch",
             AuditProbeAdminController.PATH, "audit_consumer_probes");
 
+    public static final String MACHINE_OPERATOR = "table-bundle";
+
     private final byte[] token;
+    private final byte[] machineToken;
     private final DataMetrics metrics;
 
     public AdminAuthFilter(String token, DataMetrics metrics) {
+        this(token, null, metrics);
+    }
+
+    /** 可选配置独立机器口令（仅允许访问配置表发布路径且操作人固定为 table-bundle，对齐管理面安全口径）。 */
+    public AdminAuthFilter(String token, String machineToken, DataMetrics metrics) {
         this.token = token == null ? new byte[0] : token.getBytes(StandardCharsets.UTF_8);
+        this.machineToken = (machineToken == null || machineToken.isBlank())
+                ? new byte[0] : machineToken.strip().getBytes(StandardCharsets.UTF_8);
         this.metrics = metrics;
     }
 
@@ -55,14 +65,26 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         String path = normalizedPath(request);
-        String operator = operator(request.getHeader(OPERATOR_HEADER));
+        String presented = request.getHeader(TOKEN_HEADER);
+        boolean matchedMachine = machineToken.length > 0 && presented != null
+                && MessageDigest.isEqual(machineToken, presented.getBytes(StandardCharsets.UTF_8));
+        String operator = matchedMachine ? MACHINE_OPERATOR : operator(request.getHeader(OPERATOR_HEADER));
         // 处理中抛异常时 response.getStatus() 还是 200，按 500 记
         int status = HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
         try {
-            if (token.length == 0) {
+            if (token.length == 0 && machineToken.length == 0) {
                 status = HttpServletResponse.SC_SERVICE_UNAVAILABLE;
                 response.sendError(status, "运维令牌未配置（GAME_ADMIN_TOKEN）");
-            } else if (!matches(request.getHeader(TOKEN_HEADER))) {
+            } else if (matchedMachine) {
+                if (!under(path, "/admin/tables")) {
+                    status = HttpServletResponse.SC_FORBIDDEN;
+                    response.sendError(status, "机器口令仅允许访问配置表发布路径");
+                } else {
+                    request.setAttribute(AUTHENTICATED, new Authentication(MACHINE_OPERATOR));
+                    chain.doFilter(request, response);
+                    status = response.getStatus();
+                }
+            } else if (!matches(presented)) {
                 status = HttpServletResponse.SC_UNAUTHORIZED;
                 response.sendError(status);
             } else if (operator == null) {
@@ -172,7 +194,8 @@ public final class AdminAuthFilter extends OncePerRequestFilter {
     }
 
     private boolean matches(String presented) {
-        return presented != null && MessageDigest.isEqual(token, presented.getBytes(StandardCharsets.UTF_8));
+        return token.length > 0 && presented != null
+                && MessageDigest.isEqual(token, presented.getBytes(StandardCharsets.UTF_8));
     }
 
     /** 控制器二次核验过滤器留下的私有类型标记，不接受任何客户端头作为认证事实。 */

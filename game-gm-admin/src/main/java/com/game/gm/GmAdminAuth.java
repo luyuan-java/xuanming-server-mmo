@@ -20,11 +20,14 @@ public final class GmAdminAuth {
 
     public static final Set<String> ALL_PERMISSIONS = Set.of(
             "gm:zone:read", "gm:player:read",
-            "gm:mail:prepare", "gm:mail:send",
-            "gm:system-mail:prepare", "gm:system-mail:send",
+            "gm:mail:prepare", "gm:mail:approve", "gm:mail:send",
+            "gm:system-mail:prepare", "gm:system-mail:approve", "gm:system-mail:send",
             "gm:audit:read",
             "gm:currency:add", "gm:currency:deduct", "gm:currency:block", "gm:currency:unblock",
-            "gm:player:level", "gm:pet:grant", "gm:item:grant",
+            "gm:player:level", "gm:player:approve", "gm:pet:grant", "gm:item:grant",
+            "gm:trade:read", "gm:trade:prepare", "gm:trade:approve",
+            "gm:mall:read", "gm:mall:prepare", "gm:mall:approve",
+            "gm:rank:prepare", "gm:rank:approve",
             "gm:battle-script:review");
 
     private static final Pattern USERNAME_PATTERN = Pattern.compile("[A-Za-z0-9._@-]{1,64}");
@@ -48,9 +51,20 @@ public final class GmAdminAuth {
     }
 
     private final List<Entry> entries;
+    private final OidcJwtVerifier oidcVerifier;
+    private final boolean allowStaticTokens;
 
     public GmAdminAuth(Map<String, GmAdminProperties.OperatorEntry> operators) {
-        if (operators == null || operators.isEmpty()) {
+        this(operators, null, true);
+    }
+
+    /** 生产模式下强制只认 OIDC JWT（{@code allowStaticTokens=false}），禁止静态本地口令。 */
+    public GmAdminAuth(Map<String, GmAdminProperties.OperatorEntry> operators,
+                       OidcJwtVerifier oidcVerifier,
+                       boolean allowStaticTokens) {
+        this.oidcVerifier = oidcVerifier;
+        this.allowStaticTokens = allowStaticTokens;
+        if (!allowStaticTokens || operators == null || operators.isEmpty()) {
             this.entries = List.of();
             return;
         }
@@ -69,6 +83,13 @@ public final class GmAdminAuth {
         String token = extractToken(request);
         if (token == null || token.isBlank()) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "请先登录管理员账号");
+        }
+        // JWT 格式（三段 '.' 分隔）且配置了 OIDC 验签器时走外部 IdP OIDC 认证
+        if (oidcVerifier != null && token.chars().filter(c -> c == '.').count() == 2) {
+            return oidcVerifier.verify(token);
+        }
+        if (!allowStaticTokens) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "生产模式仅允许 OIDC 管理员令牌");
         }
         byte[] presented = token.getBytes(StandardCharsets.UTF_8);
         Principal matched = null;

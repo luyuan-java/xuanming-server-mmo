@@ -36,19 +36,32 @@ public class GmAdminConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public GmAdminAuth gmAdminAuth(GmAdminProperties properties) {
-        return new GmAdminAuth(properties.operators());
+    public GmAdminAuth gmAdminAuth(
+            GmAdminProperties properties,
+            ObjectProvider<OidcJwtVerifier> oidcVerifier,
+            @org.springframework.beans.factory.annotation.Value("${game.run-mode:prod}") String runModeRaw) {
+        com.game.common.RunMode mode = com.game.common.RunMode.parse(runModeRaw);
+        OidcJwtVerifier oidc = oidcVerifier.getIfAvailable();
+        // 生产模式禁用静态口令表，仅认外部 OIDC 身份提供方 JWT
+        boolean allowStatic = mode != com.game.common.RunMode.PROD;
+        return new GmAdminAuth(properties.operators(), oidc, allowStatic);
     }
 
     @Bean
     @ConditionalOnMissingBean
-    public GmCommandJournal gmCommandJournal(JdbcTemplate jdbc, ObjectMapper mapper,
-                                             PlatformTransactionManager txManager,
-                                             GmAdminProperties properties) {
+    public GmCommandJournal gmCommandJournal(
+            JdbcTemplate jdbc, ObjectMapper mapper,
+            PlatformTransactionManager txManager,
+            GmAdminProperties properties,
+            @org.springframework.beans.factory.annotation.Value("${game.run-mode:prod}") String runModeRaw,
+            @org.springframework.beans.factory.annotation.Value("${game.gm.allow-unapproved:false}") boolean allowUnapproved) {
+        com.game.common.RunMode mode = com.game.common.RunMode.parse(runModeRaw);
+        com.game.common.admin.DualControlValidator.assertProductionPolicy(mode, allowUnapproved);
         if (Boolean.TRUE.equals(properties.autoInitSchema())) {
             initSchema(jdbc);
         }
-        return new GmCommandJournal(jdbc, mapper, txManager);
+        boolean requireDualControl = mode == com.game.common.RunMode.PROD || !allowUnapproved;
+        return new GmCommandJournal(jdbc, mapper, txManager).withDualControlRequired(requireDualControl);
     }
 
     @Bean

@@ -524,6 +524,44 @@ public class GmController {
         throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
     }
 
+    @PostMapping("/commands/{id}/approve")
+    public String approveCommand(@PathVariable("id") String id, HttpServletRequest req) {
+        GmAdminAuth.Principal principal = auth.authenticate(req);
+        if (!principal.isPermittedAny(List.of("gm:mail:approve", "gm:system-mail:approve", "gm:player:approve",
+                "gm:trade:approve", "gm:mall:approve", "gm:rank:approve"))) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "没有双人复核批准权限");
+        }
+        return ok(journal.approve(id, principal.username()));
+    }
+
+    @PostMapping("/commands/{id}/reject")
+    public String rejectCommand(@PathVariable("id") String id, @RequestBody(required = false) String rawBody,
+                                HttpServletRequest req) {
+        GmAdminAuth.Principal principal = auth.authenticate(req);
+        if (!principal.isPermittedAny(List.of("gm:mail:approve", "gm:system-mail:approve", "gm:player:approve",
+                "gm:trade:approve", "gm:mall:approve", "gm:rank:approve"))) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "没有双人复核驳回权限");
+        }
+        String reason = "rejected";
+        if (rawBody != null && !rawBody.isBlank()) {
+            try {
+                JsonNode parsed = json.readTree(rawBody);
+                if (parsed.has("reason") && parsed.get("reason").isTextual()) {
+                    reason = parsed.get("reason").asText();
+                }
+            } catch (IOException e) {
+                bad("驳回请求 JSON 非法");
+            }
+        }
+        return ok(journal.reject(id, principal.username(), reason));
+    }
+
+    @PostMapping("/commands/{id}/withdraw")
+    public String withdrawCommand(@PathVariable("id") String id, HttpServletRequest req) {
+        GmAdminAuth.Principal principal = auth.authenticate(req);
+        return ok(journal.withdraw(id, principal.username()));
+    }
+
     private String ok(JsonNode result) {
         return json.createObjectNode().put("success", true).put("code", 200).put("message", "").set("result", result).toString();
     }

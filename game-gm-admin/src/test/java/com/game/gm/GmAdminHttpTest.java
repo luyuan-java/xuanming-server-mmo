@@ -107,7 +107,7 @@ class GmAdminHttpTest {
                 .andExpect(jsonPath("$.result.mailEnabled").value(true))
                 .andExpect(jsonPath("$.result.zonesAvailable").value(true))
                 .andExpect(jsonPath("$.result.zones[0].zoneId").value(1))
-                .andExpect(jsonPath("$.result.currencies.length()").value(3));
+                .andExpect(jsonPath("$.result.currencies.length()").value(4));
 
         // 拒绝 JSON 重复键与未知字段
         String dupJson = "{\"clientRequestId\":\"" + UUID.randomUUID() + "\",\"clientRequestId\":\"" + UUID.randomUUID() + "\"}";

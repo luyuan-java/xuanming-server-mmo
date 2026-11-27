@@ -1,0 +1,47 @@
+# game-gm-admin K8s 隔离与双人复核告警规则（对齐 admin-identity-and-dual-control.md §11.4）：
+# 1. 仅暴露 ClusterIP（禁止建 Ingress，运维经 kubectl port-forward + 回环 OIDC 回调打开）；
+# 2. 拒绝集群内其它一切 Pod 入站访问 game-gm-admin；
+# 3. 任何资源服务在非 dev 集群出现 game_admin_unapproved_accepted_total > 0 立即告警。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: game-gm-admin
+  labels:
+    app.kubernetes.io/name: game-gm-admin
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: game-gm-admin
+  ports:
+    - name: http
+      port: 18090
+      targetPort: 18090
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: game-gm-admin-deny-all-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: game-gm-admin
+  policyTypes: [Ingress]
+  ingress: []
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: game-admin-dual-control-alerts
+spec:
+  groups:
+    - name: game.admin.dual_control
+      rules:
+        - alert: AdminUnapprovedActionAccepted
+          expr: sum by (service, action) (increase(game_admin_unapproved_accepted_total[5m])) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "资源服务接受了不带 AdminApproval 的高风险管理动作"
+            description: "服务 {{ $labels.service }} 动作 {{ $labels.action }} 在应急模式下接受了无双人复核记录的管理调用，集群中该计数必须恒为 0。"

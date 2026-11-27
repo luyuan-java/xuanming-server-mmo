@@ -2840,40 +2840,23 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
   - `game-scene` / `game-match`：`PlayerBattleService`（`PrepareBattle`）将 `ScenePlayer.minorPlayDeadlineMs` 写入 `BattlePlayerSnapshot.minor_play_deadline_ms(33)`，`WatchBattleService` / `GlobalWatchService` / `LocalObserverOperation` 将在线目录截止时刻透传至 `AddObserverRequest.minor_play_deadline_ms(8)`。
   - `game-battle`：新增 `BattleMinorPlayDeadline` 纯判定规则，`BattleRoom` / `BattleRoomServiceImpl` 对参战者与 L0 观众首签/补签票据按提前 5 秒封顶、挂载房间一次性到点断直连定时器、单调置位 `ended` 抗墙钟回拨并拒绝后续重连握手；验证 `BattleMinorPlayDeadlineTest` 6/6 PASS、`game-battle`(44)、`game-gate`(121)、`game-match`(297)、`game-scene`(52) 全绿。
 
-### 2026-11-26 后台管理员身份(OIDC)与高风险动作双人复核(主仓批 1~6 与批 7 告警已落码未编译,Java 待做)
+### 2026-11-26 后台管理员身份(OIDC)与高风险动作双人复核（Java 已对齐）
 
-主仓设计 `docs/design/admin-identity-and-dual-control.md`。主仓的后台是 `java/gm_admin`(JeecgBoot);Java 全服务版用不同的内部管理协议,两边只共享客户端契约,这一条不涉及客户端。
+主仓设计 `docs/design/admin-identity-and-dual-control.md`。2026-11-27 已在 `game-common`、`game-discovery`、`game-gm-admin`、`game-mail`、`game-rank`、`game-data`、`game-trade`、`game-mall` 与 K8s 策略清单闭环对齐：
 
-- **主仓做法**:
-  1. 后台登录走外部身份提供方(OIDC 授权码 + PKCE),操作人标识就是身份提供方的主体,原样当用户名;角色每次登录按分组映射整体替换;会话 12 小时硬上限;生产模式关掉原生口令登录与全部原生账号/角色管理页。
-  2. 后台流水上的写命令要第二个人批准才执行:「两人不同」在 Java 与 UPDATE 条件里各判一次;批准人只记第一次;申请 24 小时过期;可驳回、可撤回;审计行提交后同步打日志。
-  3. 高风险请求带公共消息 `common.base.AdminApproval{approval_id, proposer, approver, approved_at_ms}`,由请求自带的 ServiceCallAuth 签名覆盖;资源服务用一个共享函数核对(四项都在、两人不同、发起人就是操作人),开关缺省开。
-  4. 第一个接入的是交易人工判定:EXECUTE 必带批准记录;批准号写进合同留痕,同一批准号的重放回原结果(排在版本比较之前、锁外锁内各认一次);命令行只做查看与试算。
-- **Java 待做**:
-  1. 盘点 Java 版的管理入口(管理接口、运维命令),列出改资产、动真钱、销毁账号或撤不回的动作。
-  2. 管理员身份接 OIDC,不在 Java 版自建口令库;双人复核放在一处(管理端流水),资源服务只做只读复查;批准号当资源服务的幂等键。
-  3. 交易人工判定与支付人工动作先接入,其余按主仓设计 §3 的甲级清单逐个接入。
-- **主仓批 4~7(11-26 晚补,设计稿 §11)**:
-  5. 甲级管理动作统一进后台流水的「运营处置」类别,一张目录管白名单、服务端填的字段、请求号字段与能否重试;权限按下游分 `gm:<target>:read / prepare / approve`。
-  6. 带请求号的下游(商城、邮件、榜单删除、回收批次、收件箱处罚)核「请求号就是批准号」,一次批准只执行一次,靠下游已有的判重;没有请求号的(账号类、回收撤批次与终结、收件箱作废、滞留阵容终结)核「发起人就是操作人」。
-  7. 商城人工单与 SKU 改价 / 调库存迁进后台,商城幂等表记发起人与批准人;网关的商城代理页删掉。
-  8. 邮件只对调用方 admin 要求批准记录,系统生产方(榜单奖励、战斗掉落、赛事)不要求;批准记录随邮件行落库。榜单删除只对调用方 admin 要求(match 自动删除不受影响);后台经批准可以删任意榜上的单个条目,整代隐藏仍只许开榜方。回收的「登记已人工处置」做完撤不回,也按甲级。
-  9. 重放会被下游判成「已是终态」的命令(收件箱强制作废、滞留阵容终结)不许沿用原申请重试,结果未知要人去下游核对。
-  10. 网关管理面:写操作必须带合规的操作人头,口令闸统一打 AUDIT 行;配置表发布用单独的机器口令,只能访问配置表路径、操作人固定为 table-bundle。
-  11. 每个资源服务的「不带批准记录被接受」计数都有告警,集群里应当恒为 0。
-- **Java 待做(补充)**:
-  4. Java 独立仓 game-mall 没有商城人工单处置(数据覆写审计 r2 第 4 轮核对过),要先补人工单,再按上面第 6、7 条接入;game-data 的商城管理面(X-Game-Admin-Token)改由管理端流水发起。
-  5. Java 版邮件的管理发信、账号类、回收、榜单删除按上面第 6、8、9 条接入;各服务加「不带批准记录被接受」计数与告警。
-  6. Java 版网关 / game-data 的管理面按第 10 条收口(写操作要个人操作人、统一留痕、机器调用单独口令)。
-- **主仓批 7 剩余(11-27 补,设计稿 §11.4;K8s 部分落码未运行,本机转发没做)**:
-  12. 后台上 K8s:infra namespace 一份、只在集群内(ClusterIP、不建 Ingress,经 port-forward 打开,回调地址用回环地址)、只走 OIDC;一个镜像两个容器(后端 + 前端 nginx);管理库与 Redis 的连接信息由运维预置 Secret,部署脚本只核键。后台自己有一份拒绝其它 Pod 入站的准入策略;后台调到的服务的准入名单加上后台。
-  13. 各管理入口的口令 / 密钥只给后台与资源服务本身,全部可空(没设 = 入口关闭);资源服务的配置只在真注入时写变量名;同一把在 infra-up 与 zone-up 之间保持同值。
-  14. staging / prod 部署在写之前拒绝把「不带批准记录也受理」的应急开关提交成 true。
-- **Java 待做(补充)**:
-  7. Java 版管理端上 K8s 时照第 12、13 条:只在集群内、只走 OIDC,管理口令只挂给管理端与资源服务本身,管理端自身拒绝集群内其它 Pod 入站。
-  8. Java 版各服务的应急开关(若有)同样在部署侧拒绝非 dev 档打开(第 14 条)。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+- **统一复核核验与非 dev 应急开关门禁**：
+  - `game-common/.../admin/DualControlValidator.java` 实现公共四项非空校验、`approval_id` 正 uint64 校验、`proposer != approver`、期望操作人/请求号绑定校验及 `assertProductionPolicy(RunMode, allowUnapproved)` 生产态 fail-closed 拒启门禁；
+  - `game-discovery/.../serviceauth/AdminApprovals.java` 提供 `common.base.AdminApproval` 请求核验入口（`requireForRequestId` / `requireForOperator`）及 Micrometer 告警计数器 `game.admin.unapproved.accepted{service, action}`。
+- **管理端 OIDC 与双人复核流水（`game-gm-admin`）**：
+  - 新增纯 JDK 21 `OidcJwtVerifier.java`（支持 RS256 / ES256 / EdDSA 与 JWKS 解析、`iss`/`aud`/`exp`/`nbf` 及 12 小时硬上限校验、按 `sub` 取用户名与 `groups`/`roles` 整体替换权限），`GmAdminAuth` 在 `RunMode.PROD` 强制关闭静态令牌并新增 `gm:*:approve` 权限；
+  - `gm-schema.sql` / `GmCommandJournal` / `GmController` 落地 `approve` / `reject` / `withdraw` 闭环（Java 层 + SQL `operator_name <> ? AND approver_name IS NULL` 双重校验不同人、批准人仅记首次、24 小时过期、提交后同步打 `[GmDualControl]` 审计日志、`send` 冻结载荷自动写入 `approval` 对象），`GmAdminConfiguration` 接通 `RunMode` 与生产门禁。
+- **资源服务与管理面收口**：
+  - `game-mail/.../MailProvider.java` 仅对调用方 `admin`（及显式携带 `approval` 时）强制核验 `AdminApproval` 且绑定 `approval_id == request_id`，系统调用方（`rank`/`match`/`guild`）不受限；
+  - `game-rank/.../RankProvider.java` 对 `removeRankEntry`/`deleteRankGeneration` 仅对调用方 `admin`（及显式携带 `approval` 时）强制核验 `AdminApproval` 且绑定 `approval_id == request_id`，`match` 自动删榜不受限（`RankStore.remove` 已支持 `admin` 删单条、整代隐藏仍限开榜方）；
+  - `game-trade/.../ManualContractAdminController.java` / `ManualContractService.java` 已具备 `EXECUTE` 双人复核与锁外/锁内 `approval_id` 幂等重放；`game-mall` 已具备 `/internal/admin/manual/{list,orders/resolve,refunds/resolve,consignments/resolve,incomes/dispute}` 与 HMAC admin 验签；
+  - `game-data/.../AdminAuthFilter.java` 新增独立机器口令（仅放行 `/admin/tables` 且固定操作人 `table-bundle`，非配置表路径返回 403，审计日志统一落 `game.audit.admin`）；
+  - `deploy/k8s/gm-admin-policy.yaml` 定义 `ClusterIP` 仅集群内暴露（零 Ingress）、默认拒绝集群内其它 Pod 入站的 `NetworkPolicy` 以及 Prometheus 告警 `AdminUnapprovedActionAccepted`。
+- **验证**：`game-common` `DualControlValidatorTest`（1/1）、`game-discovery` `AdminApprovalsTest`（1/1）、`game-gm-admin` 全模块（10/10，含 `GmOidcAndDualControlTest`）、`game-mail` `MailDualControlTest` + 回归（4/4）、`game-rank` `RankDualControlTest` + 回归（9/9）、`game-data` `AdminAuthFilterTest`（6/6），共 **31/31 PASS**。
 
 ### 2026-11-26 断线租约到期按会话代次认会话（Java 架构不适用，已核对）
 

@@ -129,4 +129,29 @@ class AdminAuthFilterTest {
         assertThat(AdminAuthFilter.printable("/admin/whitelist/1/a\nforged")).isEqualTo("/admin/whitelist/1/a?forged");
         assertThat(AdminAuthFilter.printable(null)).isNull();
     }
+
+    @Test
+    void 机器口令仅允许访问配置表发布路径且固定操作人为tableBundle() throws Exception {
+        AdminAuthFilter filter = new AdminAuthFilter("human-secret", "ci-machine-token", new DataMetrics(meters));
+
+        // 1. /admin/tables/publish 放行且忽略或覆盖操作人头为 table-bundle
+        MockHttpServletRequest okReq = new MockHttpServletRequest("POST", "/admin/tables/publish");
+        okReq.setServletPath("/admin/tables/publish");
+        okReq.addHeader(AdminAuthFilter.TOKEN_HEADER, "ci-machine-token");
+        MockHttpServletResponse okResp = new MockHttpServletResponse();
+        String[] seenOp = new String[1];
+        filter.doFilter(okReq, okResp, (req, res) -> seenOp[0] = AdminAuthFilter.authenticatedOperator(okReq));
+        assertThat(okResp.getStatus()).isEqualTo(HttpServletResponse.SC_OK);
+        assertThat(seenOp[0]).isEqualTo(AdminAuthFilter.MACHINE_OPERATOR);
+
+        // 2. 非 /admin/tables 路径一律 403
+        MockHttpServletRequest deniedReq = new MockHttpServletRequest("GET", PATH);
+        deniedReq.setServletPath(PATH);
+        deniedReq.addHeader(AdminAuthFilter.TOKEN_HEADER, "ci-machine-token");
+        MockHttpServletResponse deniedResp = new MockHttpServletResponse();
+        AtomicBoolean passed = new AtomicBoolean();
+        filter.doFilter(deniedReq, deniedResp, (req, res) -> passed.set(true));
+        assertThat(deniedResp.getStatus()).isEqualTo(HttpServletResponse.SC_FORBIDDEN);
+        assertThat(passed).isFalse();
+    }
 }
