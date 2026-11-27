@@ -47,6 +47,7 @@ public final class BattleCompletionReplay implements AutoCloseable {
     private static final long BACKLOG_SAMPLE_INTERVAL_SECONDS = 10L;
     private volatile com.game.common.workshard.WorkShard.Membership workShard;
     private volatile com.game.common.workshard.LoopLiveness liveness;
+    private volatile com.game.match.spectate.RankedSpectateIndex rankedSpectateIndex;
     private long deadlineCursor,deadlineUpper,resultCursor;
     private final PlayerScanCursor firstPlayers=new PlayerScanCursor(),waitingPlayers=new PlayerScanCursor();
     public BattleCompletionReplay(BattleCompletionStore store,GlobalMatchStore formations,PlayerInboxService inbox,Results results,
@@ -65,6 +66,11 @@ public final class BattleCompletionReplay implements AutoCloseable {
     /** 挂载后台循环活性探针与每轮 Throwable 兜底。 */
     public BattleCompletionReplay withLiveness(com.game.common.workshard.LoopLiveness liveness) {
         this.liveness = liveness;
+        return this;
+    }
+    /** 挂载 V7 16 桶高段排位观战索引：终局确认后即时摘除。 */
+    public BattleCompletionReplay withRankedSpectateIndex(com.game.match.spectate.RankedSpectateIndex index) {
+        this.rankedSpectateIndex = index;
         return this;
     }
     public void start(){
@@ -155,6 +161,10 @@ public final class BattleCompletionReplay implements AutoCloseable {
             acknowledgement.get(3250,TimeUnit.MILLISECONDS);
             outcome = TerminalDeliveryOutcome.STORE_ERROR;
             store.resultPublished(source);
+            var rankedIdx = this.rankedSpectateIndex;
+            if (rankedIdx != null) {
+                rankedIdx.remove(source.getBattleId());
+            }
             outcome = TerminalDeliveryOutcome.PUBLISHED;
         } finally {
             observeDelivery(TerminalDeliveryKind.RESULT, outcome);

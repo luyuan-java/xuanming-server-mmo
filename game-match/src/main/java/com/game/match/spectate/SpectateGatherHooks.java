@@ -43,6 +43,12 @@ public final class SpectateGatherHooks implements GatherHooks {
     private final MatchMetrics metrics;
     private final long perMemberBudgetMs;
     private final long smallOpBudgetMs;
+    private volatile RankedSpectateIndex rankedIndex;
+
+    public SpectateGatherHooks withRankedIndex(RankedSpectateIndex rankedIndex) {
+        this.rankedIndex = rankedIndex;
+        return this;
+    }
 
     public SpectateGatherHooks(SpectateStore store, ObserverDialer dialer, MatchMetrics metrics) {
         this(store, dialer, metrics, PER_MEMBER_BUDGET_MS, SMALL_OP_BUDGET_MS);
@@ -183,6 +189,10 @@ public final class SpectateGatherHooks implements GatherHooks {
             log.warn("[spectate] 没有登记进可观战索引：落点记录不在或已不是这一次的 attempt={}（这一场不进观战列表） battle_id={}",
                     Integer.toUnsignedString(placement.getAttempt()), battle);
             return;
+        }
+        var idx = this.rankedIndex;
+        if (idx != null && placement.getRankedPeakRatingCenti() > 0L) {
+            idx.record(placement.getBattleId(), placement.getCreatedAtMs());
         }
         log.info("[spectate] 战斗已登记可观战 battle_id={} node={} mode={} players={}", battle, Integer.toUnsignedString(placement.getBattleNodeId()),
                 Integer.toUnsignedString(placement.getMode()), placement.getPlayerNamesCount());

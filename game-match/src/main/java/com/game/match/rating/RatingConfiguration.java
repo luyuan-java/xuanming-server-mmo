@@ -112,9 +112,11 @@ public class RatingConfiguration {
             @org.springframework.beans.factory.annotation.Qualifier("matchBattleInboxClient")
             org.apache.dubbo.config.ReferenceConfig<com.game.api.PlayerInboxService> inbox, MatchMetrics metrics,
             ObjectProvider<com.game.discovery.workshard.RedisWorkShardMembership> workShard,
+            ObjectProvider<com.game.match.spectate.RankedSpectateIndex> rankedSpectateIndex,
             ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters) {
         var replay = new BattleCompletionReplay(source,formations,inbox.get(),publisher,
-                System.getenv(com.game.api.PlayerInboxService.BATTLE_SECRET_ENV),System::currentTimeMillis,metrics);
+                System.getenv(com.game.api.PlayerInboxService.BATTLE_SECRET_ENV),System::currentTimeMillis,metrics)
+                .withRankedSpectateIndex(rankedSpectateIndex.getIfAvailable());
         var shards = workShard.getIfAvailable();
         if (shards != null) {
             replay.withWorkShard(shards.membership());

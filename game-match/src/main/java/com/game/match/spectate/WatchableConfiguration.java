@@ -30,11 +30,27 @@ public class WatchableConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(WatchableConfiguration.class);
 
+    /** V7 擂台直播独立 16 桶高段排位索引（spectate:ranked:active:{srk:0..15}）；Redis 可用时装配。 */
+    @Bean
+    public RankedSpectateIndex rankedSpectateIndex(
+            org.springframework.beans.factory.ObjectProvider<org.redisson.api.RedissonClient> redis,
+            org.springframework.beans.factory.ObjectProvider<com.game.discovery.RedisKeys> keys) {
+        var client = redis.getIfAvailable();
+        if (client == null) {
+            return null;
+        }
+        var k = keys.getIfAvailable();
+        return new RedissonRankedSpectateIndex(client, k == null ? "" : k.prefix());
+    }
+
     /** 164 的流程。 */
     @Bean
     public WatchableListService watchableListService(SpectateStore spectateStore, MatchMetrics metrics,
-                                                     org.springframework.beans.factory.ObjectProvider<SpectateTierStore> tiers) {
-        return new WatchableListService(spectateStore, metrics).withFeatured(tiers.getIfAvailable());
+                                                     org.springframework.beans.factory.ObjectProvider<SpectateTierStore> tiers,
+                                                     org.springframework.beans.factory.ObjectProvider<RankedSpectateIndex> rankedIndex) {
+        return new WatchableListService(spectateStore, metrics)
+                .withFeatured(tiers.getIfAvailable())
+                .withRankedIndex(rankedIndex.getIfAvailable());
     }
 
     /** 164 的处理器。 */
@@ -54,5 +70,21 @@ public class WatchableConfiguration {
     public SweeperControl sweeperControl(SpectateStore spectateStore, MatchMetrics metrics, MatchProperties props) {
         log.info("观战清扫间隔={}（由 MatchLifecycle 在 Dubbo 导出之后启动）", props.spectate().sweepInterval());
         return new SpectateSweeper(spectateStore, metrics, props.spectate().sweepInterval());
+    }
+
+    /** 装配期把可选 16 桶高段排位直播索引挂接到开局钩子与清扫器，保持既有 Bean 签名兼容。 */
+    @Bean
+    public Object wireRankedSpectateIndex(GatherHooks gatherHooks, SweeperControl sweeperControl,
+                                          org.springframework.beans.factory.ObjectProvider<RankedSpectateIndex> rankedIndex) {
+        var idx = rankedIndex.getIfAvailable();
+        if (idx != null) {
+            if (gatherHooks instanceof SpectateGatherHooks hooks) {
+                hooks.withRankedIndex(idx);
+            }
+            if (sweeperControl instanceof SpectateSweeper sweeper) {
+                sweeper.withRankedIndex(idx);
+            }
+        }
+        return new Object();
     }
 }

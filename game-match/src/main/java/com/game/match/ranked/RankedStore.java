@@ -112,6 +112,12 @@ public final class RankedStore {
         }
     }
 
+    /** 在调用方已持有的 SQL 连接/事务内读取或初始化当前赛季，避免组队排位入队在事务内嵌套建连。 */
+    public MatchRankedSeasonRow ensureActiveSeasonInTx(Connection c) throws SQLException {
+        Objects.requireNonNull(c, "connection");
+        return ensureSeason(c);
+    }
+
     public ProfileData loadProfile(long playerId, boolean includeHistory) throws SQLException {
         try (Connection c = dataSource.getConnection()) {
             MatchRankedSeasonRow current = ensureSeason(c);

@@ -71,6 +71,8 @@ public final class WatchableListService {
     private final MatchMetrics metrics;
     /** 赛事局标记（{@link #withFeatured(SpectateTierStore)}）；null = 列表不带标记。 */
     private SpectateTierStore tiers;
+    /** V7 擂台直播独立 16 桶高段排位索引（防高频 PVE 稀释高段排位席位）。 */
+    private RankedSpectateIndex rankedIndex;
 
     public WatchableListService(SpectateStore store, MatchMetrics metrics) {
         this.store = Objects.requireNonNull(store, "store");
@@ -80,6 +82,12 @@ public final class WatchableListService {
     /** 接上赛事局标记（装配时调用一次；null = 不接）。 */
     public WatchableListService withFeatured(SpectateTierStore tiers) {
         this.tiers = tiers;
+        return this;
+    }
+
+    /** 接上 V7 16 桶高段排位直播索引（装配时调用一次；null = 不接）。 */
+    public WatchableListService withRankedIndex(RankedSpectateIndex rankedIndex) {
+        this.rankedIndex = rankedIndex;
         return this;
     }
 
@@ -107,12 +115,14 @@ public final class WatchableListService {
             return new Result.IndexUnavailable();
         }
 
-        // 第一遍：只看成员与分数就能定的两种（非法成员、过期），其余的留给批读。赛事局排最前，且不从这一页里挑：见 featuredBattles
+        // 第一遍：只看成员与分数就能定的两种（非法成员、过期），其余的留给批读。赛事局排最前，高段排位紧随其后（防 PVE 稀释），普通局兜底。
         Set<Long> featured = featuredBattles(limit, deadline);
         long nowMs = page.redisNowMs();
+        Set<Long> rankedActive = rankedActiveBattles(limit, nowMs, deadline);
         long cutoffMs = SpectateRules.staleCutoff(nowMs);
         List<Eviction> evictions = new ArrayList<>();
-        List<Long> candidates = new ArrayList<>(featured);
+        LinkedHashSet<Long> candidateSet = new LinkedHashSet<>(featured);
+        candidateSet.addAll(rankedActive);
         int invalid = 0;
         int stale = 0;
         for (Scored member : page.members()) {
@@ -124,16 +134,20 @@ public final class WatchableListService {
             } else if (SpectateRules.stale(member.score(), nowMs)) {
                 evictions.add(new Eviction.Stale(battleId.getAsLong(), cutoffMs));
                 stale++;
-            } else if (!featured.contains(battleId.getAsLong())) {
-                candidates.add(battleId.getAsLong());
+            } else {
+                candidateSet.add(battleId.getAsLong());
             }
         }
-        // 赛事局占了位置的，这一页最旧的几场留给下一页（批读与应答都不超过 limit）
+        List<Long> candidates = new ArrayList<>(candidateSet);
+        // 赛事局与高段排位优先占席位，超出 limit 的尾部普通局留给下一页（批读与应答都不超过 limit）
         List<Long> wanted = candidates.size() > limit ? candidates.subList(0, limit) : candidates;
 
-        // 第二遍：批读落点，按「赛事局、索引」的次序组摘要
+        // 第二遍：批读落点，按「赛事局 -> 高段排位（ranked_peak_rating_centi DESC） -> 普通局」排序输出摘要
         Map<Long, Record> records = readRecords(wanted, deadline);
         ListWatchableBattlesResponse.Builder response = ListWatchableBattlesResponse.newBuilder();
+        List<BattleWatchSummary> featuredOut = new ArrayList<>();
+        List<BattleWatchSummary> rankedOut = new ArrayList<>();
+        List<BattleWatchSummary> normalOut = new ArrayList<>();
         int missing = 0;
         int hidden = 0;
         if (records != null) {
@@ -141,13 +155,22 @@ public final class WatchableListService {
                 switch (records.get(battleId)) {
                     case Record.Found found when SpectateVisibilityPolicy.isPublic(found.placement()) -> {
                         BattleWatchSummary summary = SpectateRules.summaryOf(found.placement());
-                        response.addBattles(featured.contains(battleId) ? summary.toBuilder().setFeatured(true).build() : summary);
+                        if (featured.contains(battleId)) {
+                            featuredOut.add(summary.toBuilder().setFeatured(true).build());
+                        } else if (summary.getRankedPeakRatingCenti() > 0L) {
+                            rankedOut.add(summary);
+                        } else {
+                            normalOut.add(summary);
+                        }
                     }
                     case Record.Found found -> {
                         // 可见性闸：私密局不进列表。开局钩子不公开私密局，它在索引里就是残留——只摘成员、不删落点（179 补签靠它定位）
                         log.warn("[spectate] 可观战索引里有非公开局，列表跳过并只摘成员 battle_id={} visibility={}", Long.toUnsignedString(battleId),
                                 Integer.toUnsignedString(found.placement().getSpectateVisibility()));
                         evictions.add(new Eviction.Invalid(SpectateRules.member(battleId)));
+                        if (rankedActive.contains(battleId)) {
+                            unmarkRanked(battleId);
+                        }
                         hidden++;
                     }
                     case Record.Absent absent -> {
@@ -155,6 +178,9 @@ public final class WatchableListService {
                         missing++;
                         if (featured.contains(battleId)) {
                             unmarkFeatured(battleId, deadline);
+                        }
+                        if (rankedActive.contains(battleId)) {
+                            unmarkRanked(battleId);
                         }
                     }
                     case Record.Corrupt corrupt -> {
@@ -166,6 +192,11 @@ public final class WatchableListService {
                 }
             }
         }
+        rankedOut.sort(java.util.Comparator.comparingLong(BattleWatchSummary::getRankedPeakRatingCenti).reversed()
+                .thenComparing(java.util.Comparator.comparingLong(BattleWatchSummary::getCreatedAtMs).reversed()));
+        response.addAllBattles(featuredOut);
+        response.addAllBattles(rankedOut);
+        response.addAllBattles(normalOut);
         ListWatchableBattlesResponse built = response.build();
 
         // 应答已经组好：剔除发出即返回，不等结果
@@ -203,6 +234,27 @@ public final class WatchableListService {
             tiers.setFeatured(battleId, false, deadline);
         } catch (Deadline.DependencyException e) {
             log.warn("[spectate] 摘赛事局标记失败（随到期清理） battle_id={}: {}", Long.toUnsignedString(battleId), e.toString());
+        }
+    }
+
+    /** V7 16 桶高段排位活跃局（带 1 秒大厅缓存；失败降级为空集合，不阻断 164）。 */
+    private Set<Long> rankedActiveBattles(int limit, long nowMs, Deadline deadline) {
+        var idx = this.rankedIndex;
+        if (idx == null) {
+            return Set.of();
+        }
+        try {
+            return new LinkedHashSet<>(idx.activeBattles(limit, nowMs, deadline));
+        } catch (RuntimeException e) {
+            log.warn("[spectate] 读 16 桶高段排位观战索引失败，本页降级回普通索引: {}", e.toString());
+            return Set.of();
+        }
+    }
+
+    private void unmarkRanked(long battleId) {
+        var idx = this.rankedIndex;
+        if (idx != null) {
+            idx.remove(battleId);
         }
     }
 

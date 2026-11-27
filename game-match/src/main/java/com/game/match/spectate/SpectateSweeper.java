@@ -59,6 +59,12 @@ public final class SpectateSweeper implements SweeperControl {
     private final Object lifecycle = new Object();
     private ScheduledExecutorService executor;
     private volatile boolean stopRequested;
+    private volatile RankedSpectateIndex rankedIndex;
+
+    public SpectateSweeper withRankedIndex(RankedSpectateIndex rankedIndex) {
+        this.rankedIndex = rankedIndex;
+        return this;
+    }
 
     /**
      * @param interval 两轮之间的间隔（{@code game.match.spectate.sweep-interval}；≥ 1 ms）
@@ -155,6 +161,13 @@ public final class SpectateSweeper implements SweeperControl {
                 return;
             }
             log.warn("[spectate] 清扫可观战索引失败（下一轮再试；读路径自己按分数过滤，不受影响）: {}", e.toString());
+        }
+        if (stopRequested) {
+            return;
+        }
+        var idx = this.rankedIndex;
+        if (idx != null) {
+            idx.sweepExpired(SpectateRules.staleCutoff(System.currentTimeMillis()));
         }
         if (stopRequested) {
             return;

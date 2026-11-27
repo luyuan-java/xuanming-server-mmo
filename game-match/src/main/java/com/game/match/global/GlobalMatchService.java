@@ -639,11 +639,26 @@ public final class GlobalMatchService implements AutoCloseable {
                     ||!request.getTicketIdsMap().equals(tickets)||!request.getZonesMap().equals(original.getZonesMap()))throw new SecurityException("整队RPC与完整持久launch原件不同");
             var key=GlobalMatchStore.directUuidKey(1,request.getInitiatorPlayerId(),request.getRequestId()).toBuilder().setOwnerAccount(request.getOwnerAccount()).setOwnerRevision(request.getOwnerRevision()).build();
             var replay=store.teamReplay(key,request.getClientRequest(),request.getLaunchOriginal(),deadline);if(replay!=null)return replay;
-            long stamp=store.now();int mode=MatchMode.MATCH_MODE_PVE_TEAM_VALUE;
+            long stamp=store.now();
+            int requestedMode=original.getRequest().getMatchModeValue();
+            int mode=requestedMode==MatchModes.PVP_TEAM?MatchModes.PVP_TEAM:MatchMode.MATCH_MODE_PVE_TEAM_VALUE;
             int target=original.getRequest().getTargetTeamSize();
-            if(com.game.common.team.TeamPolicyContract.isDisallowedPvpPartySize(original.getRequest().getMatchModeValue(),roster.size(),target))
+            if(com.game.common.team.TeamPolicyContract.isDisallowedPvpPartySize(requestedMode,roster.size(),target))
                 throw new IllegalArgumentException("5v5 PVP 池不收 4 人队");
-            if(target>props.pveTeamSizeFor(request.getBattleConfigId())||target!=0&&target<roster.size())throw new IllegalArgumentException("整队目标人数超出副本范围");
+            if(mode==MatchModes.PVP_TEAM){
+                if(rankedTables!=null&&original.getRequest().getRankedRuleVersion()!=0
+                        &&original.getRequest().getRankedRuleVersion()!=rankedTables.ruleVersion()){
+                    throw new IllegalStateException("kMatchRankedRuleVersionMismatch:"
+                            +com.game.table.MatchErrorTip.match_error.kMatchRankedRuleVersionMismatch_VALUE);
+                }
+                int perSide=target==0?roster.size():target;
+                if(perSide<roster.size()||perSide>com.game.api.match.MatchBudgets.MAX_TEAM_SIZE
+                        ||(rankedTables!=null&&!rankedTables.isAllowedTeamSize(mode,request.getBattleConfigId(),perSide))){
+                    throw new IllegalArgumentException("组队排位目标每侧人数超出范围");
+                }
+            }else if(target>props.pveTeamSizeFor(request.getBattleConfigId())||target!=0&&target<roster.size()){
+                throw new IllegalArgumentException("整队目标人数超出副本范围");
+            }
             int vowMask=original.getRequest().getTrialVowMask();
             if(vowMask!=0){
                 boolean fullPartyDirect=target==0||target==roster.size();
@@ -927,6 +942,11 @@ public final class GlobalMatchService implements AutoCloseable {
         var p=BattlePlacement.newBuilder().setBattleId(f.getBattleId()).setMode(f.getMode()).setBattleConfigId(f.getConfigId()).setCreatedAtMs(f.getCreatedMs())
                 .setDeadlineMs(f.getDeadlineMs()).setBattleNodeId(f.getNodeId()).setBattleInstanceId(f.getInstanceId()).setRpcHost(f.getHost()).setRpcPort(f.getPort()).setAttempt(1);
         request.getPlayersList().forEach(s->{p.addPlayerNames(s.getPlayerName());p.addPlayerIds(s.getPlayerId());});
+        if (request.hasRankedContext() && !request.getRankedContext().getUseFreePreset()
+                && request.getRankedContext().getSeasonId() != 0) {
+            p.setRankedTeamSize(request.getRankedContext().getTeamSize())
+                    .setRankedPeakRatingCenti(request.getRankedContext().getPeakRatingCenti());
+        }
         // 投影抄建房原件里冻结的可见性与观战交流开关：开局钩子据此只公开公开局（私密局的投影照写，补签靠它定位）
         p.setSpectateVisibility(request.getSpectateVisibilityValue())
                 .setSpectateChatEnabled(request.getSpectateChatEnabled());

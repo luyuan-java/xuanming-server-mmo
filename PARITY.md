@@ -2845,19 +2845,19 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 
 **不适用**：`r2-mall#1` 的历史缺陷本身；`r2-craft#1/#3`（悬赏求书另见 2026-11-27 独立条目，`game-mail` 不物理删行）；`r2-ops#1/#2`、`r2-oa#1`、`r2-jh#3`、`snowflake LegacyPrefix`、`dbmove`（主仓复用工具）。
 
-### 2026-11-26 《论剑 / 人宠会武》V6/V7 生产级强一致性与水平扩展加固（主仓已落码，Java 待做 TODO）
+### 2026-11-26 《论剑 / 人宠会武》V6/V7 生产级强一致性与水平扩展加固（Java 已对齐）
 
-主仓参考：`docs/design/ranked-play-production-architecture.md`、`docs/planning/ranked-play-v6-v7-rivalry-builds-live-rematch.md`。本轮按负责人指令「Java 留到 TODO」，仅登记待对齐项，未修改 Java 代码。
+主仓参考：`docs/design/ranked-play-production-architecture.md`、`docs/planning/ranked-play-v6-v7-rivalry-builds-live-rematch.md`。2026-11-27 已在 `game-match` 全部 7 项闭环对齐：
 
-**Java 待做（`game-match`）**：
+1. **排位结算热门流派排序加锁与代表战报 `ref_count` 护航**：`RankedStore.applyFeaturedBuildDeltasTx` 内存按 `build_key` 预聚合后字典序升序落库（杜绝并发 AB-BA 死锁），仅战报存在时写 `featured_battle_id` 并按 `battle_id` 升序维护 `match_battle_report.ref_count`（新 `+1`、旧 `-1`），换季封榜 `releaseSeasonFeaturedReplaysTx` 统一释放旧季代表战报护航引用。
+2. **大厅 Top 5 热门流派 5 秒缓存与换季主动失效**：`RankedStore.readTopFeaturedBuildsCached`（`FEATURED_CACHE_TTL_MS = 5_000L`）按 `(seasonId, limit)` 缓存不可变快照，写流派与换季主动失效。
+3. **V7 擂台直播独立 16 桶 Redis Cluster 索引（防 PVE 稀释）**：新增 `RankedSpectateIndex` 与 `RedissonRankedSpectateIndex`（`spectate:ranked:active:{srk:0..15}`，score=`created_at_ms`，1 秒进程内大厅缓存，30 分钟安全 TTL），挂载至 `GlobalMatchService.project`、`SpectateGatherHooks`、`SpectateSweeper`、`BattleCompletionReplay` 与 `WatchableConfiguration`；`WatchableListService` 在赛事局之后优先合并高段排位席位并按 `ranked_peak_rating_centi DESC` 排序，防止高频 PVE 稀释。
+4. **V7 1V1「不服再战」服务端防伪与 10 分钟时效校验**：`ChallengeService` 拒绝带 `rematch_source_battle_id != 0` 的 `use_free_preset=true` 请求，并经 `RankedStore.validateRankedRematchSource` O(1) 核验原局为敌对参战的正式 1V1 非作废 `CONFIRMED` 排位且未超 10 分钟窗口。
+5. **赛季换季分批续跑与事务外 RPC**：`RankedStore.sealSeasonAndOpenNext`（`SEAL_BATCH_SIZE = 200`）在 SQL 事务外完成 `freezeHook` 封榜与按需榜首昵称查询，随后按 200 人/批幂等落库 `final_rank` 与奖励。
+6. **删角真注销清理 6 张论剑排位表与去标识化**：`RankedStore.purgePlayerRankedData`（接入 `BattleReportStore.purgePlayerReports` 删角链路）清空被删角色在 `match_ranked_featured_build` 的展示名与对端镜像 `match_ranked_rivalry.opponent_name`，并按主键删除本人 5 张表行（零全表扫描）。
+7. **组队排位入队复用事务连接与统一版本错误码**：`RankedStore.ensureActiveSeasonInTx(Connection)` 支持在既有事务连接内读取当前赛季避免嵌套建连；`GlobalMatchService.reserveTeam` 与单排入队统一校验 `PVP_TEAM` 模式及 `kMatchRankedRuleVersionMismatch`。
 
-1. **排位结算热门流派聚合排序加锁与代表战报 `ref_count` 护航**：`RankedStore.applyRankedRating` 内将同局有效自养流派按 `build_key` 内存预聚合后按 `build_key` 字典序升序落库（防多局并发 AB-BA 死锁）；仅在战报正文存在时绑定 `featured_battle_id` 并按 `battle_id` 升序维护战报引用护航（新代表局 `+1`、被替换旧局 `-1`），换季关闭旧季时统一释放旧季代表战报护航引用。
-2. **论剑大厅 Top 5 热门流派 5 秒 SingleFlight 缓存与只读读路径**：为 `RankedStore.loadProfile` 的全服 Top 5 `FeaturedBuilds` 加按 `season_id` 隔离的 5 秒进程内防击穿缓存（返回深拷贝、换季主动失效），避免大厅与战后刷新把并发读打穿数据库。
-3. **V7 擂台直播独立 16 桶 Redis Cluster 索引（防 PVE 稀释）**：在 `GlobalMatchService` / `GlobalWatchAuthority` 中为公开的高段正式排位局增写 16 桶独立分片索引 `spectate:ranked:active:{srk:0..15}`（score 为 `created_at_ms`，同步纳入 1 秒大厅缓存、终局摘除与定期过期清扫），`ListWatchableBattles` 在赛事局之后优先保留高段排位席位并按 `ranked_peak_rating_centi DESC` 排序，防止高频 PVE 将高段排位挤出列表。
-4. **V7 1V1「不服再战」服务端防伪与 10 分钟时效校验**：`ChallengeService` 在收到带 `rematch_source_battle_id != 0` 的切磋请求时，拒绝 `use_free_preset=true`，并 O(1) 核对原对局为双方敌对参战的正式 1V1 非作废 `COMPLETE` 排位且距终局归档不超过 10 分钟，不满足回 `kMatchChallengeExpired`（非故障业务拒绝）。
-5. **赛季换季分批续跑、生产榜首查名/核榜与事务外 RPC**：确保换季荣誉快照在 SQL 事务外完成封榜核对与榜首昵称查询，并按 200 人/批幂等落库 `final_rank` 与段位/榜首奖励，避免大事务超时。
-6. **删角真注销清理 6 张论剑排位表与去标识化**：在 Java 删角清理链路同步删除被删角色的 `match_ranked_player_prefs`/`player_season`/`reward`/`battle`/本人侧 `rivalry` 行，并利用宿敌对称性按精确主键清空对端镜像 `opponent_name` 及 `match_ranked_featured_build.featured_player_name`（零全表扫描）。
-7. **组队排位入队避免事务内嵌套建连与统一版本错误码**：核对 Java 组队排位入队链路确保在既有事务内读取当前赛季，版本号不符统一返回 `kMatchRankedRuleVersionMismatch`。
+- **验证**：`game-match` `RankedV6V7HardeningTest`（2/2）+ `RankedParityTest` + `WatchableListServiceTest`（23/23）+ `SpectateGatherHooksTest` + `SpectateSweeperTest` + `WatchableConfigurationTest`（6/6）+ `ChallengeServiceTest` = **124/124 PASS**。
 
 ### 2026-11-26 gate 准入 P2-4 票据先行:验签成功之前不发会话号、不建会话,battle 直连同一做法（Java 已对齐）
 
