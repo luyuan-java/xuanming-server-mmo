@@ -32,6 +32,8 @@ public final class ClientFrames {
     public static final int MIN_LEN = 10;
     /** C++ kDefaultMaxMessageLen = 64 * 1024。 */
     public static final int DEFAULT_MAX_LEN = 64 * 1024;
+    /** 验签前帧长上限（对齐主仓 G10 / pre_auth_message_limit：4 KiB，看到长度头即断开）。 */
+    public static final int PRE_AUTH_MAX_LEN = 4 * 1024;
 
     private ClientFrames() {
     }

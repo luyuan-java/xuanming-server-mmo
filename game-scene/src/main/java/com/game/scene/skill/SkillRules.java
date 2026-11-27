@@ -61,14 +61,12 @@ final class SkillRules {
     }
 
     /**
-     * 同上，另判目标在回合制战斗中 → 7002（与「不是玩家」的 7001 分开；排在目标类型之后，基线 skill.cpp:410-414，scene-battle-spec §7.13）。
+     * 同上，另判目标在回合制战斗中 → 7002（与「不是玩家」的 7001 分开；排在目标类型之后，基线 skill.cpp:655-689，scene-battle-spec §7.13）。
+     * 无目标 / 范围技能放行 {@code targetId == 0}，仅指定目标方式（{@link #TARGET_SINGLE}）校验 {@code targetId > 0} 与目标存在。
      *
      * @param targetInBattle 实体号对应的本节点玩家是否有在途的回合制战斗
      */
     static int checkTarget(SkillDef def, long targetId, LongPredicate targetExists, LongPredicate targetInBattle) {
-        if (!def.targetingModes().isEmpty() && targetId == 0) {
-            return INVALID_TARGET_ID;
-        }
         for (int mode : def.targetingModes()) {
             if (mode == TARGET_NONE || mode == TARGET_AREA) {
                 return OK;
@@ -76,7 +74,7 @@ final class SkillRules {
             if (mode != TARGET_SINGLE) {
                 continue;
             }
-            if (!targetExists.test(targetId)) {
+            if (targetId <= 0 || !targetExists.test(targetId)) {
                 return INVALID_TARGET_ID;
             }
             return targetInBattle.test(targetId) ? TARGET_IN_BATTLE : OK;

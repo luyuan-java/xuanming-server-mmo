@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.IntSupplier;
 
 /**
  * 同端口原生 TCP / RFC 6455 WebSocket 自动分流处理器（对齐 {@code minigame-websocket-gate.md} W1 / W4）。
@@ -29,6 +30,8 @@ public final class WebSocketMuxHandler extends ByteToMessageDecoder {
 
     public static final int MAX_HANDSHAKE_BYTES = 8192;
     public static final int DEFAULT_MAX_PAYLOAD_BYTES = ClientFrames.DEFAULT_MAX_LEN + ClientFrames.HEADER_LEN + 64;
+    /** 验签前单帧载荷上限（对应 {@link ClientFrames#PRE_AUTH_MAX_LEN} + 长度头 + 余量）。 */
+    public static final int PRE_AUTH_MAX_PAYLOAD_BYTES = ClientFrames.PRE_AUTH_MAX_LEN + ClientFrames.HEADER_LEN + 64;
     private static final String WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
     private static final byte[] RESP_400 = (
@@ -41,7 +44,7 @@ public final class WebSocketMuxHandler extends ByteToMessageDecoder {
             + "Content-Length: 0\r\n"
             + "Connection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII);
 
-    private final int maxPayloadBytes;
+    private final IntSupplier maxPayloadBytes;
     private final WebSocketObserver observer;
     private boolean decidedWebSocket;
     private boolean rejected;
@@ -58,7 +61,13 @@ public final class WebSocketMuxHandler extends ByteToMessageDecoder {
         if (maxPayloadBytes <= 0) {
             throw new IllegalArgumentException("maxPayloadBytes must be positive");
         }
-        this.maxPayloadBytes = maxPayloadBytes;
+        this.maxPayloadBytes = () -> maxPayloadBytes;
+        this.observer = Objects.requireNonNull(observer, "observer");
+    }
+
+    /** 构造按连接认证状态动态计算载荷上限的分流器（透传给升级后的 {@link WebSocketBinaryCodec}）。 */
+    public WebSocketMuxHandler(IntSupplier maxPayloadBytes, WebSocketObserver observer) {
+        this.maxPayloadBytes = Objects.requireNonNull(maxPayloadBytes, "maxPayloadBytes");
         this.observer = Objects.requireNonNull(observer, "observer");
     }
 

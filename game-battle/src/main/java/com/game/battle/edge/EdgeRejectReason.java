@@ -52,6 +52,8 @@ enum EdgeRejectReason {
     MESSAGE_ID_NOT_ALLOWED,
     /** 请求体解析失败（信封 1005）。 */
     BODY_PARSE_FAILED,
+    /** 已验证直连再次发握手帧（不回包，计非法包）。 */
+    REPEAT_VERIFY,
     /** 非法包累计达阈值，断开。 */
     ILLEGAL_THRESHOLD,
     /** 输出缓冲越过高水位（2 MiB），断开。 */

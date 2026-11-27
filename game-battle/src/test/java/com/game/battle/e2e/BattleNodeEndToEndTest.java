@@ -859,16 +859,16 @@ class BattleNodeEndToEndTest {
             c.expect("reply:" + GET_BATTLE_STATE);
             c.expect("error:" + GET_BATTLE_STATE + ":" + TIP_RATE_LIMIT_EXCEEDED);
 
-            // B1：已验证后再握手（垃圾 payload）→ success + 原 battle_id，新票一个字节都不看
+            // G10：已验证后再握手（垃圾 payload）→ 不回包、计 1 次非法包、不重新绑定
             c.send(BattleTokenVerifyRequest.newBuilder().setPayload(ByteString.copyFromUtf8("garbage"))
                     .setSignature(ByteString.copyFromUtf8("garbage")).build());
-            c.expect("verify-ok:" + battleId);
+            c.expectSilence(Duration.ofMillis(100));
 
-            // 非法包阈值 50：已有 3 个（157 / 1010 / 1008）；再来 46 个仍在线，第 50 个断开（刚写的信封错误不保证送达，B5）
-            for (int i = 0; i < 46; i++) {
+            // 非法包阈值 50：已有 4 个（157 / 1010 / 1008 / 重复验签）；再来 45 个仍在线，第 50 个断开（刚写的信封错误不保证送达，B5）
+            for (int i = 0; i < 45; i++) {
                 c.request(157, GetBattleStateRequest.newBuilder().setBattleId(battleId).build());
             }
-            for (int i = 0; i < 46; i++) {
+            for (int i = 0; i < 45; i++) {
                 assertThat(c.next().label()).isIn("error:157:" + TIP_INVALID_PARAMETER, "error:157:" + TIP_RATE_LIMIT_EXCEEDED);
             }
             c.expectSilence(Duration.ofMillis(200));

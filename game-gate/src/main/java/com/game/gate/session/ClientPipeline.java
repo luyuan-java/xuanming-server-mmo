@@ -46,8 +46,13 @@ public final class ClientPipeline {
                                int maxConnections, com.game.common.net.SourcePrefixRateLimiter sourceRateLimiter) {
         GateMetrics metrics = dispatcher.metrics();
         ClientChannelHandler handler = new ClientChannelHandler(registry, dispatcher, maxConnections, sourceRateLimiter);
-        pipeline.addLast("wsMux", new com.game.net.client.WebSocketMuxHandler(metrics.webSocketObserver()));
-        pipeline.addLast("clientFrameDecoder", new ClientFrameDecoder(ACCEPTED, ClientFrames.DEFAULT_MAX_LEN,
+        pipeline.addLast("wsMux", new com.game.net.client.WebSocketMuxHandler(
+                () -> handler.isVerified()
+                        ? com.game.net.client.WebSocketMuxHandler.DEFAULT_MAX_PAYLOAD_BYTES
+                        : com.game.net.client.WebSocketMuxHandler.PRE_AUTH_MAX_PAYLOAD_BYTES,
+                metrics.webSocketObserver()));
+        pipeline.addLast("clientFrameDecoder", new ClientFrameDecoder(ACCEPTED,
+                () -> handler.isVerified() ? ClientFrames.DEFAULT_MAX_LEN : ClientFrames.PRE_AUTH_MAX_LEN,
                 handler::acceptsFrames, (ctx, e) -> {
                     // 非法帧由公网流量决定，采样记录；解码器随后关闭连接。
                     metrics.invalidFrame(e.reason());

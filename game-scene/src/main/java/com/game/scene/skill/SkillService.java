@@ -105,11 +105,19 @@ public final class SkillService {
             log.debug("放技能被拒：技能不存在或未拥有 player={} skill_table_id={}", caster.playerId(), skillTableId);
             return reject(SkillResult.UNKNOWN_SKILL, SkillRules.INVALID_TABLE_ID);
         }
+        if (caster.frozen()) {
+            return reject(SkillResult.STATE_REJECTED, SkillRules.CASTER_IN_BATTLE);
+        }
         if (caster.inBattle()) {
             metrics.battleGateReject(BattleGate.SKILL);
             return reject(SkillResult.CASTER_IN_BATTLE, SkillRules.CASTER_IN_BATTLE);
         }
-        int target = SkillRules.checkTarget(def, request.getTargetId(), entity -> world.playerByEntity(entity) != null,
+        int target = SkillRules.checkTarget(def, request.getTargetId(),
+                entity -> {
+                    ScenePlayer targetPlayer = world.playerByEntity(entity);
+                    return targetPlayer != null && targetPlayer.scene() != null
+                            && targetPlayer.scene() == caster.scene() && !targetPlayer.frozen();
+                },
                 entity -> {
                     ScenePlayer targetPlayer = world.playerByEntity(entity);
                     return targetPlayer != null && targetPlayer.inBattle();

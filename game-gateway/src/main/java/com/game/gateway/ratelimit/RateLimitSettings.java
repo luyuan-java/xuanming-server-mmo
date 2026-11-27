@@ -58,10 +58,7 @@ public record RateLimitSettings(boolean enabled, Long zoneDefaultRps, Long zoneD
         }
         trustedProxies = trustedProxies == null ? List.of() : List.copyOf(trustedProxies);
         wave = wave == null ? new Wave(false, null, null) : wave;
-        queueRetryMinMs = queueRetryMinMs == null ? DEFAULT_QUEUE_RETRY_MIN_MS : queueRetryMinMs;
-        if (queueRetryMinMs < 0) {
-            throw new IllegalArgumentException("game.gateway.rate-limit.queue-retry-min-ms 不能为负");
-        }
+        queueRetryMinMs = positive(queueRetryMinMs, DEFAULT_QUEUE_RETRY_MIN_MS, "queue-retry-min-ms");
         queueRetryJitterMs = queueRetryJitterMs == null ? DEFAULT_QUEUE_RETRY_JITTER_MS : queueRetryJitterMs;
         if (queueRetryJitterMs < 0) {
             throw new IllegalArgumentException("game.gateway.rate-limit.queue-retry-jitter-ms 不能为负");

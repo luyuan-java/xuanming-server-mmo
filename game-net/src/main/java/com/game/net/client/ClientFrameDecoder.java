@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
+import java.util.function.IntSupplier;
 
 /**
  * 客户端帧解码器。每条连接一个实例（非 {@code @Sharable}）；gate 大厅连接、battle 直连、robot 的下行共用。
@@ -33,7 +34,7 @@ import java.util.function.BooleanSupplier;
 public final class ClientFrameDecoder extends ByteToMessageDecoder {
 
     private final Map<String, Message> accepted;
-    private final int maxLen;
+    private final IntSupplier maxLen;
     private final BooleanSupplier keepDecoding;
     private final BiConsumer<ChannelHandlerContext, ClientFrameException> onError;
     private boolean failed;
@@ -47,7 +48,7 @@ public final class ClientFrameDecoder extends ByteToMessageDecoder {
      */
     public ClientFrameDecoder(Map<String, Message> accepted, int maxLen,
                               BiConsumer<ChannelHandlerContext, ClientFrameException> onError) {
-        this(accepted, maxLen, () -> true, onError);
+        this(accepted, () -> maxLen, () -> true, onError);
     }
 
     /**
@@ -59,8 +60,17 @@ public final class ClientFrameDecoder extends ByteToMessageDecoder {
      */
     public ClientFrameDecoder(Map<String, Message> accepted, int maxLen, BooleanSupplier keepDecoding,
                               BiConsumer<ChannelHandlerContext, ClientFrameException> onError) {
+        this(accepted, () -> maxLen, keepDecoding, onError);
+    }
+
+    /**
+     * 支持按连接认证状态动态切换上限的构造入口（例如验签前 4 KiB、验签后 64 KiB）。
+     * {@code maxLen} 在连接的 EventLoop 上读取，读 handler 自己的认证状态即可。
+     */
+    public ClientFrameDecoder(Map<String, Message> accepted, IntSupplier maxLen, BooleanSupplier keepDecoding,
+                              BiConsumer<ChannelHandlerContext, ClientFrameException> onError) {
         this.accepted = Map.copyOf(accepted);
-        this.maxLen = maxLen;
+        this.maxLen = Objects.requireNonNull(maxLen, "maxLen");
         this.keepDecoding = Objects.requireNonNull(keepDecoding, "keepDecoding");
         this.onError = Objects.requireNonNull(onError, "onError");
     }
@@ -75,7 +85,8 @@ public final class ClientFrameDecoder extends ByteToMessageDecoder {
             return;
         }
         int len = in.getInt(in.readerIndex());
-        if (len < ClientFrames.MIN_LEN || len > maxLen) {
+        int limit = maxLen.getAsInt();
+        if (len < ClientFrames.MIN_LEN || len > limit) {
             fail(ctx, in, new ClientFrameException(ClientFrameException.Reason.INVALID_LENGTH, "len=" + len));
             return;
         }

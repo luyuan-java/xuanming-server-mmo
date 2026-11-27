@@ -77,6 +77,17 @@ class RedisRateLimitStoreIntegrationTest {
     }
 
     @Test
+    void 区桶空排队按千分扣减IP令牌_持续重刷触发IP限流() {
+        long t = 3_000_000;
+        Bucket ip = new Bucket(ipKey, 1, 2);
+        Bucket zone = new Bucket(zoneKey, 1, 1);
+        assertThat(store.admitAt(t, ip, zone, 100).kind()).isEqualTo(Admission.Kind.OK);
+        // IP 余 1.0；每次排队扣 0.1，第 1 次后余 0.9（已低于 1.0），第 2 次立刻触发 IP_EMPTY
+        assertThat(store.admitAt(t, ip, zone, 100).kind()).isEqualTo(Admission.Kind.ZONE_EMPTY);
+        assertThat(store.admitAt(t, ip, zone, 100).kind()).isEqualTo(Admission.Kind.IP_EMPTY);
+    }
+
+    @Test
     void 等待毫秒向下取整_每秒补充超过1000时为0() {
         Bucket ip = new Bucket(ipKey, 100, 100);
         Bucket zone = new Bucket(zoneKey, 2000, 1);

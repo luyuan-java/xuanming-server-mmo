@@ -137,10 +137,10 @@ class ClientRedirectTest {
     }
 
     @Test
-    void 已验证的会话再次verify回成功_不重新验票_不覆盖票据字段() {
+    void 已验证的会话再次verify不回包_不重新验票_不覆盖票据字段() {
         Client holder = verified(ticket(PLAYER));
         holder.ch().writeInbound(verify(normalToken()));
-        assertThat(((ClientTokenVerifyResponse) holder.ch().readOutbound()).getSuccess()).isTrue();
+        assertThat((Object) holder.ch().readOutbound()).isNull();
         holder.ch().writeInbound(request(1, LOGIN_MSG, "x"));
         assertThat(login.calls.get(0).getSession().getTicketPlayerId()).isEqualTo(PLAYER);
         login.complete(ClientReply.getDefaultInstance());
@@ -148,7 +148,7 @@ class ClientRedirectTest {
 
         Client plain = verified(normalToken());
         plain.ch().writeInbound(verify(ticket(PLAYER + 1)));
-        assertThat(((ClientTokenVerifyResponse) plain.ch().readOutbound()).getSuccess()).isTrue();
+        assertThat((Object) plain.ch().readOutbound()).isNull();
         plain.ch().writeInbound(request(2, LOGIN_MSG, "x"));
         assertThat(login.calls.get(1).getSession().getTicketPlayerId()).as("第二次出示的票据不生效").isZero();
         assertThat(handshakes("ok")).as("再次 verify 不计握手").isEqualTo(2);

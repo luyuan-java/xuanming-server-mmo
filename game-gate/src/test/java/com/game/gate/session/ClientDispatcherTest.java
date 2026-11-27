@@ -124,16 +124,22 @@ class ClientDispatcherTest {
     // ================================================================ 握手
 
     @Test
-    void 握手通过回成功_重复握手再回成功() {
+    void 握手通过回成功_重复握手不回包且计非法包达阈值断开() {
         EmbeddedChannel ch = connect();
         ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
         assertThat((Object) ch.readOutbound()).isEqualTo(ClientTokenVerifyResponse.newBuilder().setSuccess(true)
                 .setHeartbeatIntervalMs(10_000).setHeartbeatTimeoutMs(30_000).build());
 
+        // 非法包阈值 = 3：前两次重复握手静默不回包且连接保持打开，第 3 次达阈值断开
         ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
-        ClientTokenVerifyResponse again = ch.readOutbound();
-        assertThat(again.getSuccess()).isTrue();
+        assertThat((Object) ch.readOutbound()).isNull();
         assertThat(ch.isOpen()).isTrue();
+        ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
+        assertThat((Object) ch.readOutbound()).isNull();
+        assertThat(ch.isOpen()).isTrue();
+        ch.writeInbound(verifyRequest(GATE_NODE, NOW + 600));
+        assertThat((Object) ch.readOutbound()).isNull();
+        assertThat(ch.isOpen()).isFalse();
     }
 
     @Test

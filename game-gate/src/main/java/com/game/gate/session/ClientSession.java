@@ -202,9 +202,19 @@ public final class ClientSession {
         return true;
     }
 
-    /** 发完这条再关（给客户端一个收到原因的窗口）。 */
+    /** 发完这条再关（给客户端一个收到原因的窗口，同时挂 100ms 强关兜底防零窗口拖住连接）。 */
     void sendThenClose(Message message) {
         channel.writeAndFlush(message).addListener(ChannelFutureListener.CLOSE);
+        if (channel.isActive()) {
+            try {
+                channel.eventLoop().schedule(() -> {
+                    if (channel.isOpen()) {
+                        channel.close();
+                    }
+                }, 100L, TimeUnit.MILLISECONDS);
+            } catch (RejectedExecutionException ignored) {
+            }
+        }
     }
 
     void close() {

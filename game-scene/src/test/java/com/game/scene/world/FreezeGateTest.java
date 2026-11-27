@@ -289,7 +289,7 @@ class FreezeGateTest {
         expected.put("SceneMovementClientPlayerMoveStop", FreezePolicy.DROP);
         expected.put("SceneMovementClientPlayerTeamFollow", FreezePolicy.REJECT);
         expected.put("SceneSkillClientPlayerListSkills", FreezePolicy.READ_ONLY);
-        expected.put("SceneSkillClientPlayerReleaseSkill", FreezePolicy.ALLOW);
+        expected.put("SceneSkillClientPlayerReleaseSkill", FreezePolicy.GATED);
         expected.put("SceneCurrencyClientPlayerGetCurrencyList", FreezePolicy.READ_ONLY);
         expected.put("SceneCurrencyClientPlayerGmAddCurrency", FreezePolicy.GATED);
         expected.put("SceneCurrencyClientPlayerGmDeductCurrency", FreezePolicy.GATED);
@@ -325,7 +325,7 @@ class FreezeGateTest {
         // 规格 §5.9 按消息号列：抽查几处号与名对得上
         assertThat(handler.freezePolicy(63)).isEqualTo(FreezePolicy.ALLOW);
         assertThat(handler.freezePolicy(226)).isEqualTo(FreezePolicy.ALLOW);
-        assertThat(handler.freezePolicy(84)).isEqualTo(FreezePolicy.ALLOW);
+        assertThat(handler.freezePolicy(84)).isEqualTo(FreezePolicy.GATED);
         assertThat(handler.freezePolicy(173)).isEqualTo(FreezePolicy.REJECT);
         assertThat(handler.freezePolicy(94)).isEqualTo(FreezePolicy.REJECT);
         assertThat(handler.freezePolicy(95)).isEqualTo(FreezePolicy.REJECT);
@@ -595,7 +595,8 @@ class FreezeGateTest {
 
         probes.add(new Probe("SceneSkillClientPlayer", "ReleaseSkill", ReleaseSkillRequest.newBuilder()
                 .setSkillTableId(1).setTargetId(player.entity())
-                .setPosition(Vector3.newBuilder().setX(1).setY(2).setZ(3)).build(), PASSED));
+                .setPosition(Vector3.newBuilder().setX(1).setY(2).setZ(3)).build(),
+                com.game.table.SkillErrorTip.skill_error.kSkillCannotBeCastInCurrentState_VALUE));
         probes.add(new Probe("SceneSkillClientPlayer", "ListSkills", ListSkillsRequest.getDefaultInstance(), 0));
 
         String moveSvc = "SceneMovementClientPlayer";

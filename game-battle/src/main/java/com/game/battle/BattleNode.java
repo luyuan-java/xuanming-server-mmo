@@ -16,7 +16,8 @@ import com.game.battle.room.RoomDependencies;
 import com.game.battle.rpc.BattleNodeServiceImpl;
 import com.game.common.RunMode;
 import com.game.common.token.BattleTickets;
-import io.netty.channel.nio.NioEventLoopGroup;
+import com.game.net.client.NettyServerTransports;
+import io.netty.channel.EventLoopGroup;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.time.Duration;
 import java.util.Locale;
@@ -102,7 +103,7 @@ public final class BattleNode implements SmartLifecycle {
     private volatile ScheduledExecutorService sched;
     private volatile Lease lease;
     private volatile BattleIdentity identity;
-    private volatile NioEventLoopGroup logicGroup;
+    private volatile EventLoopGroup logicGroup;
     private volatile BattleScheduler scheduler;
     private volatile BattleRoomService rooms;
     private volatile ThreadPoolExecutor replyExecutor;
@@ -180,7 +181,7 @@ public final class BattleNode implements SmartLifecycle {
 
         // 第 5 步：逻辑线程（= 直连面唯一的 I/O EventLoop）、房间服务、回复执行器。状态量回调读 volatile 字段（抓取线程上调用），
         // 组件还没建出来或已释放时报 0。
-        NioEventLoopGroup group = new NioEventLoopGroup(1, new DefaultThreadFactory("battle-logic"));
+        EventLoopGroup group = NettyServerTransports.newEventLoopGroup(1, "battle-logic", NettyServerTransports.epollAvailable());
         logicGroup = group;
         EventLoopBattleScheduler logic = new EventLoopBattleScheduler(group.next());
         scheduler = logic;
@@ -389,7 +390,7 @@ public final class BattleNode implements SmartLifecycle {
         }
         provider = null;
         // 第 5 步：停逻辑线程，之后才停回复执行器（之后不会再有逻辑线程上完成的结局）
-        NioEventLoopGroup group = logicGroup;
+        EventLoopGroup group = logicGroup;
         if (group != null) {
             group.shutdownGracefully(0, 2, TimeUnit.SECONDS).awaitUninterruptibly(5, TimeUnit.SECONDS);
         }

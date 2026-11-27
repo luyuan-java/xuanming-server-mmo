@@ -187,17 +187,47 @@ class BattleEdgeHandlerTest {
     }
 
     @Test
-    void 已验证连接再握手_不看新票回旧battle_id且不重新绑定() {
+    void 已验证连接再握手_不回包不重新绑定_计非法包达阈值断开() {
+        edge = edge(EdgeTestKit.props(4096, Duration.ofSeconds(10), 3));
         EmbeddedChannel ch = verifiedParticipant();
         BattleTokenVerifyRequest garbage = BattleTokenVerifyRequest.newBuilder()
                 .setPayload(ByteString.copyFromUtf8("garbage")).setSignature(ByteString.copyFromUtf8("nope")).build();
 
         ch.writeInbound(buf(garbage));
 
-        assertThat(labels(drain(ch))).containsExactly("verify-ok:" + BATTLE);
+        assertThat(drain(ch)).isEmpty();
         assertThat(ch.isOpen()).isTrue();
+        assertThat(session(ch).illegalPackets()).isEqualTo(1);
         assertThat(rooms.events).containsExactly("attach:" + PLAYER, "verified:" + PLAYER + ":1");
         assertThat(count("game.battle.handshakes", "result", "repeat")).isEqualTo(1);
+
+        // 非法包阈值=3：再发 2 次重复握手即断开
+        ch.writeInbound(buf(garbage));
+        assertThat(ch.isOpen()).isTrue();
+        ch.writeInbound(buf(garbage));
+        assertThat(drain(ch)).isEmpty();
+        assertThat(ch.isOpen()).isFalse();
+        assertThat(count("game.battle.disconnects", "reason", "illegal_packets")).isEqualTo(1);
+    }
+
+    @Test
+    void 验签前声明超过4KB帧在长度头处立即拒绝_验签后恢复64KB上限() {
+        EmbeddedChannel unauth = open();
+        io.netty.buffer.ByteBuf headerOnly = unauth.alloc().buffer(4);
+        headerOnly.writeInt(com.game.net.client.ClientFrames.PRE_AUTH_MAX_LEN + 1);
+        unauth.writeInbound(headerOnly);
+        assertThat(unauth.isOpen()).as("未验签仅发 4 字节超限长度头即关闭").isFalse();
+        assertThat(count("game.battle.invalid.frames", "reason", "invalid_length")).isEqualTo(1);
+
+        EmbeddedChannel verified = verifiedParticipant();
+        ClientRequest large = ClientRequest.newBuilder()
+                .setId(99).setMessageId(GET_STATE)
+                .setBody(ByteString.copyFrom(new byte[5000])).build();
+        verified.writeInbound(buf(large));
+        // 解码器放行后由 handler 按 >1024B 业务信封 1010 拒绝，不触发 invalid_length 断连
+        assertThat(verified.isOpen()).isTrue();
+        assertThat(count("game.battle.invalid.frames", "reason", "invalid_length")).isEqualTo(1);
+        assertThat(count2("game.battle.client.requests", "GetBattleState", "oversized")).isEqualTo(1);
     }
 
     // ---------------------------------------------------------------- 握手失败（§3.4，拒绝串逐字照抄）

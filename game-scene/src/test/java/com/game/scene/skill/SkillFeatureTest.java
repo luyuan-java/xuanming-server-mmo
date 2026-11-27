@@ -151,20 +151,17 @@ class SkillFeatureTest {
     }
 
     @Test
-    void 目标号为0一律7001_指定目标要是本节点上的玩家_其余方式只要非0() throws Exception {
+    void 指定目标须同场景未冻结且非零_范围与无目标放行零目标号() throws Exception {
         start();
-        for (int skill : new int[] {1, 2, 13}) {
-            assertThat(release(skill, 0)).as("skill %d", skill).isEqualTo(7001);
-        }
+        assertThat(release(1, 0)).as("指定目标 targetId=0 回 7001").isEqualTo(7001);
         assertThat(release(1, 424242)).as("指定目标不存在").isEqualTo(7001);
+        assertThat(release(1, entity(C))).as("跨场景玩家不可作为指定目标").isEqualTo(7001);
         assertThat(sink.messageIdsTo(LINK, B)).as("被拒不广播").isEmpty();
         assertThat(player(A).skillState().actionStates()).as("早于状态检查被拒不加战斗状态").isEmpty();
-        assertThat(counter("invalid_target")).isEqualTo(4);
+        assertThat(counter("invalid_target")).isEqualTo(3);
 
-        assertThat(release(2, 424242)).as("范围技能只看非 0").isZero();
-        assertThat(release(13, 424242)).as("认不出的目标方式只看非 0").isZero();
-        clock.advanceMillis(400);
-        assertThat(release(1, entity(C))).as("别的场景里的玩家也算（节点内，同基线）").isZero();
+        assertThat(release(2, 0)).as("范围技能放行 targetId=0").isZero();
+        assertThat(release(13, 0)).as("无指定目标方式放行 targetId=0").isZero();
         clock.advanceMillis(2_100);
         assertThat(release(1, entity(A))).as("自己也是合法目标").isZero();
     }
@@ -328,8 +325,8 @@ class SkillFeatureTest {
     @Test
     void 被拒的施法不记冷却不改阶段() throws Exception {
         start();
-        assertThat(release(13, 0)).isEqualTo(7001);
-        assertThat(release(13, entity(B))).as("7001 没记冷却").isZero();
+        assertThat(release(1, 0)).isEqualTo(7001);
+        assertThat(release(1, entity(B))).as("7001 没记冷却").isZero();
     }
 
     @Test

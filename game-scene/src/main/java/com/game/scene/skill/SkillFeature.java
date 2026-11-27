@@ -26,12 +26,12 @@ public final class SkillFeature implements SceneFeature {
     }
 
     /**
-     * 冻结策略（scene-handoff-spec §5.9）：84 ALLOW——基线请求层不拒、只在施法点对冻结施法者 no-op；Java 的施法运行态
-     * （施法阶段、冷却）不持久化，伤害 / buff 两版都未生效，冻结中照常处理不会改动冻结快照。
+     * 冻结策略（对齐主仓 SkillSystem::CheckSkillPrerequisites）：84 GATED，由 {@link SkillService#release} 在冻结态
+     * 显式拒回 {@code kSkillCannotBeCastInCurrentState(7004)}，避免跨节点交接冻结期间产生施法副作用。
      */
     @Override
     public void register(Registrar r) {
-        r.on(SERVICE, "ReleaseSkill", ReleaseSkillRequest.class, FreezePolicy.ALLOW, BattlePolicy.GATED, (call, request) -> call.reply(
+        r.on(SERVICE, "ReleaseSkill", ReleaseSkillRequest.class, FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> call.reply(
                 ReleaseSkillResponse.newBuilder()
                         .setErrorMessage(tip(skills.release(call.world(), call.player(), request)))
                         .build()));

@@ -70,13 +70,13 @@ class ClientHeartbeatTest {
         public void close() { channel.finishAndReleaseAll(); meters.close(); }
     }
 
-    @Test void 验签通告参数且重复验签只跟踪一次() throws Exception {
+    @Test void 验签通告参数且重复验签不回包只跟踪一次() throws Exception {
         try (var f = new Fixture()) {
             var response = f.verify();
             assertThat(response.getSuccess()).isTrue();
             assertThat(response.getHeartbeatIntervalMs()).isEqualTo(10_000);
             assertThat(response.getHeartbeatTimeoutMs()).isEqualTo(30_000);
-            assertThat(f.verify()).isEqualTo(response);
+            assertThat(f.verify()).isNull();
             assertThat(f.count("tracked")).isEqualTo(1);
         }
     }

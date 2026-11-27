@@ -223,6 +223,10 @@ class RateLimiterTest {
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("start-epoch-sec");
         assertThatThrownBy(() -> new RateLimitSettings(true, 0L, null, null, null, null, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new RateLimitSettings(true, null, null, null, null, null, null, null, null, 0L, null, null))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("queue-retry-min-ms");
+        assertThatThrownBy(() -> new RateLimitSettings(true, null, null, null, null, null, null, null, null, -1L, null, null))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("queue-retry-min-ms");
     }
 
     @Test

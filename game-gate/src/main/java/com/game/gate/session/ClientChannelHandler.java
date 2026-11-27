@@ -81,6 +81,11 @@ public final class ClientChannelHandler extends ChannelInboundHandlerAdapter {
         return session != null && !session.closing && !session.closed;
     }
 
+    /** 连接是否已完成 gate 票据验签（供解码器与 WS 桥在验签前收紧至 4 KiB、验签后放宽至 64 KiB）。 */
+    boolean isVerified() {
+        return session != null && session.verified;
+    }
+
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (session == null) {

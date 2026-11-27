@@ -66,8 +66,10 @@ class SkillRulesTest {
     void 目标闸() {
         Set<Long> present = Set.of(77L);
         assertThat(SkillRules.checkTarget(skill(List.of(1), List.of()), 0, present::contains)).as("没有目标方式不查").isZero();
-        assertThat(SkillRules.checkTarget(skill(List.of(1), List.of(2)), 0, present::contains)).isEqualTo(7001);
-        assertThat(SkillRules.checkTarget(skill(List.of(1), List.of(3)), 0, present::contains)).isEqualTo(7001);
+        assertThat(SkillRules.checkTarget(skill(List.of(1), List.of(0)), 0, present::contains)).as("无目标技能放行 targetId=0").isZero();
+        assertThat(SkillRules.checkTarget(skill(List.of(1), List.of(2)), 0, present::contains)).as("范围技能放行 targetId=0").isZero();
+        assertThat(SkillRules.checkTarget(skill(List.of(1), List.of(3)), 0, present::contains)).as("认不出的方式跳过后放行").isZero();
+        assertThat(SkillRules.checkTarget(skill(List.of(1), List.of(1)), 0, present::contains)).as("指定目标不允许 targetId=0").isEqualTo(7001);
         assertThat(SkillRules.checkTarget(skill(List.of(1), List.of(3)), 5, present::contains)).isZero();
         assertThat(SkillRules.checkTarget(skill(List.of(1), List.of(1, 2)), 5, present::contains)).isEqualTo(7001);
         assertThat(SkillRules.checkTarget(skill(List.of(1), List.of(1, 2)), 77, present::contains)).isZero();

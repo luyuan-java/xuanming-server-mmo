@@ -98,6 +98,53 @@ class ClientPipelineWebSocketTest {
         ch.finishAndReleaseAll();
     }
 
+    @Test
+    void 验签前声明超过4KB帧在长度头处立即拒绝_验签后恢复64KB上限() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        GateMetrics metrics = new GateMetrics(meters);
+        GateTokens tokens = GateTokens.ofUtf8("ws-gate-secret");
+        SessionRegistry registry = new SessionRegistry(new SessionIdAllocator(1));
+        ClientDispatcher dispatcher = new ClientDispatcher(
+                new GateIdentity(1, "inst-ws", 1), tokens, InstantSource.fixed(Instant.ofEpochSecond(NOW)),
+                MessageRoutes.fromGenerated(), 23, new FakeLogin(), new FakeLinks(), registry,
+                new GateLimits(8, 50, java.time.Duration.ZERO), metrics, PresenceRecorder.NONE);
+
+        EmbeddedChannel tcp = new EmbeddedChannel(new io.netty.channel.ChannelInitializer<>() {
+            @Override
+            protected void initChannel(io.netty.channel.Channel channel) {
+                ClientPipeline.install(channel.pipeline(), registry, dispatcher);
+            }
+        });
+        ByteBuf oversizedHeaderOnly = tcp.alloc().buffer(4);
+        oversizedHeaderOnly.writeInt(ClientFrames.PRE_AUTH_MAX_LEN + 1);
+        tcp.writeInbound(oversizedHeaderOnly);
+        assertThat(tcp.isOpen()).as("未验签仅发 4 字节超限长度头即关闭").isFalse();
+        assertThat(meters.get("game.gate.client.invalid.frames").tag("reason", "invalid_length").counter().count()).isEqualTo(1.0);
+        tcp.finishAndReleaseAll();
+
+        // 验签后超过 4 KiB（如 5 KiB）的帧可通过解码器到达 dispatcher（不再触发 invalid_length）
+        EmbeddedChannel authed = new EmbeddedChannel(new io.netty.channel.ChannelInitializer<>() {
+            @Override
+            protected void initChannel(io.netty.channel.Channel channel) {
+                ClientPipeline.install(channel.pipeline(), registry, dispatcher);
+            }
+        });
+        ByteString payload = GateTokenPayload.newBuilder().setGateNodeId(1).setZoneId(1).setExpireTimestamp(NOW + 300)
+                .build().toByteString();
+        authed.writeInbound(ClientFrames.encode(authed.alloc(), ClientTokenVerifyRequest.newBuilder()
+                .setPayload(payload).setSignature(tokens.sign(payload)).build()));
+        ByteBuf verifyReply = authed.readOutbound();
+        assertThat(verifyReply).isNotNull();
+        verifyReply.release();
+
+        com.game.proto.ClientRequest large = com.game.proto.ClientRequest.newBuilder()
+                .setId(7).setMessageId(1).setBody(ByteString.copyFrom(new byte[5000])).build();
+        authed.writeInbound(ClientFrames.encode(authed.alloc(), large));
+        assertThat(authed.isOpen()).as("验签后大帧不被解码器拒断（由 dispatcher 按 1010 业务处理）").isTrue();
+        assertThat(meters.get("game.gate.client.invalid.frames").tag("reason", "invalid_length").counter().count()).isEqualTo(1.0);
+        authed.finishAndReleaseAll();
+    }
+
     private static byte[] maskedBinaryFrame(byte[] payload) {
         int len = payload.length;
         int hdrLen = 2 + (len < 126 ? 0 : 2) + 4;

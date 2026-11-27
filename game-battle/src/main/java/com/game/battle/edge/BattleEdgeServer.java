@@ -131,10 +131,11 @@ public final class BattleEdgeServer implements DirectEdge {
             started = true;
             requireSingleLogicLoop();
             BattleProperties p = deps.properties();
-            EventLoopGroup boss = new NioEventLoopGroup(1, new DefaultThreadFactory("battle-accept"));
-            ServerBootstrap bootstrap = new ServerBootstrap()
-                    .group(boss, deps.logicGroup())
-                    .channel(NioServerSocketChannel.class)
+            boolean useEpoll = com.game.net.client.NettyServerTransports.isEpollGroup(deps.logicGroup());
+            EventLoopGroup boss = com.game.net.client.NettyServerTransports.newEventLoopGroup(1, "battle-accept", useEpoll);
+            ServerBootstrap bootstrap = com.game.net.client.NettyServerTransports.configureServer(
+                    new ServerBootstrap().group(boss, deps.logicGroup()),
+                    useEpoll, com.game.net.client.NettyServerTransports.DEFAULT_TCP_DEFER_ACCEPT_SECONDS)
                     .option(ChannelOption.SO_BACKLOG, 1024)
                     .childOption(ChannelOption.TCP_NODELAY, true)
                     .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK, WATER_MARK)
@@ -251,8 +252,14 @@ public final class BattleEdgeServer implements DirectEdge {
         BattleEdgeHandler handler = new BattleEdgeHandler(this);
         ChannelPipeline p = ch.pipeline();
         p.addLast("edgeGuard", new EdgeInboundGuard(handler));
-        p.addLast("wsMux", new com.game.net.client.WebSocketMuxHandler(deps.metrics().webSocketObserver()));
-        p.addLast("clientFrameDecoder", new ClientFrameDecoder(ACCEPTED, ClientFrames.DEFAULT_MAX_LEN, handler::acceptsInbound,
+        p.addLast("wsMux", new com.game.net.client.WebSocketMuxHandler(
+                () -> handler.isAuthenticated()
+                        ? com.game.net.client.WebSocketMuxHandler.DEFAULT_MAX_PAYLOAD_BYTES
+                        : com.game.net.client.WebSocketMuxHandler.PRE_AUTH_MAX_PAYLOAD_BYTES,
+                deps.metrics().webSocketObserver()));
+        p.addLast("clientFrameDecoder", new ClientFrameDecoder(ACCEPTED,
+                () -> handler.isAuthenticated() ? ClientFrames.DEFAULT_MAX_LEN : ClientFrames.PRE_AUTH_MAX_LEN,
+                handler::acceptsInbound,
                 (ctx, e) -> handler.onInvalidFrame(ctx.channel(), e)));
         p.addLast("clientFrameEncoder", ClientFrameEncoder.INSTANCE);
         p.addLast("battleEdge", handler);

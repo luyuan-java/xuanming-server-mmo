@@ -104,6 +104,12 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
         return s != null && s.acceptsFrames();
     }
 
+    /** 直连是否已通过票据验签或网络探测授权（未认证前帧长收紧至 4 KiB，认证后恢复 64 KiB）。 */
+    boolean isAuthenticated() {
+        DirectSession s = session;
+        return (s != null && s.state() == DirectSession.State.VERIFIED) || probeGrant != null;
+    }
+
     /** 一次读到的字节已经解码、分发完（{@link EdgeInboundGuard}）：房间在这次读里发起的优雅关闭从这里生效，下一次读到的字节作废。 */
     void afterInboundRead() {
         terminalStateReplyThisRead = false;
@@ -292,10 +298,14 @@ final class BattleEdgeHandler extends ChannelInboundHandlerAdapter {
 
     private void onVerify(DirectSession s, BattleTokenVerifyRequest request) {
         if (s.state() == DirectSession.State.VERIFIED) {
-            if(!rooms.currentDirect(verifiedPayload,s)){s.forceClose(Disconnect.REPLACED);return;}
-            // 第 0 步：重复握手幂等（B1）：回 success 与已绑定的 battle_id，新票一个字节都不看、不重新绑定
+            if (!rooms.currentDirect(verifiedPayload, s)) {
+                s.forceClose(Disconnect.REPLACED);
+                return;
+            }
+            // 已验证直连再次发验签：不回包、计非法包、达阈值断开（主仓 G10 / §5 第 5 条），不重新绑定。
             metrics.handshake(HandshakeResult.REPEAT);
-            s.writeDirect(BattleFrames.verifyAccepted(s.battleId()));
+            edge.rejectLog().record(EdgeRejectReason.REPEAT_VERIFY, s.peer());
+            registerIllegal(s, EdgeRejectReason.REPEAT_VERIFY);
             return;
         }
         EdgeDependencies deps = edge.dependencies();

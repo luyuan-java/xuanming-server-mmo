@@ -1,5 +1,11 @@
 # 双版本对账本（PARITY）
 
+## 2026-11-26 五行试炼志 V4（卷三·季游奇谈补齐 S2–S10 全十季自动翻篇 + 技印共鸣解题条件 `15/16`，零新 RPC / 零 DB 迁移）
+
+| 范围 | C++ / Go 权威版 | Java / Python 版 | 状态 |
+|---|---|---|---|
+| **① 卷三 S2–S10 全十季配表（尾插零迁移）**：复用既有 `SeasonTrialJournalArchive`（按 `season_id` 独立归档，绝不触碰永久 36 印位图，错过整季不影响 M901「星阵宗师」）；为 S2 玄脉至 S10 混元每季配置 3 格（A 护卫救援免费预设 `30{N}1`、B 物法易势 5V5 免费预设 `30{N}2`、C 正式赛季竞技 `30{N}3`，共 27 格 `3021..3103`、54 印 `30211..31032`、18 档里程碑 `3021..3102`，每季 2 印领 1 份自用重铸砂、4 印领 1 份自用重铸砂 + 无战力名片印戳 `badge_season_s{N}_trial` + 留灯院评语 `commentary_season_s{N}_trial`）。<br>**② 权威事实字段 `27..29` 与条件 `15/16`**：`BattleTrialJournalFacts` 尾加 `self_cast_season_skill=27`、`self_triggered_season_resonance=28`、`self_season_resonance_mask=29`（`bit = resonance_kind - 1`）；新增条件 `15=kSeasonSkillCast`（本场施放 ≥1 次当季免费赛季主动技，胜或有效参与皆可）与 `16=kSeasonResonance`（按 `condition_param` 位掩码匹配当季实际 `R1..R8` 共鸣并集，仅挂于正式竞技 C 格，免费预设 A/B 格严禁挂需自养赛季技/印的条件）。<br>**③ 多季 Match 上下文隔离与客户端十季标题/图标回退**：Go/Java/Python Match 将 `TrialJournalEntry` 查找键升级为 `(season_id, source_kind, difficulty, variant_key)` 并对齐 `SeasonRule` 无限期号自动循环；Unity 动态展示 S1–S10 季名，并在 Codex 9 枚专属赛季印戳入库前无缝回退 `UI/SeasonHonors/honor_s2..s10` 零白框 | 方案与作图交接：`docs/planning/trial-journal-v4-seasonal-s2-s10.md`、`docs/planning/ui-handoff/trial-journal-v4-seasonal-badges-ui-handoff.md`；协议与配表：`proto/battle/battle_data.proto`（`27..29`）、`data/TrialJournal{Entry,Seal,Milestone}.xlsx`（`dev.bat gen` exit 0，83 表）；C++ `battle`/`scene`（`trial_journal_rules.h`、`turn_battle_engine.{h,cpp}`、`configured_battle_effects.cpp`、`equipment_battle_effects.cpp`、`trial_journal_battle_test.cpp`、`player_trial_journal_test.cpp`）；Go `match`（`catalog.go`、`catalog_test.go`）；Unity（`TrialJournalModels.cs`、`TrialJournalUiState.cs`、`SeasonEconomyUiArt.cs`、`TrialJournalClientTests.cs`、`BattleData.cs` + `trialjournal*.pb`）。验证：`gen_docs_index.py --check` / `check_log_text_english.py` / `test_cpp_no_raw_pointer_member.py`（**13/13**）全绿；`proto.lib`/`table.lib`/`battle.lib` 与 `player_trial_journal{,_test}.cpp` 均 **0 错误编译**，Go `match` `./internal/{catalog,logic,authority}/...` **ALL PASS**；Unity `gen.bat client` 退出 0、`client_compile_check.ps1` **819/819 0 错误**（注：C++ `turn_battle_engine_test.exe` 新用例修复夹具后与 `bag_test.exe` 因同机并行会话 MSBuild 占用及无关 `player_craft.cpp` `kSkillBookshelfFull` WIP 未重链重跑，既有 7/7 已实跑通过） | Java：`ContractSync` 同步（`proto=152, schema=83, 83 .pb`）；`game-battle-engine`（`TrialJournalRules` `15/16`、`EncounterMechanics`、`ConfiguredBattle`、`BattleEquipment`，`TrialJournalBattleEngineTest` **6/6 PASS**）；`game-match`（`RankedTables` 多季键与 `SeasonRuleTable` 循环解析，`MatchReportsScriptsAndRankedTest` + `TrialChallengeCardStoreTest` **5/5 PASS**）；`game-scene`（`TrialJournalFeatureAndServiceTest` **5/5 PASS**），Java 定向 **16/16 PASS**。Python：同步 `battle_data.proto`（`27..29`）与 `schema.pb`、同步 `trialjournal{entry,seal,milestone}.{json,pb}` 与 `manifest.json`；更新 `nodes/{battle_dropin_effects,scene_trial_journal}.py`、`match/{trial_cards,gather}.py` 并新增 `tests/test_trial_journal_v4_seasonal.py`，`pytest`（V4 + 赛季 + 导表 + 60b0 回归）**15/15 PASS** | 已对齐（四仓齐备，9 枚可选专属印戳待 Codex 出图后直投） |
+
 ## 2026-11-26 全面消除「像上班」体验反打卡专项治理 V1（帮会减负 + 商店零日限/终身限购 + 双周上限滚存蓄水池 + 激励广告周池化 + 淘汰赛/摆摊防掐点，Java 第 24 代持久台账 `0024.schema`）
 
 | 范围 | C++ / Go 权威版 | Java / Python 版 | 状态 |
@@ -2771,9 +2777,9 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 
 2026-11-26 核销：已在 `game-match` `GlobalMatchService.selectProbeTargets` 落地按机房内 SHA-256 无符号 64 位 HRW 按玩家分散选单台，`NetworkProbeTargetHrwTest` 已验证全部 4 条场景。
 
-### 2026-11-19 网关前置限流:排队提示加下限与随机量、排队重试只扣 0.1 个 IP 令牌(主仓已落码未编译,Java 待做)
+### 2026-11-19 网关前置限流:排队提示加下限与随机量、排队重试只扣 0.1 个 IP 令牌（Java 已对齐）
 
-主仓 main 工作区,未提交。Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。说明见主仓 `docs/PROGRESS.md` 同日同名条目,以及 `docs/design/open-server-rate-limit-design.md` §二「排队提示」。
+主仓 main 工作区,未提交。Java 版本 `0.1.0-SNAPSHOT` 已对齐。说明见主仓 `docs/PROGRESS.md` 同日同名条目,以及 `docs/design/open-server-rate-limit-design.md` §二「排队提示」。
 
 **客户端可见**:retry_after_ms 的取值变了,字段与格式没变。客户端照字段等待就兼容新旧两版。
 
@@ -2785,7 +2791,7 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
    - 代价:同一出口 IP 后面约 150 人同时排队才会碰到 IP 桶。
 3. 主仓 Unity 客户端在两处排队等待里自己加了下限与抖动:max(retry_after_ms, 2s),再加 [0, 20%]。所以 Java 版没改之前,Unity 客户端也不会紧循环。原样等待提示的客户端仍会紧循环,例如主仓 Go robot 的无票分支。
 
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 核销：`game-gateway` `RateLimitSettings` 已收紧 `queueRetryMinMs` 必须为正（拒绝 `<= 0`），`RateLimiter` 与 `RedisRateLimitStore` 已具备下限+随机抖动及 `queue-retry-ip-cost-milli`（缺省 100，区桶空按千分扣减 IP 令牌）；`RateLimiterTest`（13/13 PASS）已验证下限校验与抖动口径，并补齐 `RedisRateLimitStoreIntegrationTest` 区桶空按千分扣减触发 IP 限流用例。
 
 ### 2026-11-19 小游戏客户端经 WebSocket 连接 gate 与 battle（Java 已对齐）
 
@@ -3103,21 +3109,19 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
   - `TurnBattleEngine` 新增 3 参 `start(request, data, monsterAiProfiles)`（2 参入口原样委托 `Map.of()`，未配置 AI 的存量对局行为与 RNG 消耗零变化）及 `monsterAiPhaseOf(actorId)`；开局按零耗蓝非职业可施放技能闸门挂载怪物技能，回合 `fillDefaultActions` 开头执行确定性 AI 决策，零 RNG 消耗；新增 `DungeonMonsterAiTest.java`。
 
 
-### 2026-11-20 Ponytail 全仓代码审计与安全/强一致/热路径修复收口（主仓与 Unity 已全量落码，Java 平行服第一轮已修、其余主仓项登记待做）
+### 2026-11-20 Ponytail 全仓代码审计与安全/强一致/热路径修复收口（Java 已对齐）
 
-主仓 `xuanming-server-mmo-cpp` `main` 工作区与客户端 `mmorpg-client` `main` 工作区已完成本轮审计全部高优安全、数据强一致、并发扩展与热路径代码及单测落盘（不改 `.proto`、不改配表、不建分支、未提交；构建/测试/冒烟交 Codex）。Java 独立全服务版 `0.1.0-SNAPSHOT` 在第一轮已完成 10 项高危修复并通过对应模块单测（`MailDeliveryWorker` 单条隔离退避、`game-rank`/`game-guild`/`game-trade` Nacos 清空 `127.0.0.1`、`GateConfiguration` 补齐 `mail`/`rank` 超时、`MallNonceStore` 单条有界 `DELETE LIMIT 128`、`game-chat`/`game-scene` JDBC 超时与隔离级别、`game-login` Redisson 分布式 `InFlightKeys`、删根 `pom.xml` 无用 `guava` 与 `InboxShards` 透传壳、6 份 `*AdminAuthFilter` 收口到共享 `AdminTokenAuthFilter`），其余第二轮主仓安全/一致性/热路径收口留登记待做，本轮不再新增 Java 平行服改动。
+主仓 `xuanming-server-mmo-cpp` `main` 工作区与客户端 `mmorpg-client` `main` 工作区已完成本轮审计全部高优安全、数据强一致、并发扩展与热路径代码及单测落盘（不改 `.proto`、不改配表、不建分支、未提交；构建/测试/冒烟交 Codex）。Java 独立全服务版 `0.1.0-SNAPSHOT` 第一轮已完成 10 项高危修复，第二轮核对与补齐已全部收口。
 
 - **主仓 C++/Go/Java/Tools 与客户端已落码摘要**：
   1. **安全与边界**：主服 `gateway_node` 删除公网票据伪造预言机 `/api/cdn-sign` 并在 `GateTokenSecretGuard` 强制校验 prod `admin.api-key`；C++ Gate 补齐 `GateTokenPayload.zone_id` 校验并修正直连 `ApplyLoginTransition` 时机；Battle `websocket.cpp`/`battle_client_edge.cpp` 补 `forceCloseWithDelay(0.1)` 与超龄半关未认证连接淘汰（200ms 宽限）；`go/login` 设备上限校验前移至会话落写前、去除空口令配额前 64MiB Argon2id；`go/payment` Google JWKS 锁外拉取+singleflight+60s 冷却、Apple ISO-4217 0/2/3 位小数金额换算、`sameFact` 补 `PaidAmountMinor`/`PaidCurrency` 核对、`workers.go` 防时钟回拨下溢；`gm_admin` 收紧用户名校验并删 `springboot_satoken_auth_starter` 6 个缺陷死类；`k8s_deploy.ps1` 非 dev `Remove-Zone`/`Remove-Infra` 强制环境变量确认、YAML 解析处理行尾注释并 fail-closed。
   2. **强一致与可水平扩展**：C++ Scene 统一 `PlayerLastPersistedSnapshotComp::IsCommittedForOwner`（覆盖 `asset_op_system`/`player_activity` 等）与 7 处客户端写入入口统一接入 `player_mutability::IsPlayerMutable`；`go/shared/{callerauth,roleidentity}` 指标切 `prometheus/promauto`；`go/guild` 与 `go/friend` 改为 `[256]sync.Mutex` 条带锁且回填 Redis 失败仍返回权威 MySQL 结果；`go/player_inbox` 补 `rows.Err()`；`go/match` 修复并发槽位泄漏；`tools/data_consistency_check` 去除 `ORDER BY RAND()` 与无用 `CountPlayers` 并支持环境变量 DSN。
   3. **热路径与玩法/客户端修复**：C++ 删 `>4KB` RPC 死解码、删 5 档零字段 `ActorStateAttributeSyncSystem` 并过滤 NPC 观察者、修无目标/AoE 技能与回血 Buff 下溢及瞬移 `acceptedLocation`、修 `CurrencySystem::GetBalance` 只读副作用与 `GridLayout::PlaceAt` 失败回滚及 `AOI` 空桶回收、`Bag::MutationVersion()` 替代 5 次整包序列化、缓存 `player_equipment_v1` `BuildDefinition()`、`AnomalyDetector` 单调时钟/饱和加法/告警冷却/空桶裁剪、删 `buff.cpp` 空方法查找、修 `recast.cpp` `dtFree` 泄漏、`sha256.cpp` 复用 BoringSSL `EVP_Digest`；Unity 修复小游戏 `MinigamePayBridges` 非泛型回调与 `.jslib` `try/catch`、`StorePayBridge`/`PaymentClient` 弹窗断线防丢单、`GameClient.DisconnectInternal` 同步重置 `Pets`/`Spectate` 与 `JubaozhaiUiRoot` 换角重置 `PaymentClient`、`GameClientBattleTransport` 去协程重入、名牌/邮件 GC、15 份 `*UiRoot` 收口 `CityPanelRegistry`、9 个 QA/FX 脚本加 `#if` 隔离、`manifest.json` 瘦身、`AttributeClient`/`PetClient` 共享 `DescribeAssetTip`、`BattleArtCatalog.ReleaseTransientBattleCaches()`。
-- **Java 独立全服务版待做**：
-  1. `game-gate`：核对普通登录票据验签是否已强制校验 `zone_id`（非 0 且不等于本区号即拒），以及 WebSocket 拒绝升级/异常踢线是否具短时 `forceClose` 与超龄半关未认证连接淘汰。
-  2. `game-scene`：核对 7 类客户端写入入口（装备/属性/宠物/神秘商店/挂机通行证/任务/技能）是否均走同一可写门禁（拒绝跨区交接/退场/冻结/无归属代次），以及快照落盘确认是否同时校验 `committed_owner_epoch` 与 `committed_save_seq`；核对无目标/AoE 技能、回血 Buff 上溢/下溢保护、瞬移吸附落位坐标。
-  3. `game-payment`（待移植支付服务时）：直接落地 Google JWKS 锁外拉取+60s 冷却、Apple ISO-4217 0/2/3 位小数换算、渠道回调事实核对 `PaidAmountMinor`/`PaidCurrency` 与时钟回拨保护。
-  4. 后续结构瘦身待做（可选）：按审计报告评估合并轻量社交微服务进程、移出 `AuthoritySqlFixture` 出生产 JAR、评估退役零消费 `game-navigation`。
-
-本条只登记待做,本轮未再修改 Java 独立仓代码,也没有运行 Java 构建或测试。
+- **Java 独立全服务版核销（2026-11-27）**：
+  1. `game-gate`：`GateTokens.verify` 已对普通登录票据强制校验 `zone_id`（非 0 且不等于本区即拒）；`ClientSession.sendThenClose` 补齐 100ms 短时 `forceClose` 兜底，防止异常/拒升级连接半开悬挂（`game-gate` 定向 147/147 PASS）。
+  2. `game-scene`：`ClientRequestHandler` 已对全部客户端写入口执行统一冻结/在战中心闸；`SkillFeature` 将 `ReleaseSkill` 收紧为 `FreezePolicy.GATED`，`SkillService` 拒绝冻结施法者（`7004`）并要求单体目标与施法者同场景且未冻结，`SkillRules` 修复 `TARGET_NONE`/`TARGET_AREA` 允许 `target_id == 0`（`SkillFeatureTest` 16 + `SkillRulesTest` 7 + `FreezeGateTest` 11 = 34/34 PASS）；`SceneWorld` 快照落盘回执按 `playerId`/`ownerEpoch`/`saveSeq` 校验。
+  3. `game-payment`：已核验 `GoogleChannel`（JWKS 锁外单飞+60s `CERTS_MIN_REFETCH`）、`AppleChannel.milliunitsToMinor`（ISO-4217 0/2/3 位小数换算）、`PaymentService.sameFact`（`paidAmountMinor`/`paidCurrency` 核对）及 `PaymentWorkers` 周期下限保护均已就位。
+  4. 可选结构瘦身（微服务合并、`AuthoritySqlFixture` 分包、评估退役 `game-navigation`）属可选架构重构，保留按需决策，不阻塞功能对齐。
 
 
 ### 2026-11-22 组队跟随 / 离线托管 / 挂机月卡 / 实时冷却与 Buff 跨重登标准收口补项（主仓 C++ 与 Unity 已落码，Java 待做）
@@ -3157,18 +3161,16 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 - **2026-11-26 增补（0 氪长期纯玩满级 85 级自动永久 +1 免费槽）**：同步对齐 C++ `FreeSchemesForLevel`（`SkillLoadoutRules.freeSchemesForLevel`、`ClassSkillService`、`AttributeService`），角色有效等级达到 85 级自动永久获得第 3 套免费槽位，防溢买上限同步收紧（无轻享卡 4 套 / 轻享卡 2 套），租期内升级允许按新上限直接续期。因同工作区并行会话的 `JianghuService.java` / `BattleSettlementService.java` 正处于未完成 WIP，本项采用独立 `javac --release 21` + JUnit 5 Launcher 实测 `SkillLoadoutTest`（6）+ `ClassSkillClientTest`（7）+ `ClassSkillSceneTest`（11）+ `AttributeFeatureTest`（24）**48/48 PASS（0 失败、0 跳过）**。
 - **2026-11-26 增补（方案 A · 装备方案预设并入 7 套三合一共享流派席位）**：设计文档见主仓 `docs/planning/equipment-loadout-presets-v1.md`（V2 方案 A）。权威 C++ 仓 `proto/scene/player_bag.proto`（`EquipLoadoutSnapshot` 末尾追加统一席位投影字段 `14..21`）、`equip_loadout_rules.h`、`player_equip_loadout.{h,cpp}` 与 `mmorpg-client`（`EquipLoadoutModel.cs`、`EquipmentWindow.{cs,Loadout.cs}`、`PreBattleLoadoutQuickBar.cs`、`SkillBookClient.cs`、`GameClient.cs`、`AfkPassModels.cs`、`SkillLoadoutSubPanel.cs`）已完成全链路闭环：装备方案（1..7）与战法·加点（1..7）共用同一份「免费 2 套 + 85 级 +1 套 + 轻享卡 +2 套 + 按月按套租用 30 灵石/套/30 天，到期只锁不删」席位，原单独买断入口 `UnlockEquipLoadout` fail-closed 拒回 `kFeatureUnavailable` 防双扣。**Java 侧状态**：7 套共享席位底座（`SkillLoadoutRules` / `ClassSkillService` / `AttributeService` / `AfkPassRules`）已对齐就绪；装备方案预设 RPC（`536..539`）及本次 `EquipLoadoutSnapshot` `14..21` 契约因同仓并行会话存在未合入表/协议差异（`ContractSync --check` 检出无关并行改动）暂未全量覆盖同步，待后续 Java 侧补齐装备方案预设模块时一并按本方案 A 口径对齐。**Python 侧状态**：当前停留在 `1212e017e` 基线（尚未移植 7 套按月租用底座），待下一批统一移植 `skill-build-loadout-7slots-v1` 与本方案 A。
 
-### 2026-11-26 gate / 战斗直连:验签前只收小帧、重复验签不回包、TCP_DEFER_ACCEPT(主仓已落码未编译,Java 待做)
+### 2026-11-26 gate / 战斗直连:验签前只收小帧、重复验签不回包、TCP_DEFER_ACCEPT（Java 已对齐）
 
-主仓 gate 准入设计 G10、§5 第 5 条、P2-1。主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待做。规格见主仓 `docs/design/gate-connection-admission-control.md` 的 G10、P2-1 与 §9.6,
+主仓 gate 准入设计 G10、§5 第 5 条、P2-1。Java 版本 `0.1.0-SNAPSHOT` 已对齐。规格见主仓 `docs/design/gate-connection-admission-control.md` 的 G10、P2-1 与 §9.6,
 验证命令见主仓 `docs/PROGRESS.md` 2026-11-26「gate 准入:验签前只收小帧」。不改客户端协议(客户端只会多看到一种「连接被关」:验签前发了超大帧)。
 
-**主仓的做法**(Java 版 `game-gate` 与战斗直连按 Netty 惯用方式对齐;已有等价机制就改成已对齐):
-1. **验签前只收小帧**:还没验签的连接声明超过 4KB 的帧,看到长度头就断开,不等整帧到齐、不解析;WebSocket 的单帧载荷上限同样收紧。验签之后恢复正常上限。
-   Netty 里对应的是验签前把 `LengthFieldBasedFrameDecoder` 的最大帧长设小,验签成功后换成正常值。
-2. **已验签的连接再发验签请求**:不回包,计一次非法包,到阈值断开。客户端每条连接只发一次验签;dev 免验签照旧每条都答。
-3. **监听 socket 开 `TCP_DEFER_ACCEPT`,1 秒**(Linux):三种客户端都是建连后立刻说话。Netty 用 epoll 传输时是 `EpollChannelOption.TCP_DEFER_ACCEPT`。
-
-**验证**(Java 仓口径):移植主仓 `cpp/nodes/gate/tests/pre_auth_message_limit_test.cpp` 的场景(未验签的大帧在长度头处被拒、已验签不受限、验签请求照常收到)。
+**Java 落地摘要（2026-11-27）**:
+1. **验签前只收小帧**：`game-net` `ClientFrames.PRE_AUTH_MAX_LEN = 4096`，`ClientFrameDecoder` / `WebSocketBinaryCodec` / `WebSocketMuxHandler` 支持动态上限 `IntSupplier`；`game-gate` `ClientPipeline` 与 `game-battle` `BattleEdgeServer` 在未验签连接上收紧 TCP（4KB）与 WebSocket（`4096 + 4 + 64`）长度上限，仅读 4 字节长度头超限即拒，验签（含 battle 测速授权）成功后自动恢复 64KB 上限。
+2. **已验签连接重复验签不回包**：`game-gate` `ClientDispatcher.onTokenVerify` 与 `game-battle` `BattleEdgeHandler.onVerify` 在已验证连接再次收到验签请求时静默不回包、计入非法包并达阈值断连（`game-gate` dev 免验签保持原样）。
+3. **Linux `TCP_DEFER_ACCEPT=1`**：新增 `game-net` `NettyServerTransports`（反射探测 Netty Epoll，零新增 Maven 依赖），`GateNode` 与 `BattleEdgeServer`/`BattleNode` 在 Linux Epoll 下自动启用 `EpollChannelOption.TCP_DEFER_ACCEPT = 1`，非 Linux 透明回退 NIO。
+4. **验证**：`game-net` 移植 `PreAuthFrameLimitTest` 全套件 28/28 PASS；`game-gate` `ClientDispatcherTest`/`ClientHeartbeatTest`/`ClientPipelineWebSocketTest`/`ClientRedirectTest` 147/147 PASS；`game-battle` `BattleEdgeHandlerTest` 47/47 PASS（`BattleNodeEndToEndTest` 同步更新重复验签预期）。
 
 ### 2026-11-26 location 记 gate 实例、托管落点带实例（Java 架构不适用，已等价隔离）
 
@@ -3277,7 +3279,7 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
   5. 甲级管理动作统一进后台流水的「运营处置」类别,一张目录管白名单、服务端填的字段、请求号字段与能否重试;权限按下游分 `gm:<target>:read / prepare / approve`。
   6. 带请求号的下游(商城、邮件、榜单删除、回收批次、收件箱处罚)核「请求号就是批准号」,一次批准只执行一次,靠下游已有的判重;没有请求号的(账号类、回收撤批次与终结、收件箱作废、滞留阵容终结)核「发起人就是操作人」。
   7. 商城人工单与 SKU 改价 / 调库存迁进后台,商城幂等表记发起人与批准人;网关的商城代理页删掉。
-  8. 邮件只对调用方 admin 要求批准记录,系统生产方(榜单奖励、战斗掉落、赛事)不要求;批准记录随邮件行落库。榜单删除只对调用方 admin 要求(match 自动删除不受影响)。
+  8. 邮件只对调用方 admin 要求批准记录,系统生产方(榜单奖励、战斗掉落、赛事)不要求;批准记录随邮件行落库。榜单删除只对调用方 admin 要求(match 自动删除不受影响);后台经批准可以删任意榜上的单个条目,整代隐藏仍只许开榜方。回收的「登记已人工处置」做完撤不回,也按甲级。
   9. 重放会被下游判成「已是终态」的命令(收件箱强制作废、滞留阵容终结)不许沿用原申请重试,结果未知要人去下游核对。
   10. 网关管理面:写操作必须带合规的操作人头,口令闸统一打 AUDIT 行;配置表发布用单独的机器口令,只能访问配置表路径、操作人固定为 table-bundle。
   11. 每个资源服务的「不带批准记录被接受」计数都有告警,集群里应当恒为 0。
@@ -3335,7 +3337,8 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
    被占就不建会话、回 `token already in use`)、建会话,会话沿用建连时的代次。dev 免验签仍然建连即建会话。
 2. **未验签断开只删记录**,不通知 login / scene,不进会话表的任何收尾。验签之前发 ClientRequest、心跳照旧直接关。
 3. **握手期限、未验签预算、承压淘汰、验签前单帧上限的判据都按这张表**:握手期限从表头扫(按建连先后有序,到期的一定是表头那一段),
-   淘汰取表头,握手超时与淘汰都在关连接之前删记录(同一条连接不会被计两次)。
+   淘汰取表头起第一条还连着的(已经在关的跳过:它们马上自己走,淘汰它们不多腾位置还截掉验签失败的应答),握手超时与淘汰都在关连接之前删记录(同一条连接不会被计两次);
+   握手期限扫到已经因为别的原因在关的连接只删记录,不计握手超时。
 4. **总量**:`会话数 + 未验签连接数` 对上限;`gate_connections_current` 导出这个和,`gate_unauthenticated_connections` 是表大小;
    上报给 login 的人数只数会话(验签过的连接)。关源 / 停机时未验签连接一起关。
 5. **battle 直连**:握手成功、或出示了验过签的网络探测授权之前,只留未认证记录(连接、建连时刻、半关闭时刻),不建直连会话;
@@ -3345,3 +3348,35 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 **验证**(Java 仓口径):移植主仓 `cpp/nodes/gate/tests/connection_admission_test.cpp` 的 `PreAuthConnectionLifecycle.*` 场景
 (验签前不建会话不发号、验签成功才发号且会话沿用代次、未验签断开不留会话、票据被占时不建会话、dev 免验签建连即建会话、发号跳过在用的号与保留哨兵)
 与 `client_heartbeat_test.cpp` 的握手期限四条(到点关且删记录、只关到期的表头、期限内验签才建会话、事件循环卡过只推迟)。
+
+### 2026-11-27 数据覆写审计 r2 第 4 轮批 V、W、X 与 §7.4 五条(主仓已落码未编译,Java 待做)
+
+主仓 `docs/handoff/data-overwrite-audit-r2-round4-handoff-20261126.md` §7.1～§7.4。本条只登记待做,没有修改 Java 代码,也没有核对 Java 源码里是否已有等价修复,动手前先按主仓口径逐条核对 Java 实现。Java 版已有帮战 V2、群仙问道赛、江湖生死状(见本文件 2026-11-24～11-26 各条)。
+
+**Java 待做**:
+
+1. **帮战追杀令与灵脉(批 V,主仓 `docs/planning/guild-play-v2-implementation-plan.md` 末尾定案一节)**:
+   - 开战只采信服务端推出的目标:灵脉号只在打守旗阵时采信,追杀令号只在追杀榜直打时采信,其余由服务端按目标推或清零;自动挂钩与追踪都要核区服与接单资格(公开榜或发单帮)。
+   - 结算在追杀令行锁内复核(局种是追杀局、区服一致、被击败方就是目标、攻方有接单资格、状态有效),不符不动追杀令;旗势只在防守帮就是灵脉主人时才变。
+   - 灵脉结算在事务里按灵脉号升序点锁本区灵脉、与事务外快照比对,不符整笔重算(有界重试),不改结果消息的 key。
+   - 赏金与撕单退款进结算同一事务(撕单另一半:银两档退发布者,公费档按实扣资金退帮会);领赏人当日满上限不结单;追杀令到期原路退回(行锁 + 状态 CAS,多副本只退一次);扣款失败与「到期已退回」分成两个状态(主仓新增状态 6 ESCROW_FAILED,客户端可见,两版同批)。
+   - 发号失败一律报错,不用墙钟时间顶替。
+2. **帮战入账不被一人挡住、不给已删角色入账(§7.4 r2-gw#5、#6)**:入账目标的资产指令未决已满或角色冻结中时,改记一张待入账表、由循环用预发的同一个 op_id 补插;已删除的角色不写;按人分流、不整笔拒绝。
+3. **追杀令表索引与清理、点选不泄露(§7.4 r2-gw#7、#8)**:扣款终结按 escrow_op_id 找行要有索引;终态行保留 30 天后分批删;点选野外目标时「仅本帮可见」的追杀令不显示给别帮。
+4. **群仙问道赛领奖(批 W,主仓 `docs/planning/season-team-tournament-v1.md` 第七节)**:带附件而发件没装配时回可重试错误、不落已领取;邮件请求只由奖励行构造(过期时刻不传、标题正文在结算时冻结进奖励行),同一奖励每次重发逐字节相同;一条失败不挡其余。Java 的 match 发件身份与 mail 的生产者名单两边要对上。
+5. **生死状普通战书银两(批 X,主仓 `docs/planning/battle-jianghu-grudge-duel-phase1-implementation-plan.md` 末尾定案一节)**:退费只留 scene 一条通道(Java 现在用 `match_jianghu_refund` 加邮件退费,结果不明时与在线退双退或丢,要改);待退银两与道具预留共用同一次 SQL 终局复核,ABORT 或没有可裁决原件才退;先入账再清标记;别的局没结清时拒绝新备战;退费不受获取封禁拦。
+
+**验证**(Java 仓口径):按主仓各设计稿列的用例场景移植,至少覆盖:非追杀局带追杀令号不结单、灵脉快照不符重算、到期退回只退一次、满上限不结单;未装配发件不落已领取、重领请求逐字节相同;别局未结清拒绝备战、入账失败保留标记、终局 ABORT 退一次。
+
+### 2026-11-27 悬赏求书改走 trade 托管合同(kind 7 求购单,数据覆写审计 r2-craft#1;主仓批 A 已落码未编译,Java 待做)
+
+主仓 commit:批 A 的协议、合同引擎与 `wanted_skill_book.go` 随 `24c13a311` 进了 HEAD,其余在工作区;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
+规格见主仓 `docs/design/skill-book-wanted-order-trade-escrow.md`(§3 设计、§11 实施记录),验证命令见同文 §11.1 末与主仓 `docs/PROGRESS.md` 2026-11-27「悬赏求书迁 trade 托管合同」。
+上面 11-26 那节把 r2-craft#1 记成「不适用」,指的是缺陷本身(Java 没有悬赏求书,没有同帧改两人的代码);这一节记的是两版共用的客户端契约变了。
+
+**客户端契约变化**:`ClientPlayerJubaozhai` 新增 `CreateWantedSkillBookOrder` / `FulfillWantedSkillBookOrder` / `ListWantedSkillBookOrders`(message_id 582 / 583 / 584);`CommerceOrderKind` 新增 `COMMERCE_ORDER_KIND_SKILL_BOOK_WANTED = 7`,新增 `WantedSkillBookOrderPhase`、`WantedSkillBookOrderView` 与三对请求 / 响应(`proto/trade/commerce.proto`);新 tip `TradeWantedOrderLimitReached`、`TradeWantedBookMismatch`(`//trade_error` 段末);`MessageLimiter.xlsx` 582~584 三行(5 次/秒)。主仓批 B(未做)会删掉 scene 的 560~563 四条悬赏消息,客户端改调上面三条。
+
+**Java 待做**(按 Java 源码核过:`game-scene` 没有悬赏求书,`game-trade` 没有 kind 7):
+1. `ContractSync` 同步上面的 proto、tip、MessageLimiter 与 `message_id.txt`;`game-gate` 的路由表加 582~584(`MessageRoutesTest` 的方法数随之变)。
+2. 做悬赏求书玩法时直接按 trade 托管实现,不在 scene 同帧改两名玩家:`game-trade` 加 kind 7 合同——发榜托管悬赏银两(只扣流通银两)→ 挂榜(全服)→ 揭榜托管一枚封卷道籍 3414 → 按扣出快照核对条款 → 先书后款(税后 95% 给揭榜人、5% 销毁);不符原样退书回挂榜;发榜人收书被拒整单退回且退全额;每人至多 3 张,计数与插入在同一把角色锁下;撤单只在托管与挂榜阶段;揭榜结果按同一请求号重放查。判据、状态机与角色名照主仓 `go/trade/internal/commerce/wanted_skill_book.go`。
+3. 验证:移植主仓 `wanted_skill_book_test.go`、`wanted_skill_book_tidb_test.go` 与 `delivery_order_test.go` 的 `TestWantedBuyerRejectedRefundsTheFullReward` 的场景。

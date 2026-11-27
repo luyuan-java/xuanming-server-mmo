@@ -349,8 +349,9 @@ public final class ClientDispatcher {
             return;
         }
         if (s.verified) {
-            // 已验证的会话再次 verify 直接回成功（C++ 同）；不重新验票，会话上的票据字段也不被覆盖。
-            sendVerified(s);
+            // 已验证连接再次发验签：不回包、计非法包、达阈值断开（主仓 G10 / §5 第 5 条），避免成为应答放大器。
+            logRejection("repeat_token_verify", s);
+            registerIllegal(s, "repeat_token_verify", 0);
             return;
         }
         GateTokens.Verdict verdict = tokens.verify(request.getPayload(), request.getSignature(),

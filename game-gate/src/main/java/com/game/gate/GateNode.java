@@ -246,15 +246,17 @@ public final class GateNode {
         metrics.bindSessionCount(registry::size);
         metrics.bindSceneLinkCount(links::linkCount);
 
-        bossGroup = new NioEventLoopGroup(1, new DefaultThreadFactory("gate-accept"));
-        workerGroup = new NioEventLoopGroup(properties.workerThreads(), new DefaultThreadFactory("gate-io"));
+        boolean useEpoll = com.game.net.client.NettyServerTransports.epollAvailable();
+        bossGroup = com.game.net.client.NettyServerTransports.newEventLoopGroup(1, "gate-accept", useEpoll);
+        workerGroup = com.game.net.client.NettyServerTransports.newEventLoopGroup(properties.workerThreads(), "gate-io", useEpoll);
         SessionRegistry sessions = registry;
         com.game.common.net.SourcePrefixRateLimiter sourceRateLimiter =
                 new com.game.common.net.SourcePrefixRateLimiter(20.0, 200.0);
         int maxConnections = properties.maxConnections();
-        serverChannel = new ServerBootstrap()
-                .group(bossGroup, workerGroup)
-                .channel(NioServerSocketChannel.class)
+        ServerBootstrap bootstrap = com.game.net.client.NettyServerTransports.configureServer(
+                new ServerBootstrap().group(bossGroup, workerGroup),
+                useEpoll, com.game.net.client.NettyServerTransports.DEFAULT_TCP_DEFER_ACCEPT_SECONDS);
+        serverChannel = bootstrap
                 .option(ChannelOption.SO_BACKLOG, 1024)
                 .childOption(ChannelOption.TCP_NODELAY, true)
                 .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK, CLIENT_WATER_MARK)

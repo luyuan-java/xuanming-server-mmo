@@ -9,6 +9,7 @@ import io.netty.channel.ChannelPromise;
 import java.nio.channels.ClosedChannelException;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.function.IntSupplier;
 
 /**
  * RFC 6455 二进制帧编解码桥（紧贴 {@link ClientFrameDecoder} / {@link ClientFrameEncoder} 下方）。
@@ -36,7 +37,7 @@ public final class WebSocketBinaryCodec extends ChannelDuplexHandler {
     private static final int OP_PING = 0x9;
     private static final int OP_PONG = 0xA;
 
-    private final int maxPayloadBytes;
+    private final IntSupplier maxPayloadBytes;
     private final WebSocketObserver observer;
     private ByteBuf cumulation;
     private boolean fragmentedOpen;
@@ -46,7 +47,13 @@ public final class WebSocketBinaryCodec extends ChannelDuplexHandler {
         if (maxPayloadBytes <= 0) {
             throw new IllegalArgumentException("maxPayloadBytes must be positive");
         }
-        this.maxPayloadBytes = maxPayloadBytes;
+        this.maxPayloadBytes = () -> maxPayloadBytes;
+        this.observer = Objects.requireNonNull(observer, "observer");
+    }
+
+    /** 支持按认证状态动态切换单帧载荷上限（验签前收紧至 4 KiB 级、验签后放宽至 64 KiB 级）。 */
+    public WebSocketBinaryCodec(IntSupplier maxPayloadBytes, WebSocketObserver observer) {
+        this.maxPayloadBytes = Objects.requireNonNull(maxPayloadBytes, "maxPayloadBytes");
         this.observer = Objects.requireNonNull(observer, "observer");
     }
 
@@ -167,7 +174,7 @@ public final class WebSocketBinaryCodec extends ChannelDuplexHandler {
                 headerLen = 10;
             }
 
-            if (payloadLen > maxPayloadBytes) {
+            if (payloadLen > maxPayloadBytes.getAsInt()) {
                 failProtocol(ctx, CLOSE_MESSAGE_TOO_BIG, "payload_too_big_" + payloadLen);
                 return;
             }
