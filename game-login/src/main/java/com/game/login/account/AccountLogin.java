@@ -5,6 +5,8 @@ import com.game.common.token.GateTokenIssuer;
 import com.game.login.auth.AuthProviderUnavailableException;
 import com.game.login.auth.LoginAuthenticator;
 import com.game.login.auth.LoginAuthenticator.Authenticated;
+import com.game.login.auth.PassportProvider;
+import com.game.login.auth.PassportSessionEnforcer;
 import com.game.login.compliance.AntiAddictionGate;
 import com.game.login.dispatch.InFlightKeys;
 import com.game.login.dispatch.Tips;
@@ -50,6 +52,12 @@ public final class AccountLogin {
     private final InFlightKeys<String> accountsInFlight;
     private final AntiAddictionGate antiAddiction;
     private final boolean strictAccessTokenAccount;
+    private volatile PassportSessionEnforcer passportEnforcer;
+
+    public AccountLogin withPassportEnforcer(PassportSessionEnforcer enforcer) {
+        this.passportEnforcer = enforcer;
+        return this;
+    }
 
     public AccountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens tokens, LoginDevices devices) {
         this(authenticator, store, tokens, devices, new InFlightKeys<>());
@@ -132,6 +140,14 @@ public final class AccountLogin {
             return Outcome.failed(LoginErrorTip.login_error.kLoginAccountNotFound_VALUE);
         }
         String account = authenticated.get().account();
+        // 官方通行证状态核对（改密/封禁/删除）：无论放不放行均吊销改密前旧会话；本次令牌失效即拒回 2059
+        PassportSessionEnforcer enforcer = passportEnforcer;
+        if (enforcer != null && PassportProvider.AUTH_TYPE.equals(authenticated.get().authType())) {
+            int rejectTip = enforcer.checkLogin(account, authenticated.get().identityIssuedAt());
+            if (rejectTip != 0) {
+                return Outcome.failed(rejectTip);
+            }
+        }
         // 票据绑定账号校验（防在线账号反复领免排队票转给他人、防排队令牌转卖；抢账号锁之前即拒绝且不产生副作用）
         if (session != null && !GateTokenIssuer.ticketIssuedTo(session.getTicketAccountDigest(), account)) {
             log.warn("gate 票据绑定账号不符，拒绝登录 account={} session={}",
@@ -231,7 +247,7 @@ public final class AccountLogin {
                 }
             }
             if (authenticated.get().issuesTokens()
-                    && !issueTokens(account, authType, response) && session == null) {
+                    && !issueTokens(account, authType, authenticated.get().identityIssuedAt(), response) && session == null) {
                 return Outcome.failed(LoginErrorTip.login_error.kLoginTokenIssueFailed_VALUE);
             }
             if (deviceKey != null) {
@@ -399,9 +415,11 @@ public final class AccountLogin {
     }
 
     /** 签发令牌写进应答；失败返回 false（是否致命由调用方按路径决定）。 */
-    private boolean issueTokens(String account, String authType, LoginResponse.Builder response) {
+    private boolean issueTokens(String account, String authType, long identityIssuedAt, LoginResponse.Builder response) {
         try {
-            TokenPair pair = tokens.issue(account, authType, "");
+            TokenPair pair = identityIssuedAt > 0L
+                    ? tokens.issue(account, authType, "", identityIssuedAt)
+                    : tokens.issue(account, authType, "");
             response.setAccessToken(pair.accessToken())
                     .setRefreshToken(pair.refreshToken())
                     .setAccessTokenExpire(pair.accessExpireSeconds())

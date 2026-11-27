@@ -2,6 +2,8 @@ package com.game.login;
 
 import com.game.api.ContentGuardService;
 import com.game.api.DubboGroups;
+import com.game.api.GuildInternalService;
+import com.game.api.MatchInternalService;
 import com.game.api.SceneDirectoryService;
 import com.game.common.compliance.AntiAddictionRules;
 import com.game.common.id.Snowflake;
@@ -12,17 +14,27 @@ import com.game.discovery.NodeTypes;
 import com.game.discovery.RedisKeys;
 import com.game.discovery.RedisProperties;
 import com.game.discovery.location.PlayerLocationDirectory;
+import com.game.discovery.presence.PlayerPresenceDirectory;
+import com.game.discovery.presence.PlayerPushes;
 import com.game.discovery.zone.ZoneMergeFence;
 import com.game.login.account.AccountLogin;
+import com.game.login.auth.AppleRevokerClient;
 import com.game.login.auth.DevPasswordRule;
+import com.game.login.auth.DouyinMinigameProvider;
 import com.game.login.auth.ExternalAuthProviders;
+import com.game.login.auth.IdTokenProvider;
+import com.game.login.auth.IdTokenReplayGuard;
 import com.game.login.auth.NeteaseProvider;
+import com.game.login.auth.PassportAdminClient;
+import com.game.login.auth.PassportProvider;
+import com.game.login.auth.PassportSessionEnforcer;
 import com.game.login.auth.PasswordAuthenticator;
 import com.game.login.auth.ProductionPasswordAuthenticator;
 import com.game.login.auth.PasswordFailureQuota;
 import com.game.login.auth.RedisPasswordFailureQuota;
 import com.game.login.auth.OAuthPolicy;
 import com.game.login.auth.QqProvider;
+import com.game.login.auth.WeChatMinigameProvider;
 import com.game.login.auth.WeChatProvider;
 import com.game.login.auth.LoginAuthenticator;
 import com.game.login.character.CharacterRules;
@@ -104,6 +116,12 @@ public class LoginConfiguration {
      */
     @DubboReference(check = false, url = "${game.dubbo.scene-manager-url:}", timeout = 3000, retries = 0)
     private SceneDirectoryService sceneDirectory;
+
+    @DubboReference(group = DubboGroups.GUILD, check = false, url = "${game.dubbo.guild-url:}", timeout = 3000, retries = 0)
+    private GuildInternalService guildInternal;
+
+    @DubboReference(group = DubboGroups.MATCH, check = false, url = "${game.dubbo.match-url:}", timeout = 3000, retries = 0)
+    private MatchInternalService matchInternal;
 
     @Bean
     public MessageIdRegistry messageIdRegistry() {
@@ -199,17 +217,28 @@ public class LoginConfiguration {
     }
 
     /**
-     * 按配置注册的外部认证（Sa-Token / 微信 / QQ / 网易）；秘密只从环境变量读，缺了拒绝启动。
-     * Sa-Token 的 Redis 客户端最后建：前面的校验失败时不留下一个没人关的客户端（它的线程不是守护线程，会让启动失败的进程退不掉）。
+     * 按配置注册的外部认证（Sa-Token / 微信 App / 微信小游戏 / 抖音小游戏 / QQ / Apple / Google / 官方通行证 / 网易）；
+     * 秘密只从环境变量读，缺了或违反门禁直接拒绝启动。
      */
     @Bean(destroyMethod = "close")
     public ExternalAuthProviders externalAuthProviders(LoginAuthProperties auth, RedisProperties redisProps,
-                                                       LoginProperties props) {
+                                                       LoginProperties props, RedissonClient redis, RedisKeys redisKeys) {
+        return buildExternalAuthProviders(auth, redisProps, props, redis, redisKeys, System::getenv);
+    }
+
+    static ExternalAuthProviders buildExternalAuthProviders(LoginAuthProperties auth, RedisProperties redisProps,
+                                                            LoginProperties props, RedissonClient redis,
+                                                            RedisKeys redisKeys,
+                                                            java.util.function.UnaryOperator<String> env) {
         ExternalAuthProviders providers = new ExternalAuthProviders();
-        // 接口地址的 http 只给 dev 模式的本地假服务；生产只接受 https（请求里带着 AppSecret / access_token）
         boolean allowHttpEndpoint = LoginProperties.MODE_DEV.equals(props.mode());
+        IdTokenReplayGuard replayGuard = redis == null ? null : IdTokenReplayGuard.redis(redis);
+        if (auth.wechat() != null && auth.wechatMinigame() != null
+                && java.util.Objects.equals(auth.wechat().appId(), auth.wechatMinigame().appId())) {
+            throw new IllegalStateException("微信 App 与微信小游戏不得配置相同的 app-id，拒绝启动");
+        }
         if (auth.wechat() != null) {
-            String secret = System.getenv(LoginAuthProperties.WECHAT_SECRET_ENV);
+            String secret = env.apply(LoginAuthProperties.WECHAT_SECRET_ENV);
             if (secret == null || secret.isBlank()) {
                 throw new IllegalStateException("配置了微信认证但缺少环境变量 " + LoginAuthProperties.WECHAT_SECRET_ENV + "，拒绝启动");
             }
@@ -220,6 +249,32 @@ public class LoginConfiguration {
             log.info("外部认证已注册：wechat（endpoint={} require-union-id={}）",
                     auth.wechat().endpoint() == null ? "生产" : auth.wechat().endpoint(), requireUnionId);
         }
+        if (auth.wechatMinigame() != null) {
+            String secret = env.apply(LoginAuthProperties.WECHAT_MINIGAME_SECRET_ENV);
+            if (secret == null || secret.isBlank()) {
+                throw new IllegalStateException("配置了微信小游戏认证但缺少环境变量 "
+                        + LoginAuthProperties.WECHAT_MINIGAME_SECRET_ENV + "，拒绝启动");
+            }
+            boolean requireUnionId = auth.wechatMinigame().requireUnionId();
+            providers.add(WeChatMinigameProvider.AUTH_TYPE, new WeChatMinigameProvider(
+                    auth.wechatMinigame().appId(), secret, auth.wechatMinigame().endpoint(),
+                    new OAuthPolicy(requireUnionId, true, allowHttpEndpoint)));
+            warnOpenIdFallback(WeChatMinigameProvider.AUTH_TYPE, requireUnionId);
+            log.info("外部认证已注册：wechat_minigame（require-union-id={}）", requireUnionId);
+        }
+        if (auth.douyinMinigame() != null) {
+            String secret = env.apply(LoginAuthProperties.DOUYIN_MINIGAME_SECRET_ENV);
+            if (secret == null || secret.isBlank()) {
+                throw new IllegalStateException("配置了抖音小游戏认证但缺少环境变量 "
+                        + LoginAuthProperties.DOUYIN_MINIGAME_SECRET_ENV + "，拒绝启动");
+            }
+            boolean requireUnionId = auth.douyinMinigame().requireUnionId();
+            providers.add(DouyinMinigameProvider.AUTH_TYPE, new DouyinMinigameProvider(
+                    auth.douyinMinigame().appId(), secret, auth.douyinMinigame().endpoint(),
+                    new OAuthPolicy(requireUnionId, true, allowHttpEndpoint)));
+            warnOpenIdFallback(DouyinMinigameProvider.AUTH_TYPE, requireUnionId);
+            log.info("外部认证已注册：douyin_minigame（require-union-id={}）", requireUnionId);
+        }
         if (auth.qq() != null) {
             boolean requireUnionId = auth.qq().requireUnionId();
             providers.add("qq", new QqProvider(auth.qq().appId(), auth.qq().endpoint(),
@@ -228,21 +283,36 @@ public class LoginConfiguration {
             log.info("外部认证已注册：qq（endpoint={} request-union-id={} require-union-id={}）",
                     auth.qq().endpoint() == null ? "生产" : auth.qq().endpoint(), auth.qq().requestUnionId(), requireUnionId);
         }
+        if (auth.apple() != null) {
+            providers.add(IdTokenProvider.APPLE_AUTH_TYPE, IdTokenProvider.apple(
+                    auth.apple().clientId(), auth.apple().endpoint(), allowHttpEndpoint, replayGuard, redisKeys));
+            log.info("外部认证已注册：apple");
+        }
+        if (auth.google() != null) {
+            providers.add(IdTokenProvider.GOOGLE_AUTH_TYPE, IdTokenProvider.google(
+                    auth.google().clientId(), auth.google().endpoint(), allowHttpEndpoint, replayGuard, redisKeys));
+            log.info("外部认证已注册：google");
+        }
+        if (auth.passport() != null) {
+            validatePassportAdminGate(auth.passport(), props.devMode(), env);
+            providers.add(PassportProvider.AUTH_TYPE, new PassportProvider(
+                    auth.passport().issuer(), auth.passport().clientId(), auth.passport().endpoint(),
+                    allowHttpEndpoint, replayGuard, redisKeys));
+            log.info("外部认证已注册：passport");
+        }
         if (auth.netease() != null && auth.netease().enabled()) {
             providers.add("netease", new NeteaseProvider());
             log.info("外部认证已注册：netease（占位，恒失败）");
         }
         if (auth.satoken() != null) {
             org.redisson.config.Config config = new org.redisson.config.Config();
-            // 超时 / 重试与本进程的业务 Redis 同一套上界（RedisProperties）：Redisson 默认值下 Sa-Token Redis 失联时
-            // 一次认证能占住 login 工作线程二十多秒
             var server = config.useSingleServer().setAddress(auth.satoken().redisAddress())
                     .setDatabase(auth.satoken().database())
                     .setConnectTimeout(redisProps.connectTimeoutMs())
                     .setTimeout(redisProps.timeoutMs())
                     .setRetryAttempts(redisProps.retryAttempts())
                     .setRetryDelay(new ConstantDelay(Duration.ofMillis(redisProps.retryDelayMs())));
-            String redisPassword = System.getenv(LoginAuthProperties.SATOKEN_REDIS_PASSWORD_ENV);
+            String redisPassword = env.apply(LoginAuthProperties.SATOKEN_REDIS_PASSWORD_ENV);
             if (redisPassword != null && !redisPassword.isEmpty()) {
                 server.setPassword(redisPassword);
             }
@@ -257,6 +327,53 @@ public class LoginConfiguration {
                     auth.satoken().tokenName(), auth.satoken().loginType());
         }
         return providers;
+    }
+
+    /** 生产模式下配置了 passport 就必须配置独立管理凭据（AdminClientId != ClientId 且环境变量密钥非空）。 */
+    static void validatePassportAdminGate(LoginAuthProperties.Passport passport, boolean devMode,
+                                          java.util.function.UnaryOperator<String> env) {
+        boolean hasAdminId = passport.adminClientId() != null && !passport.adminClientId().isBlank();
+        String secret = env.apply(passport.adminClientSecretEnv());
+        boolean hasSecret = secret != null && !secret.isBlank();
+        if (hasAdminId && passport.adminClientId().equals(passport.clientId())) {
+            throw new IllegalStateException("官方通行证 admin-client-id 不能与客户端公开应用的 client-id 相同，拒绝启动");
+        }
+        if (!devMode && (!hasAdminId || !hasSecret)) {
+            throw new IllegalStateException("生产模式启用官方通行证必须配置 admin-client-id 与环境变量 "
+                    + passport.adminClientSecretEnv() + "，拒绝启动");
+        }
+        if (hasAdminId != hasSecret) {
+            throw new IllegalStateException("官方通行证 admin-client-id 与环境变量 "
+                    + passport.adminClientSecretEnv() + " 必须成对配置，拒绝启动");
+        }
+    }
+
+    static AppleRevokerClient buildAppleRevoker(LoginAuthProperties auth, LoginProperties props,
+                                                java.util.function.UnaryOperator<String> env) {
+        if (auth.apple() == null || !auth.apple().revokeConfigured()) {
+            return null;
+        }
+        String pem = env.apply(auth.apple().privateKeyEnv());
+        if (pem == null || pem.isBlank()) {
+            throw new IllegalStateException("配置了 Apple 授权撤销但缺少环境变量 " + auth.apple().privateKeyEnv() + "，拒绝启动");
+        }
+        boolean allowHttp = LoginProperties.MODE_DEV.equals(props.mode());
+        return new AppleRevokerClient(auth.apple().clientId(), auth.apple().teamId(),
+                auth.apple().keyId(), pem, auth.apple().endpoint(), allowHttp);
+    }
+
+    static PassportAdminClient buildPassportAdmin(LoginAuthProperties auth, LoginProperties props,
+                                                  java.util.function.UnaryOperator<String> env) {
+        if (auth.passport() == null || auth.passport().adminClientId() == null || auth.passport().adminClientId().isBlank()) {
+            return null;
+        }
+        String secret = env.apply(auth.passport().adminClientSecretEnv());
+        if (secret == null || secret.isBlank()) {
+            return null;
+        }
+        boolean allowHttp = LoginProperties.MODE_DEV.equals(props.mode());
+        return new PassportAdminClient(auth.passport().issuer(), auth.passport().endpoint(),
+                auth.passport().adminClientId(), secret, allowHttp);
     }
 
     @Bean(destroyMethod = "close")
@@ -294,25 +411,88 @@ public class LoginConfiguration {
                 null, true);
     }
 
-    /** 登录主流程（TCP 48 与 HTTP 登录共用，同一份跨实例账号在途闸门，挂载可选防沉迷门禁）。 */
+    /** 登录主流程（TCP 48 与 HTTP 登录共用，同一份跨实例账号在途闸门，挂载可选防沉迷门禁与通行证核对）。 */
     @Bean
     public AccountLogin accountLogin(LoginAuthenticator authenticator, PlayerStore store, LoginTokens loginTokens,
                                      LoginDevices loginDevices, RedissonClient redis, RedisKeys redisKeys,
-                                     ObjectProvider<AntiAddictionGate> antiAddictionGate) {
+                                     ObjectProvider<AntiAddictionGate> antiAddictionGate,
+                                     ObjectProvider<PassportSessionEnforcer> passportEnforcer) {
         return new AccountLogin(authenticator, store, loginTokens, loginDevices,
                 InFlightKeys.distributed(redis, account -> redisKeys.loginInFlight("account", account), IN_FLIGHT_TTL),
-                antiAddictionGate.getIfAvailable(), true);
+                antiAddictionGate.getIfAvailable(), true)
+                .withPassportEnforcer(passportEnforcer.getIfAvailable());
     }
 
-    /** 账号注销服务与后台执行器（每 30s 按租约认领到期账号并经角色栅栏删除）。 */
+    @Bean
+    public PlayerPushes loginPlayerPushes(RedissonClient redis, RedisKeys redisKeys,
+                                          PlayerPresenceDirectory presenceDirectory) {
+        return new PlayerPushes(redis, redisKeys, presenceDirectory);
+    }
+
+    @Bean(destroyMethod = "close")
+    public AppleRevokerClient appleRevokerClient(LoginAuthProperties auth, LoginProperties props) {
+        return buildAppleRevoker(auth, props, System::getenv);
+    }
+
+    @Bean(destroyMethod = "close")
+    public PassportAdminClient passportAdminClient(LoginAuthProperties auth, LoginProperties props) {
+        return buildPassportAdmin(auth, props, System::getenv);
+    }
+
+    @Bean(destroyMethod = "close")
+    public PassportSessionEnforcer passportSessionEnforcer(ObjectProvider<PassportAdminClient> passportAdmin,
+                                                           LoginTokens loginTokens, PlayerStore store,
+                                                           PlayerPushes playerPushes, OwnerTakeovers ownerTakeovers,
+                                                           MeterRegistry meterRegistry) {
+        PassportAdminClient admin = passportAdmin.getIfAvailable();
+        if (admin == null) {
+            return null;
+        }
+        return new PassportSessionEnforcer(admin, loginTokens, (account, tipId) -> {
+            List<com.game.player.store.PlayerRow> roles = store.listPlayers(account);
+            if (roles == null || roles.isEmpty()) {
+                return;
+            }
+            for (var role : roles) {
+                try {
+                    playerPushes.kick(role.getPlayerId(), tipId)
+                            .toCompletableFuture()
+                            .orTimeout(2, java.util.concurrent.TimeUnit.SECONDS)
+                            .join();
+                } catch (RuntimeException e) {
+                    log.debug("[passport] kick gate player={} err={}",
+                            Long.toUnsignedString(role.getPlayerId()), e.getClass().getSimpleName());
+                }
+                if (ownerTakeovers != null && role.getOwnerEpoch() > 0) {
+                    ownerTakeovers.request(role.getPlayerId(), role.getOwnerEpoch());
+                }
+            }
+        }, meterRegistry);
+    }
+
+    /** 账号注销服务与后台执行器（每 30s 按租约认领到期账号并经角色栅栏删除、清理跨域数据与通行证用户）。 */
     @Bean
     public AccountDeletionService accountDeletionService(PlayerStore store, LoginTokens loginTokens,
                                                          OwnerTakeovers ownerTakeovers,
+                                                         PlayerPushes playerPushes,
+                                                         ObjectProvider<AppleRevokerClient> appleRevoker,
+                                                         ObjectProvider<PassportAdminClient> passportAdmin,
                                                          ComplianceProperties compliance,
                                                          MeterRegistry meterRegistry) {
         var del = compliance.getDeletion();
+        List<java.util.function.LongPredicate> cleanups = new java.util.ArrayList<>();
+        if (guildInternal != null) {
+            cleanups.add(pid -> Boolean.TRUE.equals(guildInternal.purgeRemovedRole(pid).join()));
+        }
+        if (matchInternal != null) {
+            cleanups.add(pid -> Boolean.TRUE.equals(matchInternal.purgeRemovedRole(pid).join()));
+        }
+        PassportAdminClient admin = passportAdmin.getIfAvailable();
         return new AccountDeletionService(store, loginTokens, ownerTakeovers, RoleDeletionPrecheck.SQL_FULL,
-                del.getCoolingOff(), null, del.isExecutorEnabled(), meterRegistry);
+                del.getCoolingOff(), appleRevoker.getIfAvailable(), del.isExecutorEnabled(), meterRegistry)
+                .withPlayerPushes(playerPushes)
+                .withPassportUserDeleter(admin == null ? null : admin::deleteUser)
+                .withRolePurgeCleanups(cleanups);
     }
 
     /** 显式开启 game.login.compliance.anti-addiction.enabled=true 时装配 NPPA 实名、防沉迷裁决与上下线上报。 */
@@ -369,8 +549,10 @@ public class LoginConfiguration {
     }
 
     @Bean
-    public RefreshTokenHandler refreshTokenHandler(LoginTokens loginTokens) {
-        return new RefreshTokenHandler(loginTokens);
+    public RefreshTokenHandler refreshTokenHandler(LoginTokens loginTokens,
+                                                   ObjectProvider<PassportSessionEnforcer> passportEnforcer) {
+        return new RefreshTokenHandler(loginTokens)
+                .withPassportEnforcer(passportEnforcer.getIfAvailable());
     }
 
     /**

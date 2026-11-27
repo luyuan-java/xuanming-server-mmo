@@ -53,14 +53,37 @@ final class OAuthHttp implements AutoCloseable {
      * 抛出的异常一律只带异常类名或状态码：URI 的查询串里有 code / access_token / secret，JDK 的 URI / 请求构造异常会把整条 URI 写进消息。
      */
     String get(String base, String path, Map<String, String> query) {
-        StringJoiner joined = new StringJoiner("&");
-        query.forEach((k, v) -> joined.add(URLEncoder.encode(k, StandardCharsets.UTF_8) + "="
-                + URLEncoder.encode(v, StandardCharsets.UTF_8)));
+        return get(base, path, query, Map.of());
+    }
+
+    /** 同 {@link #get(String, String, Map)}，可附加请求头（如抖音 code2Session 要求 {@code Content-Type: application/json}）。 */
+    String get(String base, String path, Map<String, String> query, Map<String, String> headers) {
+        String target = trimSlash(base) + path;
+        if (query != null && !query.isEmpty()) {
+            StringJoiner joined = new StringJoiner("&");
+            query.forEach((k, v) -> joined.add(URLEncoder.encode(k, StandardCharsets.UTF_8) + "="
+                    + URLEncoder.encode(v, StandardCharsets.UTF_8)));
+            target = target + "?" + joined;
+        }
+        return getUrl(target, headers);
+    }
+
+    /** GET 完整 URL（JWKS 等无查询串地址用）。 */
+    String getUrl(String fullUrl) {
+        return getUrl(fullUrl, Map.of());
+    }
+
+    /** GET 完整 URL，可附加请求头。 */
+    String getUrl(String fullUrl, Map<String, String> headers) {
         CompletableFuture<HttpResponse<byte[]>> pending = null;
         HttpResponse<byte[]> response;
         try {
-            URI uri = URI.create(trimSlash(base) + path + "?" + joined);
-            HttpRequest request = HttpRequest.newBuilder(uri).timeout(timeout).GET().build();
+            URI uri = URI.create(fullUrl);
+            HttpRequest.Builder builder = HttpRequest.newBuilder(uri).timeout(timeout).GET();
+            if (headers != null) {
+                headers.forEach(builder::header);
+            }
+            HttpRequest request = builder.build();
             // 整个交换（含读响应体）一个总时限，同 Go http.Client.Timeout：JDK 的请求超时只管到响应头，
             // 响应体读到一半卡住会把 login 工作线程一直挂着
             pending = client.sendAsync(request, responseInfo -> isSuccess(responseInfo.statusCode())

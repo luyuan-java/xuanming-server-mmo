@@ -2488,8 +2488,8 @@ class ClientDispatcherTest {
 
             int sessionId = kickLinks.sent.getFirst().frame().getPlayerEnter().getSessionId();
             ClientSession sess = reg.get(sessionId);
-            d.onPlayerEntered(sess, enter.getSceneNodeId(), sess.sceneLinkGen,
-                    com.game.api.proto.PlayerEntered.newBuilder().setSessionId(sessionId).setPlayerId(enter.getPlayerId())
+            d.onPlayerEnterResult(sess, enter.getSceneNodeId(), sess.sceneLinkGen,
+                    PlayerEnterResult.newBuilder().setSessionId(sessionId).setPlayerId(enter.getPlayerId())
                             .setOwnerEpoch(enter.getOwnerEpoch()).build());
             assertThat(d.kickByServer(sess, enter.getPlayerId(), reasonTip)).isEqualTo(GateMetrics.PushResult.DELIVERED);
             ch.runPendingTasks();

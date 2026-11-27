@@ -1,10 +1,12 @@
 package com.game.login.handler;
 
 import com.game.api.proto.SessionContext;
+import com.game.login.auth.PassportSessionEnforcer;
 import com.game.login.dispatch.ClientMessageHandler;
 import com.game.login.dispatch.HandlerReply;
 import com.game.login.dispatch.Tips;
 import com.game.login.token.LoginTokens;
+import com.game.login.token.TokenData;
 import com.game.login.token.TokenPair;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.login.RefreshTokenRequest;
@@ -51,6 +53,12 @@ public final class RefreshTokenHandler implements ClientMessageHandler<RefreshTo
     private final LoginTokens tokens;
     private final LongSupplier nanoClock;
     private final Duration refreshBudget;
+    private volatile PassportSessionEnforcer passportEnforcer;
+
+    public RefreshTokenHandler withPassportEnforcer(PassportSessionEnforcer enforcer) {
+        this.passportEnforcer = enforcer;
+        return this;
+    }
 
     public RefreshTokenHandler(LoginTokens tokens) {
         this(tokens, System::nanoTime, DEFAULT_REFRESH_BUDGET);
@@ -116,6 +124,20 @@ public final class RefreshTokenHandler implements ClientMessageHandler<RefreshTo
     }
 
     private RefreshTokenResponse rotate(RefreshTokenRequest request, BooleanSupplier pastDeadline) {
+        PassportSessionEnforcer enforcer = passportEnforcer;
+        if (enforcer != null) {
+            Optional<TokenData> inspected = Optional.empty();
+            try {
+                inspected = tokens.inspectRefresh(request.getRefreshToken());
+            } catch (RuntimeException e) {
+                log.warn("刷新令牌预检读存储出错，交轮换路径处理 reason={}", e.getClass().getName());
+            }
+            if (inspected.isPresent() && enforcer.checkRefresh(inspected.get())) {
+                return RefreshTokenResponse.newBuilder()
+                        .setErrorMessage(Tips.of(LoginErrorTip.login_error.kLoginAccountNotFound_VALUE))
+                        .build();
+            }
+        }
         Optional<TokenPair> pair;
         try {
             pair = tokens.refresh(request.getRefreshToken(), pastDeadline);

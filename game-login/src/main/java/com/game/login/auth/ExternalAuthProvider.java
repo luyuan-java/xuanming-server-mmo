@@ -8,10 +8,16 @@ import java.util.Optional;
  */
 public interface ExternalAuthProvider {
 
-    /** 认证通过的账号与原始渠道 openid（微信等平台内容安全审核需要 openid，即使账号主键采用 unionid）。 */
-    record VerifiedIdentity(String account, String openId) {
+    /**
+     * 认证通过的账号、原始渠道 openid 与身份令牌签发秒（通行证改密前旧会话吊销用，其余渠道为 0）。
+     */
+    record VerifiedIdentity(String account, String openId, long identityIssuedAt) {
         public VerifiedIdentity {
             openId = openId == null ? "" : openId;
+        }
+
+        public VerifiedIdentity(String account, String openId) {
+            this(account, openId, 0L);
         }
     }
 

@@ -36,6 +36,10 @@ public interface GuildTxHooks {
     default void cleanupGuildWarOnDisband(GuildJdbc tx, long guildId, long nowMs) throws SQLException {
     }
 
+    /** 账号注销删角收尾时同事务清理帮战个人数据（守旗阵、个人状态、待入账行）。 */
+    default void cleanupGuildWarPlayerRows(GuildJdbc tx, long playerId) throws SQLException {
+    }
+
     /** 4.4：两张表都还不存在，空操作。 */
     GuildTxHooks NONE = new GuildTxHooks() {
         @Override

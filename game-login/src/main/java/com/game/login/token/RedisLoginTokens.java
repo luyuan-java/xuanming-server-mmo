@@ -112,7 +112,7 @@ public final class RedisLoginTokens implements LoginTokens {
             end
             redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
             redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[3])
-            redis.call('HSET', KEYS[3], 'account', ARGV[4], 'head', ARGV[5], 'prev', '', 'created_at', ARGV[6], 'rotated_at', ARGV[6])
+            redis.call('HSET', KEYS[3], 'account', ARGV[4], 'head', ARGV[5], 'prev', '', 'created_at', ARGV[6], 'rotated_at', ARGV[6], 'id_token_iat', ARGV[7])
             redis.call('PEXPIRE', KEYS[3], ARGV[3])
             return 1
             """;
@@ -298,6 +298,11 @@ public final class RedisLoginTokens implements LoginTokens {
      */
     @Override
     public TokenPair issue(String account, String authType, String deviceId) {
+        return issue(account, authType, deviceId, 0L);
+    }
+
+    @Override
+    public TokenPair issue(String account, String authType, String deviceId, long idTokenIat) {
         if (account == null || account.isEmpty() || authType == null || authType.isEmpty()) {
             throw new IllegalArgumentException("签发令牌的账号与认证方式不能为空");
         }
@@ -314,13 +319,13 @@ public final class RedisLoginTokens implements LoginTokens {
         String refresh = newToken(familyId, Kind.REFRESH);
         long refreshExpire = nowSeconds + refreshTtl.toSeconds();
         TokenPair pair = new TokenPair(access, refresh, nowSeconds + accessTtl.toSeconds(), refreshExpire);
-        String payload = encode(new TokenData(account, authType, deviceId, nowSeconds, familyId));
+        String payload = encode(new TokenData(account, authType, deviceId, nowSeconds, familyId, idTokenIat));
         List<Object> keys = List.of(redisKeys.loginAccessToken(familyId, access), redisKeys.loginRefreshToken(familyId, refresh),
                 redisKeys.loginRefreshFamily(familyId));
         try {
             redis.getScript(StringCodec.INSTANCE).eval(RScript.Mode.READ_WRITE, ISSUE_SCRIPT, RScript.ReturnType.INTEGER, keys,
                     payload, String.valueOf(accessTtl.toMillis()), String.valueOf(refreshTtl.toMillis()), account, refresh,
-                    String.valueOf(nowSeconds));
+                    String.valueOf(nowSeconds), String.valueOf(idTokenIat));
         } catch (RuntimeException e) {
             if (!isScriptReply(e, COLLISION)) {
                 // 结果未知：首发可能已经写入。按值撤回，撞键之外的情况都不会误删别人的键。
@@ -430,7 +435,7 @@ public final class RedisLoginTokens implements LoginTokens {
                 List.of(redisKeys.loginRefreshToken(familyId, refreshToken), redisKeys.loginAccessToken(familyId, access),
                         redisKeys.loginRefreshToken(familyId, refresh), redisKeys.loginRefreshFamily(familyId),
                         redisKeys.loginRefreshRotated(familyId, refreshToken)),
-                value, encode(new TokenData(old.account(), old.authType(), old.deviceId(), nowSeconds, familyId)),
+                value, encode(new TokenData(old.account(), old.authType(), old.deviceId(), nowSeconds, familyId, old.idTokenIat())),
                 String.valueOf(accessTtl.toMillis()), String.valueOf(refreshTtl.toMillis()), refresh, refreshToken,
                 String.valueOf(nowSeconds), String.valueOf(reuseGraceMillis), record, old.account()));
         long result = rotated == null ? -1L : rotated;
@@ -590,6 +595,21 @@ public final class RedisLoginTokens implements LoginTokens {
     }
 
     @Override
+    public Optional<TokenData> inspectRefresh(String refreshToken) {
+        Optional<Parsed> parsed = parse(refreshToken).filter(p -> p.kind() == Kind.REFRESH);
+        if (parsed.isEmpty()) {
+            return Optional.empty();
+        }
+        String familyId = parsed.get().familyId();
+        String value = store("预检refresh", () -> redis.<String>getBucket(redisKeys.loginRefreshToken(familyId, refreshToken),
+                StringCodec.INSTANCE).get());
+        if (value == null) {
+            return Optional.empty();
+        }
+        return decode(value, familyId);
+    }
+
+    @Override
     public void revokeAll(String account) {
         if (account == null || account.isEmpty()) {
             return;
@@ -610,6 +630,35 @@ public final class RedisLoginTokens implements LoginTokens {
         } catch (RuntimeException e) {
             log.warn("清理账号令牌家族索引失败 account={}: {}", account, e.getClass().getSimpleName());
         }
+    }
+
+    @Override
+    public int revokeIssuedBefore(String account, long cutoffSeconds) {
+        if (account == null || account.isEmpty()) {
+            return 0;
+        }
+        String setKey = redisKeys.loginAccountRefresh(account);
+        RScoredSortedSet<String> set = redis.getScoredSortedSet(setKey, StringCodec.INSTANCE);
+        List<String> families = store("读取账号令牌家族列表", () -> new ArrayList<>(set.valueRange(0, -1)));
+        int revoked = 0;
+        for (String familyId : families) {
+            Map<String, String> fields = store("读取家族签发时刻", () -> redis.<String, String>getMap(
+                    redisKeys.loginRefreshFamily(familyId), StringCodec.INSTANCE).readAllMap());
+            if (fields.isEmpty()) {
+                continue;
+            }
+            if (!account.equals(fields.get("account"))) {
+                continue;
+            }
+            long iat = parseLong(fields.get("id_token_iat"));
+            if (iat <= cutoffSeconds) {
+                String head = fields.getOrDefault("head", "");
+                if (store("按时刻吊销家族", () -> revokeFamily(account, familyId, head))) {
+                    revoked++;
+                }
+            }
+        }
+        return revoked;
     }
 
     /**

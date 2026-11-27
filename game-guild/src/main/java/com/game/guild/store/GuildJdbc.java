@@ -54,6 +54,11 @@ public final class GuildJdbc {
         return deadline;
     }
 
+    /** 当前事务底层的 JDBC 连接（包内只供同事务角色护栏检查复用）。 */
+    Connection connection() {
+        return connection;
+    }
+
     /** 单行查询；没有行返回 null（映射结果本身不许是 null）。 */
     public <T> T one(String sql, RowMapper<T> mapper, Object... args) throws SQLException {
         try (PreparedStatement ps = prepare(sql, args); ResultSet rs = ps.executeQuery()) {

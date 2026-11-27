@@ -228,9 +228,17 @@ public interface GuildStore {
     }
 
     /** 账号注销帮会收尾结果：不在帮、普通离帮、帮主自动让位或单人帮解散。 */
-    record DeletionOutcome(Kind kind, long guildId, int zoneId, long newLeaderId) {
+    record DeletionOutcome(Kind kind, long guildId, int zoneId, long newLeaderId, List<Long> remainingMembers) {
         public enum Kind {
             NOT_IN_GUILD, REMOVED, LEADER_TRANSFERRED, DISBANDED
+        }
+
+        public DeletionOutcome {
+            remainingMembers = remainingMembers == null ? List.of() : List.copyOf(remainingMembers);
+        }
+
+        public DeletionOutcome(Kind kind, long guildId, int zoneId, long newLeaderId) {
+            this(kind, guildId, zoneId, newLeaderId, List.of());
         }
     }
 

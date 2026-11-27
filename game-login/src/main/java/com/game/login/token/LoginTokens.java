@@ -22,6 +22,16 @@ public interface LoginTokens {
     /** 签一对新令牌。 */
     TokenPair issue(String account, String authType, String deviceId);
 
+    /** 签一对新令牌并记录原始身份令牌签发秒（官方通行证用；默认委托 3 参版本以兼容测试替身）。 */
+    default TokenPair issue(String account, String authType, String deviceId, long idTokenIat) {
+        return issue(account, authType, deviceId);
+    }
+
+    /** 只读查看 refresh token 当前载荷（用于轮换前核对通行证改密/封禁状态，不消费令牌）；无效或已消耗返回空。 */
+    default Optional<TokenData> inspectRefresh(String refreshToken) {
+        return Optional.empty();
+    }
+
     /** access token 有效时给出它的数据；无效 / 过期 / 空串为空。 */
     Optional<TokenData> validateAccess(String accessToken);
 
@@ -47,6 +57,14 @@ public interface LoginTokens {
 
     /** 吊销该账号的全部令牌家族（账号注销申请与执行时调用）；默认空实现以兼容测试替身。 */
     default void revokeAll(String account) {
+    }
+
+    /**
+     * 吊销该账号下所有原始身份令牌签发时刻 {@code idTokenIat <= cutoffSeconds} 的令牌家族（改密后保留新登录会话）；
+     * 返回实际吊销的家族数。默认返回 0 以兼容测试替身。
+     */
+    default int revokeIssuedBefore(String account, long cutoffSeconds) {
+        return 0;
     }
 
     /** 轮换在写之前因请求截止放弃：什么都没写，旧 refresh 仍然有效，调用方应回可重试的错误（不是「令牌无效」）。 */

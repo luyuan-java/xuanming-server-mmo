@@ -35,22 +35,28 @@ public final class LoginAuthenticator {
     /**
      * 认证通过的结果。
      *
-     * @param authType        本次登录请求生效的认证方式（空串已归一成 {@code password}）
-     * @param channelAuthType 原始登录渠道（{@code access_token} 场景保留签发令牌时的原始渠道如 {@code wechat}/{@code qq}，
-     *                        供防沉迷与渠道身份判定使用；直登场景与 {@code authType} 相同）
+     * @param authType         本次登录请求生效的认证方式（空串已归一成 {@code password}）
+     * @param channelAuthType  原始登录渠道（{@code access_token} 场景保留签发令牌时的原始渠道如 {@code wechat}/{@code qq}，
+     *                         供防沉迷与渠道身份判定使用；直登场景与 {@code authType} 相同）
+     * @param openId           渠道原始 openid（无则空串）
+     * @param identityIssuedAt 第三方身份令牌签发 Unix 秒（官方通行证改密前会话判定用；其余为 0）
      */
-    public record Authenticated(String account, String authType, String channelAuthType, String openId) {
+    public record Authenticated(String account, String authType, String channelAuthType, String openId, long identityIssuedAt) {
 
         public Authenticated {
             openId = openId == null ? "" : openId;
         }
 
         public Authenticated(String account, String authType) {
-            this(account, authType, authType, "");
+            this(account, authType, authType, "", 0L);
         }
 
         public Authenticated(String account, String authType, String channelAuthType) {
-            this(account, authType, channelAuthType, "");
+            this(account, authType, channelAuthType, "", 0L);
+        }
+
+        public Authenticated(String account, String authType, String channelAuthType, String openId) {
+            this(account, authType, channelAuthType, openId, 0L);
         }
 
         /** access token 登录不再签新令牌（基线：避免令牌搅动）。 */
@@ -139,7 +145,7 @@ public final class LoginAuthenticator {
         }
         try {
             return provider.authenticateWithIdentity(request.getAuthToken())
-                    .map(id -> new Authenticated(id.account(), authType, authType, id.openId()));
+                    .map(id -> new Authenticated(id.account(), authType, authType, id.openId(), id.identityIssuedAt()));
         } catch (AuthProviderUnavailableException e) {
             // 消息由本包实现给出，只带固定说明与渠道错误码，不含凭据
             log.warn("外部认证渠道故障 auth_type={} reason={}", authType, e.getMessage());

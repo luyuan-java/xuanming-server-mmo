@@ -2216,31 +2216,10 @@ robot `killswitch` 端到端补两项:type 范围关停 gate 上的一个客户�
   - 主仓的口径：预发与生产必须给 login 与 7 个在线服务的 RPC 端口加 NetworkPolicy 白名单，只放行登记过的调用方；Pod 间流量必须透明加密（CNI 的 WireGuard），部署前检核不到就拒绝部署。
   - Java 要核对：Java 版的 K8s 部署是否同样要求这两项；Dubbo 端口有没有只放行真实调用方。
 
-### 2026-11-12 微信 / 抖音小游戏登录(主仓已落码未编译,Java 待做)
+### 2026-11-12 微信 / 抖音小游戏登录（Java 已对齐）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/third-party-login-end-to-end-design.md` §十一,
-联调手册见主仓 `docs/ops/wechat-qq-sandbox-runbook.md` §H,验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「微信 / 抖音小游戏登录」。
-
-**客户端契约(两版同批)**:`POST /api/login` 的 `auth_type` 新增两个取值,`auth_token` 是小游戏端拿到的一次性 code。回包、错误码与现有第三方登录相同。
-
-| auth_type | auth_token | 账号名 |
-|---|---|---|
-| `wechat_minigame` | `wx.login()` 的 code | `wx_<unionid>`(与 `wechat` 同一个命名空间:App 与小游戏绑在同一个开放平台账号下就是同一个账号) |
-| `douyin_minigame` | `tt.login({force: true})` 的 code | `dy_<unionid>` |
-
-**要对齐的行为**(Java 现有 `com.game.login.auth.WeChatProvider` 调的是 App 的 `sns/oauth2/access_token`,换不了小游戏的 code):
-
-1. 微信小游戏:`GET https://api.weixin.qq.com/sns/jscode2session`,参数 `appid`、`secret`、`js_code`、`grant_type=authorization_code`;用小游戏自己的 AppId / AppSecret,与 App 的那一组分开配。
-2. 抖音小游戏:`GET https://minigame.zijieapi.com/mgplatform/api/apps/jscode2session`,参数 `appid`、`secret`、`code`,请求头 `Content-Type: application/json`;成功 `error=0`,失败 `error` 非 0 并带 `errcode`。只接受 `code`,不接受 `anonymous_code`。
-3. unionid 策略与 App 形态相同:缺省必须有 unionid,拿不到按渠道故障拒绝;显式允许时才回落 openid。
-4. 错误分类:传输失败、非 2xx、应答超限或不可解析、成功应答没有 openid、缺 unionid 算渠道故障(`AuthProviderUnavailableException`)。微信 errcode 沿用 App 的渠道故障清单,但 45011 在 code2Session 上按凭证无效;抖音的错误应答一律按凭证无效。
-5. 应答里的 `session_key` 不解析、不记录、不进错误文案。
-6. 配置门禁与 App 的微信段相同(密钥只从环境变量或 Secret 注入、生产只收 https 的 Endpoint);微信 App 与小游戏的 AppId 相同时拒绝启动。
-
-**验证**(Java 仓口径):对应主仓 `go/login/internal/logic/pkg/auth/minigame_providers_test.go`(请求形状、同 unionid 同账号、缺 unionid 拒绝与回落、errcode 分类、
-传输与形状故障、session_key 与凭据不进日志)、`go/login/internal/config/auth_providers_minigame_test.go`(门禁、密钥不串字段、AppId 查重)。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-login` 对齐：`WeChatMinigameProvider`（`GET /sns/jscode2session`，`wx_<unionid>` 默认要求 unionid / 可配回落 openid，`45011` 归类凭证无效，绝不解析/记录 `session_key`）与 `DouyinMinigameProvider`（`GET /mgplatform/api/apps/jscode2session` 带 `Content-Type: application/json`，`dy_<unionid>` / 拒绝 `anonymous_code`，所有非 0 `error`/`errcode` 归类凭证无效，绝不解析/记录 `session_key`）；`LoginAuthProperties` / `LoginConfiguration` 落地独立密钥环境变量注入、生产 https 门禁及微信 App 与小游戏 `appId` 查重拒启。
+- **验证**：`game-login` `MinigameAndOidcAuthTest` + `ExternalAuthProvidersTest`（含请求形状、同 unionid 同账号、缺 unionid 拒与回落、45011/抖音错误分类、App/小游戏 appId 查重）全部 PASS（`game-login` 29/29 PASS）。
 
 ### 2026-11-12 选主锁围栏:负载分刷新的成员写入在脚本里核对锁值（Java 架构不适用，现有写路径已带锁围栏）
 
@@ -2446,31 +2425,10 @@ Java 版按同一口径要做的事(只登记,没改 Java 代码):
   - `game-gateway`：`AssignGateRequest` 接收 `access_token`（忽略自报 `account`）；`AssignGateResponse` 新增 `401`（`ERR_AUTH_REJECTED`/`ERR_AUTH_REQUIRED`）与 `500`（`ERR_AUTH_UNAVAILABLE`）；`GatewayProperties` 新增 `legacyGateLoginEnabled`（默认 `true`）；`AssignGateService` 校验 `access_token` 解析权威账号、匿名路径受旧登录开关门控、冷却键改用 `"tok:" + sha256Prefix16Hex(accessToken)`（匿名无冷却键）；`AssignGateMetrics` 增加 `game.gateway.assign.gate.auth{result}`（`authenticated`/`anonymous`/`anonymous_denied`/`token_rejected`/`error`）及 19 项预注册结果计数。
   - **验证**：`game-api` `clean install` BUILD SUCCESS；`game-login` `LoginAccountServiceTest` **5/5 PASS**；`game-gateway` **112/112 PASS**（含新增 `AssignGateServiceAuthTest` 与 `GatewayHttpApiTest`，12 项 Redis/MySQL IT 跳过）。
 
-### 2026-11-13 Apple / Google 登录(主仓已落码未编译,Java 待做)
+### 2026-11-13 Apple / Google 登录（Java 已对齐）
 
-主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。设计见主仓 `docs/design/third-party-login-end-to-end-design.md` §十二,
-联调手册见主仓 `docs/ops/wechat-qq-sandbox-runbook.md` §I,验证命令见主仓 `docs/PROGRESS.md` 2026-11-13「Apple / Google 登录」。
-
-**客户端契约(两版同批)**:`POST /api/login` 的 `auth_type` 新增 `apple` / `google`,`auth_token` 是平台 SDK 拿到的身份令牌(JWT)原文。回包、错误码与现有第三方登录相同。
-
-| auth_type | auth_token | 账号名 |
-|---|---|---|
-| `apple` | `ASAuthorizationAppleIDCredential.identityToken` | `apple_<sub>` |
-| `google` | Google 登录 SDK 的 `idToken`(客户端用服务端 OAuth 客户端 ID 请求) | `google_<sub>` |
-
-**要对齐的行为**:
-
-1. 只接受 RS256,不信令牌头部声明的算法(拒绝 `none`、`HS256` 等);先按 `kid` 取公钥验签名,签名对了才看声明。
-2. 公钥:Apple `https://appleid.apple.com/auth/keys`,Google `https://www.googleapis.com/oauth2/v3/certs`。`iss`:Apple `https://appleid.apple.com`,Google `https://accounts.google.com` 或 `accounts.google.com`;沙箱只换取公钥的地址,不换 `iss`。
-3. `aud` 必须包含配置的 ClientId(Apple 是 Bundle ID,Google 是服务端 OAuth 客户端 ID,必须以 `.apps.googleusercontent.com` 结尾);`exp`、`iat`、`nbf` 容忍 1 分钟时钟偏差;`sub` 非空;不足 2048 位的公钥不用;令牌超过 16 KiB 不解析。
-4. 公钥缓存:新鲜期 1 小时,过期后认识的 `kid` 先用旧公钥、后台换新;不认识的 `kid` 等一次重拉,但离上次拉取不足 1 分钟不拉、按凭证无效拒绝;拉取失败时 24 小时内的旧公钥照用;并发请求共用一次拉取,各自按自己的期限等待。
-5. 错误分类:令牌本身的问题按凭证无效;取不到公钥(网络、非 2xx、超限、不可解析、一把可用公钥都没有、等公钥超时)与没配 ClientId 按渠道故障。错误文案与日志不带令牌原文。
-6. 配置没有密钥;生产只收 https 的取公钥地址(公钥被换掉就能伪造令牌)。
-
-**验证**(Java 仓口径):对应主仓 `go/login/internal/logic/pkg/auth/idtoken_test.go`(算法混淆、篡改、声明逐项、kid 重拉限速、旧公钥兜底、并发共用拉取、等待期限)、
-`go/login/internal/config/auth_providers_idtoken_test.go`(门禁)、`go/login/cmd/sandbox_mock/idtoken_test.go`(对着 mock 端到端)。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-login` 对齐：`IdTokenVerifier`（纯 JDK 零新依赖，严格只认 RS256 拒绝 `none`/`HS256`、RSA 公钥 ≥2048 位、令牌上限 16 KiB、单飞 JWKS 缓存 1h 新鲜 / 未知 kid 1m 重拉限速 / 24h 旧公钥兜底 / 按请求期限等待不取消共享拉取、`exp`/`iat`/`nbf` ±60s 容忍）与 `IdTokenProvider.apple`/`google`（`apple_<sub>` / `google_<sub>`、生产 https JWKS 门禁、Google ClientId `.apps.googleusercontent.com` 后缀校验，日志不泄露令牌原文）。
+- **验证**：`game-login` `MinigameAndOidcAuthTest`（含算法混淆、篡改、声明逐项、未知 kid 重拉限速、旧公钥兜底、配置门禁与并发单飞）PASS（`game-login` 29/29 PASS）。
 
 ### 2026-11-15 普通宠物商店与野外捕捉（C++ / Java 已落码，Java 编译和相关测试通过）
 
@@ -2559,15 +2517,13 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 2026-11-27 已对齐：`game-battle` `BattleEdgeServer` / `BattleEdgeHandler` 接入共用 `ConnectionAdmissionPolicy.fromEnv("BATTLE_", ...)` + `ConnectionAdmissionController<Channel>`，判定在创建 `DirectSession` 之前（`shutting_down -> capacity -> preauth -> accept_rate -> source_rate`），拒绝走 `SO_LINGER=0` RST，`stopAccepting()` 同步关闭准入闸，`drainAndClose()` 同步排空/关闭已认证会话与未认证池；`BattleMetrics.bindAdmission` 导出与 `deploy/k8s/battle-connection-alerts.yaml` 同名全部 `battle_*` Prometheus 指标。
 - **验证**：`game-battle` `BattleAdmissionPreAuthTest` + `BattleEdgeHandlerTest` + `BattleEdgeHeartbeatTest` + `BattleEdgeLoopbackTest` + `BattleEdgeProtectionTest` + `BattleMetricsTest` **69/69 PASS**。
 
-### 2026-11-19 账号注销与 Apple / Google 身份令牌一次性消费(主仓已落码未编译,Java 待做)
+### 2026-11-19 账号注销与 Apple / Google 身份令牌一次性消费（Java 已对齐）
 
-主仓说明见 `docs/PROGRESS.md` 2026-11-19「账号注销」条目,设计见主仓 `docs/design/account-deletion.md`(负责人 11-19 定:Apple 撤销用「申请时当场换票撤销」、身份令牌一次性消费不做挑战式 nonce、冷静期 7 天)。
-
-- **客户端可见契约(两版必须同批)**:`POST /api/account/delete`(`zone_id` + 与 `/api/login` 同义的凭据,Apple 另带 `authorization_code`)、`POST /api/account/delete/cancel`(`zone_id`、`access_token`),应答 `code`、`message`、`tip`、`state`、`execute_after`、`blockers[]{player_id, reason}`;`/api/login` 应答多 `account_deletion_state`、`account_deletion_execute_after`、`previous_account_deleted_at`。tip 码 2038~2041(`kLoginAccountDeletionPending` / `Blocked` / `InProgress` / `ReauthRequired`)由 `data/tip/Tip.xlsx` 导表。
-- **服务端语义**:账号行状态 0 正常 / 1 冷静期 / 2 执行中;申请要重新认证并预检全部角色(挂起原因回给玩家,帮主另加 `guild_leader`);冷静期内能登录、只能撤销,建角与过户买入按名额满拒绝,进游戏拒绝;到期由执行者认领、吊销令牌、踢线、逐名删角,角色删完写只存账号摘要的回执并删账号行;删角收尾清存档与各参与者的个人数据。Apple / Google 身份令牌验签后一次性消费。
-- **Java 待做**:登录服务、目录与各参与者按上面对齐;Apple 撤销同样不长期保存 Apple 令牌。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-login` / `game-gateway` / `game-discovery` 对齐：
+- `POST /api/account/delete` 与 `POST /api/account/delete/cancel`、7 天冷静期状态机（0/1/2）、重认证预检（含 `guild_leader`）与回执去标识化已在 `AccountDeletionService` / `LoginComplianceController` 落地；
+- 新增 `AppleRevokerClient`（JDK `SHA256withECDSAinP1363Format` 签 ES256 `client_secret`，申请时当场调 `/auth/token` + `/auth/revoke` 且不持久化 Apple 令牌，`invalid_grant` 转凭证无效）并接入 `LoginConfiguration`；
+- 新增 `IdTokenReplayGuard`（`RedisKeys.loginIdTokenUsed(authType, digestHex)` 原子 `SET NX PX`，Redis 故障 fail-closed），Apple / Google / Passport 身份令牌验签后一律一次性消费。
+- **验证**：`game-login` `MinigameAndOidcAuthTest` + `LoginComplianceTest`（29/29 PASS）、`game-gateway` `LoginComplianceHttpTest`（19/19 PASS）。
 
 ### 2026-11-19 gate 未验签连接预算:独立预算、LRU 淘汰最老的未验签连接、按概率早拒（Java 已对齐）
 
@@ -2749,24 +2705,14 @@ Java 侧要做的:支付服务(渠道适配、回调入口、付款事实与修�
 
 2026-11-26 核销：`GlobalMatchService.plan` 在目录可读但无合格目标时直接回 `kMatchNoRegionWithinLatency(16023)`、目录故障继续向上抛错，`NetworkProbeTargetHrwTest` 已覆盖。
 
-### 2026-11-20 账号注销收尾:帮主自动让位、注销下线结束托管、摘评级榜、剧本清理、拒收已删角色的邮件(主仓已落码未编译,Java 待做)
+### 2026-11-20 账号注销收尾:帮主自动让位、注销下线结束托管、摘评级榜、剧本清理、拒收已删角色的邮件（Java 已对齐）
 
-接在 2026-11-19「账号注销与 Apple / Google 身份令牌一次性消费」一条之后。主仓 commit:main 工作区未提交;Java 版本 `0.1.0-SNAPSHOT`,待做,本轮不写 Java 代码。
-设计见主仓 `docs/design/account-deletion.md` §6.2、§6.3、§7.2、§7.4 与 §10「收尾批」,验证命令见主仓 `docs/PROGRESS.md` 2026-11-20「账号注销收尾批」。
-
-- **客户端可见契约(两版必须同批)**:
-  1. 注销下线带原因:申请成功后踢掉在线设备用 `kLoginAccountDeletionPending`(2038),到期执行时用 `kLoginAccountDeletionInProgress`(2040),走 `GameKickPlayerRequest.reason`;客户端显示原因、不自动重连。
-  2. 新 tip `kMailRecipientDeleted`(mail 段,导表后应为 17011):个人邮件的收件人角色已注销。客户端不处理(发件方都是服务端)。
-  3. 预检的 `guild_leader` 只在申请时出现;执行时不再因帮主卡住。
-- **服务端语义**:
-  1. 帮主:申请时(试探)仍拦,让玩家自己转让;执行删角时收尾自动让位给职位最高、累计帮贡最多、入帮最早的成员,帮里只剩他就解散;转让帮主拒绝冻结中 / 已删除的目标。提交后再失效缓存、摘帮会榜、推送。
-  2. 下线:踢 gate 之后再按正常登出结束会话(删会话、离场释放),否则有挂机月卡的角色会转成离线托管留在世界里,删角一直等。同地域各区共用会话存储与命令通道,任一区都踢得到。
-  3. 评级榜:删角收尾按他有评分的模式写待摘榜行(事务发件箱),投榜方调 `RemoveRankEntry` 摘掉并立墓碑;榜单奖励邮件收件人已注销时直接放弃、不报人工。
-  4. 玩家写的战斗剧本与选用随角色删,审核流水按审计保留。
-  5. 注销范围是本地域的账号:账号目录按地域各一份,别的地域的同一渠道身份是另一个账号。
-- **Java 待做**:按上面对齐登录服务的下线(注意 Java 版托管 / 断线保留的等价机制)、帮会删角收尾、评级榜摘除、剧本清理与邮件拒收;Java 已有等价机制就把对应项改成已对齐。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已跨 `game-api` / `game-gate` / `game-login` / `game-guild` / `game-match` / `game-mail` / `game-rank` 完整对齐：
+1. **注销踢线与结束托管**：`AccountDeletionService` 申请时带 `2038`（`kLoginAccountDeletionPending`）、执行时带 `2040`（`kLoginAccountDeletionInProgress`）经 `PlayerPushes` 踢线并经 `OwnerTakeovers` 驱逐离线托管；`game-gate` `ClientDispatcher` 对 `2038`/`2040`/`2049`/`2059` 均推 msg 34 `GameKickPlayerRequest{reason}` 且置 `exitSceneImmediatelyOnClose=true`（跳过断线保留与挂机月卡离线托管）。
+2. **帮主自动让位与帮会清理**：`JdbcGuildStore.transferLeader` 新增 `targetFence`（生产装配 `RoleFence.PLAYER_TABLE`）拒绝冻结中/已删除目标；`purgeDeletedPlayer` 同事务完成普通离帮、帮主按职位/帮贡/入帮顺序自动让位（双点锁+校验恰好 1 名帮主）或单人帮解散并清理 `guild_player_state`/`guild_application`/`guild_player_op_seq`/`guild_daily_counter`/`guild_client_request` 与帮战个人表（`guild_war_garrison`/`player_state`/`credit_owed`）；`GuildInternalServiceProvider.purgeRemovedRole` 提交后失效缓存、解散摘榜并向帮众推送 `LEADER_TRANSFERRED`/`MEMBER_LEFT`。
+3. **评级榜摘除与剧本清理**：`MatchInternalServiceImpl.purgeRemovedRole` 单事务登记 `match_rank_removal` 待摘评级榜（含永久榜 `epoch=1` 与各论剑赛季 `10000+seasonId`）、删除战报/试炼卡/论剑 6 表/`match_rating`/玩家剧本与选用（`match_battle_script_review` 按审计保留）；`RatingRankOutbox.publishPendingRankRemovals` 异步调 `RemoveRankEntry` 摘除并立墓碑（失败保留重试）。
+4. **删角邮件拒收与榜奖放弃**：`game-mail` `MailStore` 校验收件人已注销返回 `kMailRecipientDeleted`（17011）；`game-rank` `RankRewardWorker` 遇 17011 直接放弃领奖不报人工。
+- **验证**：`game-gate` `ClientDispatcherTest` **110/110 PASS**、`game-guild` `GuildParityClosureTest` + `GuildStoreResultsTest` + `GuildWarCreditOwedAndPurgeTest` **15/15 PASS**、`game-match` `MatchRolePurgeH2Test` + `BattleScriptReviewCleanupTest` **3/3 PASS**、`game-mail` `MailRecipientDeletedTest` **2/2 PASS**、`game-rank` `RankIndexAndLimitTest` **5/5 PASS**。
 
 ### 2026-11-20 实时 Buff 再施加刷新时长、带进回合战斗按剩余时长换算（Java 已对齐）
 
@@ -2978,33 +2924,14 @@ Java 独立服通过 `tools/ContractSync.java` 从 C++ 当前权威源同步了�
 
 2026-11-26 已对齐（`a1d5e1ad`）：修复 `game-login` `NppaLedger.LUA_PRELUDE`（仅 `cap_ms > now_ms and cap_ms < e` 时封顶租约）与 `SWEEP_SCRIPT`（命中 `lease_ended == cap` 时补发下线并保留 `"||cap"` 登记续约至 `now_ms + lease`，续约到期且 `si==''` 删除且不重复计普通收尾数），新增 `NppaLedgerBackstopAndGuardTest` 与 `RenewSessionHandlerTest` 覆盖「截止后先清扫再续租仍触发兜底踢线」及「无续租一个租约后删除」。验证：`game-login` **47/47 PASS**（1 真 Redis IT 跳过）。
 
-### 2026-11-26 官方通行证(auth_type=passport,Casdoor OIDC):只收身份令牌、注销时删通行证用户(主仓已落码未编译,Java 待做)
+### 2026-11-26 官方通行证(auth_type=passport,Casdoor OIDC):只收身份令牌、注销时删通行证用户（Java 已对齐）
 
-主仓设计 `docs/design/official-passport-registration.md`(§3.5~§3.7、§4 第 11～16 项、§5.4),验证命令见主仓 `docs/PROGRESS.md` 2026-11-26「官方通行证审核」。Java 版目前没有 `passport` 渠道,整条都待做。
-
-**客户端契约(两版同批)**:`POST /api/login` 与 `POST /api/account/delete` 的 `auth_type` 新增 `passport`,`auth_token` 是客户端经 OAuth2 授权码 + PKCE 向官方通行证换到的 `id_token`(JWT)原文;账号串 `passport_<sub>`。回包、错误码与 `apple` / `google` 相同。
-
-**Java 待做**:
-
-1. 渠道校验同 `apple` / `google` 的身份令牌(RS256 + JWKS 缓存、`iss` / `aud` / `exp` / `iat` / `nbf` / `sub`、一次性消费)。公钥地址 `<Endpoint 或 Issuer>/.well-known/jwks`;`iss` 必须等于配置的 `Issuer`(生产只收 https、不带末尾斜杠)。
-2. 通行证特有的三条:
-   - `tokenType` 必须是 `id-token`。Casdoor 同一次换票给的访问令牌、刷新令牌与身份令牌同一把钥匙签,`iss` / `aud` / `sub` 相同,只有这一项不同。别的类型按凭证无效拒绝,不算渠道故障,并排在有效期检查之前。
-   - `exp - iat` 超过 2 小时按渠道配置故障拒绝(Casdoor 缺省 168 小时)。
-   - `passport_` + `sub` 不含空白且不超过 191 字节。
-3. 账号注销:冷静期满执行时,角色全部删完之后、删账号行之前,用机密应用凭据(HTTP Basic)调 Casdoor:`GET /api/get-user?userId=<sub>` → `POST /api/delete-user {owner,name}` → 再查一次,查不到才算删掉。`data` 为 `null` 按已删;回 `Unaffected`、删完还查得到、`status=error`、应答里的 id 对不上都重试,不当成删完。
-4. 启动门禁:生产模式配了通行证却没配管理凭据(`AdminClientId` + 存密钥的环境变量名,且 `AdminClientId` 不能等于客户端的 `ClientId`)拒绝启动。
-5. 登录与刷新时核对、吊销了就踢线(主仓设计 §3.6,同日补、同日改):
-   - 登录时把身份令牌的 `iat` 写进令牌载荷,轮换时原样带下去(不能用令牌自己的创建时刻:每次轮换都变,又是游戏服的时钟)。
-   - 用同一组管理凭据 `GET /api/get-user?userId=<sub>` 查状态并判定:查不到或 `isDeleted` 记被删,`isForbidden` 记被封,`lastChangePasswordTime`(RFC 3339)不早于这次会话的 `iat` 记改过密码(同一秒按改密在后)。
-   - 落地:被删、被封吊销整个账号的令牌;改过密码只吊销身份令牌签发时刻不晚于改密时刻的令牌家族(改密之后重新登录的会话保留);吊销了东西就把账号名下在线的角色踢下线,提示码 `kLoginPassportCredentialChanged`(客户端可见,两版同一个码)。
-   - 登录时:本次身份令牌判出来就拒绝登录、回上面的提示码(网关 401、`message` 为 `upstream_err=<码>`,同现有渠道凭证被拒);不论放不放行,都吊销改密之前的旧会话。
-   - 刷新时:这一家族判出来就不续期,吊销并踢线,回令牌失效的码;核对放在轮换之前,吊销失败也不续期。
-   - 通行证故障:登录、刷新照常放行并计数告警,不让通行证故障把在线玩家都踢下线。
-   - 申请注销的重新认证(第 3 条之前那一步)也过这道核对:登录会被拒的身份令牌拿去申请注销同样拒,回同一个提示码(11-27 补)。
-   - 踢线在吊销之后放到后台做(带时限、与请求脱钩),不占登录 / 刷新的请求时间:登录时身份令牌已一次性消费,超时了玩家得重走授权;账号从没进过游戏(没有账号行)时没有角色可踢,不算失败(11-27 补)。
-6. 通行证回调入口(主仓设计 §3.7,同日补):网关 `POST /internal/passport/events`(Casdoor 侧的契约,路径与状态码两版同):请求头 `X-Passport-Webhook-Secret` 按摘要常量时间比较(至少 32 字节,没配回 404);请求体上限 64 KiB;200 处理完、400 请求体不是 Casdoor 记录、401 密钥不对、503 暂时处理不了(Casdoor 会重投)。处理:从记录的 `extendedUser`、组织与用户、`object` 里取用户(跳过 `built-in`,最多 4 个),逐个现查通行证,按第 5 条落地;回调只用来找人,不信内容。名字里带 `/` 的引用跳过:那是 Casdoor 的应用伪用户(应用凭据发起的操作记成 `app/<应用名>`,注销时删通行证用户就是),拿去查 Casdoor 会 panic、整条回调被一直重投(11-27 补)。Java 版内部怎么接(网关转 login 还是直接处理)按自己的方式。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已在 `game-login` / `game-gateway` / `game-api` / `game-gate` 对齐全部 6 项：
+1. **OIDC 身份令牌校验**：`PassportProvider`（`passport_<sub>`、`.well-known/jwks`、生产 https 无尾斜杠门禁、先于有效期检验 `tokenType == "id-token"`、`exp - iat <= 2h` 否则按渠道配置故障、无空白且 ≤191 UTF-8 字节、一次性消费并回传 `identityIssuedAt = iat`）。
+2. **启动门禁与注销删用户**：`LoginConfiguration` 生产模式强制 `adminClientId` 非空且不等于 `clientId`、密钥环境变量非空；`PassportAdminClient`（HTTP Basic `GET /api/get-user` → `POST /api/delete-user` 校验 `Affected` → 复查确认已删）挂接至 `AccountDeletionService`，在角色全部删完之后、删账号行之前执行。
+3. **登录/刷新/注销重认证核对与后台踢线**：`TokenData`/`RedisLoginTokens` 持久化并在轮换时保留 `id_token_iat`，新增 `inspectRefresh`（轮换前核对）与 `revokeIssuedBefore`（仅吊销改密前家族）；`PassportSessionEnforcer` 判定被删/被封/改密（同秒按改密在后），拒登/注销重认证回 `kLoginPassportCredentialChanged`（2059），吊销后脱钩后台踢线（2059 + `immediate_exit`），无账号行不算失败，通行证故障 fail-open 放行并记 `login.passport.session.check{phase,result}`。
+4. **Webhook 回调**：`game-gateway` `PassportEventController` 提供 `POST /internal/passport/events`（未配 404、<32B 拒启、SHA-256 常量时间比较 `X-Passport-Webhook-Secret`→401、64 KiB 上限→400、经 `AccountLoginService.handlePassportEvent` 最多提取 4 名用户跳过 `built-in` 与含 `/` 伪用户现查 Casdoor 落地→200/400/503）。
+- **验证**：`game-login` `PassportAdminAndSessionTest` + `MinigameAndOidcAuthTest`（29/29 PASS）、`game-gateway` `PassportEventControllerTest`（19/19 PASS）、`game-gate` `ClientDispatcherTest`（110/110 PASS）。
 
 ### 2026-11-26 未成年人到点立即下线、离线托管不越过截止时刻（Java 已对齐）
 

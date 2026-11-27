@@ -212,7 +212,8 @@ public class GuildConfiguration {
     public GuildStore guildStore(GuildTx guildTx, SchemaReady guildSchemaReady,
                                  ObjectProvider<com.game.guild.war.GuildWarStore> warStoreProvider) {
         if (warStoreProvider.getIfAvailable() == null) {
-            return new JdbcGuildStore(guildTx, EconomyTxHooks.INSTANCE);
+            return new JdbcGuildStore(guildTx, EconomyTxHooks.INSTANCE)
+                    .withTargetFence(com.game.guild.war.GuildWarStore.RoleFence.PLAYER_TABLE);
         }
         com.game.guild.store.GuildTxHooks hooks = new com.game.guild.store.GuildTxHooks() {
             @Override
@@ -236,8 +237,14 @@ public class GuildConfiguration {
             public void cleanupGuildWarOnDisband(com.game.guild.store.GuildJdbc tx, long guildId, long nowMs) throws SQLException {
                 com.game.guild.war.GuildWarStore.cleanupDisbandTx(tx, guildId, nowMs);
             }
+
+            @Override
+            public void cleanupGuildWarPlayerRows(com.game.guild.store.GuildJdbc tx, long playerId) throws SQLException {
+                com.game.guild.war.GuildWarStore.cleanupPlayerPurgeTx(tx, playerId);
+            }
         };
-        return new JdbcGuildStore(guildTx, hooks);
+        return new JdbcGuildStore(guildTx, hooks)
+                .withTargetFence(com.game.guild.war.GuildWarStore.RoleFence.PLAYER_TABLE);
     }
 
     /** 经济请求路径存储（捐献 / 兑换预留、升级、读页；GuildTx 事务基座）。 */
@@ -718,13 +725,30 @@ public class GuildConfiguration {
     }
 
     @Bean
+    public com.game.guild.jianghu.GuildJianghuGrudgeService guildJianghuGrudgeService(
+            DataSource dataSource,
+            SchemaReady guildSchemaReady,
+            GuildStore store,
+            ObjectProvider<com.game.guild.activity.GuildActivityRuntime> activityRuntimeProvider) throws SQLException {
+        com.game.guild.jianghu.GuildJianghuGrudgeService service =
+                com.game.guild.jianghu.GuildJianghuGrudgeService.withDataSource(dataSource, store::playerGuildId);
+        service.ensureSchema();
+        com.game.guild.activity.GuildActivityRuntime runtime = activityRuntimeProvider.getIfAvailable();
+        if (runtime != null) {
+            runtime.setJianghuGrudgeSettler(service::recordDuelResult);
+        }
+        return service;
+    }
+
+    @Bean
     public GuildDispatcher guildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
                                            GuildRankService ranks, GuildEconomyService economy, GuildActivityService activities,
                                            com.game.guild.war.GuildWarService war,
+                                           com.game.guild.jianghu.GuildJianghuGrudgeService jianghuGrudge,
                                            @Qualifier("guildWorkerPool") GuildWorkerPool guildWorkerPool, GuildMetrics metrics,
                                            GuildProperties props) {
-        GuildDispatcher dispatcher = new GuildDispatcher(registry, guilds, manage, ranks, economy, activities, war, guildWorkerPool, metrics,
-                props.requestBudget().toMillis());
+        GuildDispatcher dispatcher = new GuildDispatcher(registry, guilds, manage, ranks, economy, activities, war, jianghuGrudge,
+                guildWorkerPool, metrics, props.requestBudget().toMillis());
         log.info("guild 接管的消息号: C2S={} 经济={} 帮战={} 拒绝上行={} 活动={} 请求预算={} 缓存 TTL={} 推送上限={} 资产通道={}",
                 dispatcher.messageIdsOf(GuildMethods.CLIENT_REQUESTS), dispatcher.messageIdsOf(GuildMethods.ECONOMY_REQUESTS),
                 dispatcher.messageIdsOf(GuildMethods.GUILD_WAR_PLACEHOLDERS),

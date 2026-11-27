@@ -79,23 +79,98 @@ class GuildParityClosureTest {
 
     @Test
     void 注销收尾入参非法提前拒绝_不在帮返回NOT_IN_GUILD() throws Exception {
-        Connection conn = mock(Connection.class);
-        when(conn.getAutoCommit()).thenReturn(true);
-        PreparedStatement memberGuildStmt = mock(PreparedStatement.class);
-        ResultSet emptyRs = mock(ResultSet.class);
-        when(emptyRs.next()).thenReturn(false);
-        when(memberGuildStmt.executeQuery()).thenReturn(emptyRs);
-        when(conn.prepareStatement(anyString())).thenReturn(memberGuildStmt);
+        try (MockedStatic<PlayerRouteAuthority> route = mockStatic(PlayerRouteAuthority.class)) {
+            route.when(() -> PlayerRouteAuthority.requireMeta(any(Connection.class), anyInt(), anyBoolean()))
+                    .thenAnswer(inv -> null);
+            Connection conn = mock(Connection.class);
+            when(conn.getAutoCommit()).thenReturn(true);
+            when(conn.getTransactionIsolation()).thenReturn(Connection.TRANSACTION_READ_COMMITTED);
+            PreparedStatement stmt = mock(PreparedStatement.class);
+            ResultSet emptyRs = mock(ResultSet.class);
+            when(emptyRs.next()).thenReturn(false);
+            when(stmt.executeQuery()).thenReturn(emptyRs);
+            when(stmt.executeUpdate()).thenReturn(0);
+            when(conn.prepareStatement(anyString())).thenReturn(stmt);
 
-        JdbcGuildStore store = new JdbcGuildStore(new GuildTx(w -> conn, 1, GuildTxListener.NONE), GuildTxHooks.NONE);
-        assertThatThrownBy(() -> store.purgeDeletedPlayer(0L, 1000L, Deadline.after(5_000)))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> store.purgeDeletedPlayer(42L, 0L, Deadline.after(5_000)))
-                .isInstanceOf(IllegalArgumentException.class);
+            JdbcGuildStore store = new JdbcGuildStore(new GuildTx(w -> conn, 1, GuildTxListener.NONE), GuildTxHooks.NONE);
+            assertThatThrownBy(() -> store.purgeDeletedPlayer(0L, 1000L, Deadline.after(5_000)))
+                    .isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> store.purgeDeletedPlayer(42L, 0L, Deadline.after(5_000)))
+                    .isInstanceOf(IllegalArgumentException.class);
 
-        GuildStore.DeletionOutcome out = store.purgeDeletedPlayer(42L, 1000L, Deadline.after(5_000));
-        assertThat(out.kind()).isEqualTo(GuildStore.DeletionOutcome.Kind.NOT_IN_GUILD);
-        assertThat(out.guildId()).isZero();
-        assertThat(GuildRoles.LEADER).isEqualTo(3);
+            GuildStore.DeletionOutcome out = store.purgeDeletedPlayer(42L, 1000L, Deadline.after(5_000));
+            assertThat(out.kind()).isEqualTo(GuildStore.DeletionOutcome.Kind.NOT_IN_GUILD);
+            assertThat(out.guildId()).isZero();
+            assertThat(GuildRoles.LEADER).isEqualTo(3);
+        }
+    }
+
+    @Test
+    void 转让帮主拒绝冻结中与已注销目标() throws Exception {
+        try (MockedStatic<PlayerRouteAuthority> route = mockStatic(PlayerRouteAuthority.class)) {
+            route.when(() -> PlayerRouteAuthority.requireMeta(any(Connection.class), anyInt(), anyBoolean()))
+                    .thenAnswer(inv -> null);
+            for (var fenceState : List.of(
+                    com.game.guild.war.GuildWarStore.CreditFenceState.FROZEN,
+                    com.game.guild.war.GuildWarStore.CreditFenceState.DELETED)) {
+                Connection conn = mock(Connection.class);
+                when(conn.getAutoCommit()).thenReturn(true);
+                when(conn.getTransactionIsolation()).thenReturn(Connection.TRANSACTION_READ_COMMITTED);
+
+                PreparedStatement lockGuild = mock(PreparedStatement.class);
+                ResultSet guildRs = mock(ResultSet.class);
+                when(guildRs.next()).thenReturn(true, false);
+                when(guildRs.getLong(1)).thenReturn(1L);    // level
+                when(guildRs.getObject(2)).thenReturn(10L); // leader_id
+                when(guildRs.getLong(3)).thenReturn(1L);    // zone_id
+                when(guildRs.getLong(4)).thenReturn(50L);   // max_members
+                when(lockGuild.executeQuery()).thenReturn(guildRs);
+
+                PreparedStatement lockMember = mock(PreparedStatement.class);
+                ResultSet memberRs = mock(ResultSet.class);
+                when(memberRs.next()).thenReturn(true, true, false);
+                when(memberRs.getLong(1)).thenReturn((long) GuildRoles.LEADER, (long) GuildRoles.OFFICER);
+                when(lockMember.executeQuery()).thenReturn(memberRs);
+
+                when(conn.prepareStatement(JdbcGuildStore.LOCK_GUILD)).thenReturn(lockGuild);
+                when(conn.prepareStatement(JdbcGuildStore.LOCK_MEMBER_ROLE)).thenReturn(lockMember);
+
+                JdbcGuildStore store = new JdbcGuildStore(new GuildTx(w -> conn, 1, GuildTxListener.NONE), GuildTxHooks.NONE)
+                        .withTargetFence((c, pid) -> fenceState);
+                var outcome = store.transferLeader(500L, 10L, 20L, lvl -> java.util.OptionalInt.of(2), Deadline.after(5_000));
+                assertThat(outcome.rejection()).isEqualTo(com.game.guild.rules.GuildReject.TARGET_NOT_MEMBER);
+            }
+        }
+    }
+
+    @Test
+    void 帮会内部注销收尾提交后按结局失效缓存_解散摘榜_让位推送() {
+        GuildStore store = mock(GuildStore.class);
+        com.game.guild.cache.GuildCacheInvalidator inv = mock(com.game.guild.cache.GuildCacheInvalidator.class);
+        com.game.guild.rank.GuildRanks ranks = mock(com.game.guild.rank.GuildRanks.class);
+        com.game.guild.push.GuildPushes pushes = mock(com.game.guild.push.GuildPushes.class);
+        com.game.guild.GuildInternalServiceProvider provider =
+                new com.game.guild.GuildInternalServiceProvider(null, store, inv, ranks, pushes, Runnable::run, 5_000L);
+
+        // 1. 帮主自动让位 -> 失效缓存 + 推 LEADER_TRANSFERRED，不摘榜
+        when(store.purgeDeletedPlayer(org.mockito.ArgumentMatchers.eq(10L), org.mockito.ArgumentMatchers.anyLong(), any()))
+                .thenReturn(new GuildStore.DeletionOutcome(GuildStore.DeletionOutcome.Kind.LEADER_TRANSFERRED,
+                        700L, 2, 20L, List.of(20L, 30L)));
+        assertThat(provider.purgeRemovedRole(10L).join()).isTrue();
+        org.mockito.Mockito.verify(inv).afterCommit(
+                org.mockito.ArgumentMatchers.eq(com.game.guild.cache.InvalidationOp.TRANSFER),
+                org.mockito.ArgumentMatchers.eq(700L), any(), org.mockito.ArgumentMatchers.eq(10L));
+        org.mockito.Mockito.verify(pushes).notify(
+                com.game.proto.guild.GuildChangeKind.GUILD_CHANGE_KIND_LEADER_TRANSFERRED,
+                700L, 10L, 20L, List.of(20L, 30L));
+        org.mockito.Mockito.verify(ranks, org.mockito.Mockito.never())
+                .remove(org.mockito.ArgumentMatchers.anyLong(), anyInt(), any());
+
+        // 2. 独人帮主解散 -> 失效缓存 + 摘帮会榜
+        when(store.purgeDeletedPlayer(org.mockito.ArgumentMatchers.eq(99L), org.mockito.ArgumentMatchers.anyLong(), any()))
+                .thenReturn(new GuildStore.DeletionOutcome(GuildStore.DeletionOutcome.Kind.DISBANDED,
+                        800L, 3, 0L, List.of()));
+        assertThat(provider.purgeRemovedRole(99L).join()).isTrue();
+        org.mockito.Mockito.verify(ranks).remove(org.mockito.ArgumentMatchers.eq(800L), org.mockito.ArgumentMatchers.eq(3), any());
     }
 }

@@ -439,6 +439,46 @@ public final class BattleScriptStore implements BattleScriptResolver.PlayerScrip
         }
     }
 
+    /**
+     * 账号注销删角同事务清理该玩家的战斗剧本与选用（对齐 Go {@code purgeBattleScriptsTx}）：
+     * 删除 {@code match_battle_script_loadout} 与 {@code match_battle_script}，刻意保留 {@code match_battle_script_review} 审核留痕（180 天审计保留）。
+     */
+    public static int purgePlayerScripts(Connection c, long playerId) throws SQLException {
+        if (playerId == 0L) {
+            return 0;
+        }
+        List<Long> scriptIds = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT script_id FROM match_battle_script WHERE owner_player_id=? ORDER BY script_id")) {
+            ps.setObject(1, PbMysql.uint64(playerId));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    scriptIds.add(Long.parseUnsignedLong(rs.getString(1)));
+                }
+            }
+        } catch (SQLException e) {
+            if ("42S02".equals(e.getSQLState()) || "42102".equals(e.getSQLState())) {
+                return 0;
+            }
+            throw e;
+        }
+        try (PreparedStatement delLoadout = c.prepareStatement(
+                "DELETE FROM match_battle_script_loadout WHERE player_id=?")) {
+            delLoadout.setObject(1, PbMysql.uint64(playerId));
+            delLoadout.executeUpdate();
+        }
+        int deleted = 0;
+        try (PreparedStatement delScript = c.prepareStatement(
+                "DELETE FROM match_battle_script WHERE script_id=? AND owner_player_id=?")) {
+            for (long sid : scriptIds) {
+                delScript.setObject(1, PbMysql.uint64(sid));
+                delScript.setObject(2, PbMysql.uint64(playerId));
+                deleted += delScript.executeUpdate();
+            }
+        }
+        return deleted;
+    }
+
     private static MatchBattleScriptRow lockScript(Connection c, long scriptId) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT " + SCRIPT_COLS + " FROM match_battle_script WHERE script_id=? FOR UPDATE")) {

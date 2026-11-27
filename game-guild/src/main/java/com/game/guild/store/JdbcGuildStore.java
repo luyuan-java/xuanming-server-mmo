@@ -197,6 +197,7 @@ public final class JdbcGuildStore implements GuildStore {
     private final GuildTxHooks hooks;
     @FunctionalInterface interface RoleMembershipGuard { boolean lockAvailable(GuildJdbc sql, long player) throws SQLException; }
     private final RoleMembershipGuard roleMembershipGuard;
+    private volatile com.game.guild.war.GuildWarStore.RoleFence targetFence = com.game.guild.war.GuildWarStore.RoleFence.OPEN;
 
     /**
      * @param tx    事务基座（连接、语句超时上限、指标钩子都在它里面）
@@ -210,8 +211,15 @@ public final class JdbcGuildStore implements GuildStore {
         this.hooks = Objects.requireNonNull(hooks, "hooks");
         this.roleMembershipGuard = Objects.requireNonNull(roleMembershipGuard);
     }
+
+    /** 装配转让帮主目标的角色护栏检查（拒绝冻结中或已注销的目标）。 */
+    public JdbcGuildStore withTargetFence(com.game.guild.war.GuildWarStore.RoleFence fence) {
+        this.targetFence = fence == null ? com.game.guild.war.GuildWarStore.RoleFence.OPEN : fence;
+        return this;
+    }
+
     @Override public JdbcGuildStore forActor(com.game.api.proto.SessionContext actor) {
-        return new JdbcGuildStore(tx.forActor(actor), hooks, roleMembershipGuard);
+        return new JdbcGuildStore(tx.forActor(actor), hooks, roleMembershipGuard).withTargetFence(targetFence);
     }
 
     // ================================================================ 建帮
@@ -381,6 +389,10 @@ public final class JdbcGuildStore implements GuildStore {
             }
             if (!GuildRoles.canTransferLeader(pair.actorRole())) {
                 return TxOutcome.reject(GuildReject.RANK_TOO_LOW);
+            }
+            // 拒绝把帮主转给冻结中（角色寄售/过户）或已注销的目标，避免注销执行前被他人转成帮主或转给无效角色
+            if (targetFence.classifyInTx(t.connection(), targetId) != com.game.guild.war.GuildWarStore.CreditFenceState.NORMAL) {
+                return TxOutcome.reject(GuildReject.TARGET_NOT_MEMBER);
             }
             // leader_id 与 role=3 是同一事实的两份存储：对不上不猜哪份对，直接拒写（fail-closed）
             if (guild.leaderId() != actorId) {
@@ -893,60 +905,103 @@ public final class JdbcGuildStore implements GuildStore {
     public DeletionOutcome purgeDeletedPlayer(long playerId, long nowMs, Deadline deadline) {
         requirePlayer(playerId, "注销角色");
         requireNow(nowMs, "注销帮会收尾");
-        long guildId = playerGuildId(playerId, deadline);
-        if (guildId == 0L) {
-            return new DeletionOutcome(DeletionOutcome.Kind.NOT_IN_GUILD, 0L, 0, 0L);
-        }
-        GuildReject ensure = ensurePlayerStateRows(GuildTxOp.LEAVE, nowMs, deadline, List.of(playerId));
-        if (ensure != null) {
-            throw new Deadline.DependencyException("注销帮会收尾状态行补建冲突: " + ensure);
-        }
+        long preGuildId = playerGuildId(playerId, deadline);
         TxOutcome<DeletionOutcome> outcome = tx.run(GuildTxOp.DISBAND, deadline, t -> {
-            GuildRow guild = lockGuildRow(t, guildId);
-            if (guild == null) {
-                return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.NOT_IN_GUILD, 0L, 0, 0L));
+            long guildId = preGuildId;
+            GuildRow guild = null;
+            if (guildId != 0L) {
+                guild = lockGuildRow(t, guildId);
+                if (guild == null) {
+                    guildId = 0L;
+                }
             }
-            lockPlayerState(t, playerId);
-            Integer role = lockMemberRole(t, guildId, playerId);
+            // 状态行若存在则按锁序位置 2 锁住，随后在事务末尾删除
+            t.one(LOCK_PLAYER_STATE, rs -> GuildJdbc.u64(rs, 1), playerId);
+            Integer role = guildId == 0L ? null : memberRoleOf(t, guildId, playerId);
             if (role == null) {
-                return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.NOT_IN_GUILD, 0L, 0, 0L));
+                guildId = 0L;
             }
-            if (guild.leaderId() != playerId && role != GuildRoles.LEADER) {
-                t.updateExactlyOne("注销删普通成员 " + id(playerId), DELETE_MEMBER, guildId, playerId);
-                deleteApplicationRows(t, applicationKeysOfPlayers(t, List.of(playerId)));
-                hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
-                hooks.cleanupGuildWarGarrison(t, guildId, List.of(playerId));
-                return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.REMOVED, guildId, guild.zoneId(), 0L));
+
+            DeletionOutcome.Kind kind = DeletionOutcome.Kind.NOT_IN_GUILD;
+            long resultGuildId = 0L;
+            int resultZoneId = 0;
+            long successorId = 0L;
+            if (guildId != 0L && guild != null) {
+                resultGuildId = guildId;
+                resultZoneId = guild.zoneId();
+                if (GuildRoles.rank(role) != GuildRoles.Rank.LEADER && guild.leaderId() != playerId) {
+                    lockMemberRole(t, guildId, playerId);
+                    t.updateExactlyOne("注销删普通成员 " + id(playerId), DELETE_MEMBER, guildId, playerId);
+                    hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
+                    hooks.cleanupGuildWarGarrison(t, guildId, List.of(playerId));
+                    kind = DeletionOutcome.Kind.REMOVED;
+                } else {
+                    Long successor = t.one(SELECT_SUCCESSOR_MEMBER, rs -> GuildJdbc.u64(rs, 1), guildId, playerId);
+                    if (successor != null && successor != 0L) {
+                        // 按主键升序双点锁（同 TransferLeader），先改 guild.leader_id，再升职，再删原帮主，并断言恰好 1 名帮主
+                        MemberPair pair = lockMemberPair(t, guildId, playerId, successor);
+                        if (pair.reject() != null) {
+                            throw new GuildStoreException(GuildStoreException.Kind.INVARIANT_BROKEN,
+                                    "注销让位锁定成员对失败 guild=" + id(guildId) + " reject=" + pair.reject());
+                        }
+                        t.updateExactlyOne("注销帮主让位改 leader_id", UPDATE_LEADER, successor, guildId);
+                        t.update(UPDATE_MEMBER_ROLE, GuildRoles.LEADER, guildId, successor);
+                        t.updateExactlyOne("注销删除原帮主成员行 " + id(playerId), DELETE_MEMBER, guildId, playerId);
+                        long leaders = t.count(COUNT_MEMBERS_BY_ROLE, guildId, GuildRoles.LEADER);
+                        if (leaders != 1) {
+                            throw new GuildStoreException(GuildStoreException.Kind.INVARIANT_BROKEN,
+                                    "注销帮主让位后帮主人数应为 1，实际 " + leaders);
+                        }
+                        hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
+                        hooks.cleanupGuildWarGarrison(t, guildId, List.of(playerId));
+                        kind = DeletionOutcome.Kind.LEADER_TRANSFERRED;
+                        successorId = successor;
+                    } else {
+                        // 仅剩帮主一人：同事务解散并清空帮战守旗阵与灵脉归属
+                        lockMemberRole(t, guildId, playerId);
+                        t.updateExactlyOne("注销解散删唯一成员 " + id(playerId), DELETE_MEMBER, guildId, playerId);
+                        List<AppKey> keys = new ArrayList<>();
+                        for (long applicant : t.ids(SELECT_APPLICANTS_OF_GUILD, guildId)) {
+                            keys.add(new AppKey(guildId, applicant));
+                        }
+                        keys.addAll(applicationKeysOfPlayers(t, List.of(playerId)));
+                        deleteApplicationRows(t, keys);
+                        hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
+                        hooks.deleteGuildActivityProgress(t, guildId);
+                        hooks.cleanupGuildWarOnDisband(t, guildId, nowMs);
+                        t.updateExactlyOne("注销解散删帮会 " + id(guildId), DELETE_GUILD, guildId);
+                        kind = DeletionOutcome.Kind.DISBANDED;
+                    }
+                }
             }
-            Long successor = t.one(SELECT_SUCCESSOR_MEMBER, rs -> GuildJdbc.u64(rs, 1), guildId, playerId);
-            if (successor != null && successor != 0L) {
-                lockMemberRole(t, guildId, successor);
-                t.updateExactlyOne("注销帮主让位改 leader_id", UPDATE_LEADER, successor, guildId);
-                t.update(UPDATE_MEMBER_ROLE, GuildRoles.LEADER, guildId, successor);
-                t.updateExactlyOne("注销删除原帮主成员行 " + id(playerId), DELETE_MEMBER, guildId, playerId);
-                deleteApplicationRows(t, applicationKeysOfPlayers(t, List.of(playerId)));
-                hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
-                hooks.cleanupGuildWarGarrison(t, guildId, List.of(playerId));
-                return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.LEADER_TRANSFERRED, guildId, guild.zoneId(), successor));
+            if (kind != DeletionOutcome.Kind.DISBANDED) {
+                deleteApplicationsOfPlayer(t, playerId);
             }
-            // 仅剩帮主一人：直接解散帮会并清理全部关联记录
-            t.updateExactlyOne("注销解散删唯一成员 " + id(playerId), DELETE_MEMBER, guildId, playerId);
-            List<AppKey> keys = new ArrayList<>();
-            for (long applicant : t.ids(SELECT_APPLICANTS_OF_GUILD, guildId)) {
-                keys.add(new AppKey(guildId, applicant));
-            }
-            keys.addAll(applicationKeysOfPlayers(t, List.of(playerId)));
-            deleteApplicationRows(t, keys);
-            hooks.accelerateDonationDeadlines(t, guildId, List.of(playerId), nowMs);
-            hooks.deleteGuildActivityProgress(t, guildId);
-            hooks.cleanupGuildWarOnDisband(t, guildId, nowMs);
-            t.updateExactlyOne("注销解散删帮会 " + id(guildId), DELETE_GUILD, guildId);
-            return TxOutcome.ok(new DeletionOutcome(DeletionOutcome.Kind.DISBANDED, guildId, guild.zoneId(), 0L));
+            t.update("DELETE FROM guild_player_state WHERE player_id = ?", playerId);
+            deleteOptionalPersonalRows(t, "DELETE FROM guild_player_op_seq WHERE player_id = ?", playerId);
+            deleteOptionalPersonalRows(t, "DELETE FROM guild_daily_counter WHERE player_id = ?", playerId);
+            deleteOptionalPersonalRows(t, "DELETE FROM guild_client_request WHERE player_id = ?", playerId);
+            hooks.cleanupGuildWarPlayerRows(t, playerId);
+            List<Long> remaining = (resultGuildId != 0L && kind != DeletionOutcome.Kind.DISBANDED)
+                    ? t.ids(SELECT_MEMBER_IDS, resultGuildId) : List.of();
+            return TxOutcome.ok(new DeletionOutcome(kind, resultGuildId, resultZoneId, successorId, remaining));
         });
         if (outcome instanceof TxOutcome.Ok<DeletionOutcome> ok) {
             return ok.value();
         }
         throw new Deadline.DependencyException("注销帮会收尾事务未确认，禁止伪装不在帮: " + outcome);
+    }
+
+    private static void deleteOptionalPersonalRows(GuildJdbc t, String sql, long playerId) throws SQLException {
+        try {
+            t.update(sql, playerId);
+        } catch (SQLException e) {
+            String state = e.getSQLState();
+            if ("42S02".equals(state) || "42102".equals(state)) {
+                return;
+            }
+            throw e;
+        }
     }
 
     // ================================================================ 状态行与守卫

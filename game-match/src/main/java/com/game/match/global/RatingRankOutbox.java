@@ -51,6 +51,85 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
     /** 论剑排位赛季榜使用的独立 source_epoch 基址（与存量 epoch=1 永久榜隔离）。 */
     public static final long RANKED_SOURCE_EPOCH_BASE = 10_000L;
 
+    /** 账号注销待摘评级榜事务发件箱表（与评分/排位行同事务写入，投榜循环异步调 RemoveRankEntry 摘除并立墓碑）。 */
+    public static final String CREATE_RANK_REMOVAL_SQL =
+            "CREATE TABLE IF NOT EXISTS match_rank_removal ("
+                    + "source_epoch BIGINT UNSIGNED NOT NULL, "
+                    + "player_id BIGINT UNSIGNED NOT NULL, "
+                    + "created_ms BIGINT UNSIGNED NOT NULL, "
+                    + "PRIMARY KEY (source_epoch, player_id))";
+
+    public static void ensureRankRemovalTable(Connection c) throws SQLException {
+        try (Statement st = c.createStatement()) {
+            st.execute(CREATE_RANK_REMOVAL_SQL);
+        }
+    }
+
+    /**
+     * 在删角事务内（删除 match_rating 与 match_ranked_player_season 之前）登记待摘评级榜记录：
+     * 有普通评分行则登记 source_epoch=1，有论剑赛季行则逐季登记 {@link #rankedSourceEpoch}。
+     */
+    public static int queueRankRemovalsInTx(Connection c, long playerId, long nowMs) throws SQLException {
+        if (playerId == 0L) {
+            return 0;
+        }
+        List<Long> epochs = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement("SELECT 1 FROM match_rating WHERE player_id=?")) {
+            ps.setObject(1, PbMysql.uint64(playerId));
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    epochs.add(1L);
+                }
+            }
+        } catch (SQLException e) {
+            if (!isMissingTable(e)) {
+                throw e;
+            }
+        }
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT season_id FROM match_ranked_player_season WHERE player_id=? ORDER BY season_id")) {
+            ps.setObject(1, PbMysql.uint64(playerId));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    int sid = rs.getInt(1);
+                    if (sid > 0) {
+                        epochs.add(rankedSourceEpoch(sid));
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            if (!isMissingTable(e)) {
+                throw e;
+            }
+        }
+        if (epochs.isEmpty()) {
+            return 0;
+        }
+        int queued = 0;
+        try (PreparedStatement ps = c.prepareStatement(
+                "INSERT INTO match_rank_removal (source_epoch, player_id, created_ms) VALUES (?, ?, ?) "
+                        + "ON DUPLICATE KEY UPDATE created_ms = created_ms")) {
+            for (long epoch : epochs) {
+                ps.setObject(1, PbMysql.uint64(epoch));
+                ps.setObject(2, PbMysql.uint64(playerId));
+                ps.setObject(3, PbMysql.uint64(nowMs));
+                ps.executeUpdate();
+                queued++;
+            }
+        } catch (SQLException e) {
+            if (isMissingTable(e)) {
+                return 0;
+            }
+            throw e;
+        }
+        return queued;
+    }
+
+    private static boolean isMissingTable(SQLException e) {
+        String state = e.getSQLState();
+        return "42S02".equals(state) || "42102".equals(state);
+    }
+
     public static long rankedSourceEpoch(int seasonId) {
         return RANKED_SOURCE_EPOCH_BASE + Integer.toUnsignedLong(seasonId);
     }
@@ -129,6 +208,79 @@ public final class RatingRankOutbox implements RatingStore.CommitHook,AutoClosea
             }
         }
         publishPendingRankedSeasons();
+        publishPendingRankRemovals();
+    }
+
+    /** 扫描 match_rank_removal 待摘榜行并向 game-rank 投递 RemoveRankEntry（摘除并立墓碑），成功后删发件箱行。 */
+    void publishPendingRankRemovals() throws Exception {
+        publishPendingRankRemovals(req -> {
+            try {
+                return call(s -> s.removeRankEntry(sign(RankAdminService.REMOVE_METHOD, req)));
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    /** 同上，允许测试注入 RemoveRankEntry 发送器而不依赖 Dubbo。 */
+    public int publishPendingRankRemovals(Function<RemoveRankEntryRequest, RankAdminResponse> sender) throws SQLException {
+        List<long[]> rows = new ArrayList<>();
+        try (var c = source.getConnection();
+             var ps = c.prepareStatement(
+                     "SELECT source_epoch, player_id FROM match_rank_removal ORDER BY created_ms ASC, source_epoch ASC, player_id ASC LIMIT 16")) {
+            ps.setQueryTimeout(3);
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    rows.add(new long[]{
+                            Long.parseUnsignedLong(rs.getString(1)),
+                            Long.parseUnsignedLong(rs.getString(2))
+                    });
+                }
+            }
+        } catch (SQLException e) {
+            if (isMissingTable(e)) {
+                return 0;
+            }
+            throw e;
+        }
+        int processed = 0;
+        for (long[] row : rows) {
+            long epoch = row[0];
+            long playerId = row[1];
+            GlobalRankSourceRow guard;
+            try (var c = source.getConnection()) {
+                guard = db.findOneByPk(c, GlobalRankSourceRow.newBuilder().setSourceEpoch(epoch).build()).orElse(null);
+            }
+            if (guard != null && guard.getBoardId() != 0L) {
+                long generation = 1L;
+                if (Long.compareUnsigned(epoch, RANKED_SOURCE_EPOCH_BASE) > 0 && rankedStore != null) {
+                    int seasonId = (int) (epoch - RANKED_SOURCE_EPOCH_BASE);
+                    var season = rankedStore.findSeason(seasonId).orElse(null);
+                    if (season != null && season.getRankGeneration() > 0L) {
+                        generation = season.getRankGeneration();
+                    }
+                }
+                long reqId = deterministicRemovalRequestId(epoch, playerId);
+                RemoveRankEntryRequest req = RemoveRankEntryRequest.newBuilder()
+                        .setBoardId(guard.getBoardId())
+                        .setGeneration(generation)
+                        .setEntityId(playerId)
+                        .setRequestId(reqId)
+                        .build();
+                RankAdminResponse resp = sender.apply(req);
+                if (resp == null || resp.getErrorMessage().getId() != 0) {
+                    throw new IllegalStateException("评级榜摘除被拒 epoch=" + Long.toUnsignedString(epoch));
+                }
+            }
+            mutate("DELETE FROM match_rank_removal WHERE source_epoch=? AND player_id=?", epoch, playerId);
+            processed++;
+        }
+        return processed;
+    }
+
+    private static long deterministicRemovalRequestId(long epoch, long playerId) {
+        long mixed = (epoch * 0x9E3779B97F4A7C15L) ^ Long.rotateLeft(playerId, 17) ^ 0x52454D4F5645L;
+        return mixed == 0L ? 1L : mixed;
     }
     /** 扫描所有未追平游标的排位赛季来源代次（source_epoch >= 10000）并按赛季投递至 game-rank。 */
     private void publishPendingRankedSeasons()throws Exception{

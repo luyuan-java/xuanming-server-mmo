@@ -2482,6 +2482,19 @@ public class GuildWarStore {
                 nowMs, guildId);
     }
 
+    /** 账号注销删角收尾同事务清理该玩家全部帮战个人行（守旗阵、个人状态、待入账行；按表锁序）。 */
+    public static void cleanupPlayerPurgeTx(com.game.guild.store.GuildJdbc tx, long playerId) throws SQLException {
+        if (playerId == 0L) {
+            return;
+        }
+        tx.update("DELETE FROM guild_war_garrison WHERE player_id = ?", playerId);
+        tx.update("DELETE FROM guild_war_player_state WHERE player_id = ?", playerId);
+        List<Long> owedOps = tx.ids("SELECT op_id FROM guild_war_credit_owed WHERE player_id = ? ORDER BY op_id", playerId);
+        for (long opId : owedOps) {
+            tx.update("DELETE FROM guild_war_credit_owed WHERE player_id = ? AND op_id = ?", playerId, opId);
+        }
+    }
+
     private static List<GarrisonRow> listGarrisonTx(Connection c, long guildId) throws SQLException {
         List<GarrisonRow> out = new ArrayList<>();
         try (PreparedStatement ps = c.prepareStatement(

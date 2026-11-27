@@ -8,6 +8,8 @@ import com.game.discovery.proto.PlayerLocation;
 import com.game.discovery.proto.PlayerPresence;
 import com.game.login.account.AccountLogin;
 import com.game.login.auth.AuthProviderUnavailableException;
+import com.game.login.auth.PassportProvider;
+import com.game.login.auth.PassportSessionEnforcer;
 import com.game.login.compliance.AccountDeletionService;
 import com.game.login.compliance.AntiAddictionGate;
 import com.game.login.compliance.RealNameService;
@@ -64,6 +66,7 @@ public class LoginAccountService implements AccountLoginService {
     private final Function<Collection<Long>, Map<Long, PlayerPresence>> presenceLookup;
     private final PlayerLocationLookup locationLookup;
     private final Executor executor;
+    private volatile PassportSessionEnforcer passportEnforcer;
 
     @Autowired
     public LoginAccountService(AccountLogin accountLogin, RefreshTokenHandler refreshTokens, LoginTokens tokens,
@@ -71,11 +74,18 @@ public class LoginAccountService implements AccountLoginService {
                                @Autowired(required = false) AccountDeletionService accountDeletion,
                                @Autowired(required = false) PlayerPresenceDirectory presenceDirectory,
                                @Autowired(required = false) PlayerLocationDirectory locationDirectory,
+                               @Autowired(required = false) PassportSessionEnforcer passportEnforcer,
                                LoginWorkerPool workers) {
         this(accountLogin, refreshTokens, tokens, store, antiAddiction, accountDeletion,
                 presenceDirectory == null ? null : presenceDirectory::findAll,
                 locationDirectory == null ? null : locationDirectory::find,
                 (Executor) workers);
+        this.passportEnforcer = passportEnforcer;
+    }
+
+    public LoginAccountService withPassportEnforcer(PassportSessionEnforcer enforcer) {
+        this.passportEnforcer = enforcer;
+        return this;
     }
 
     /** 兼容既有 3 参测试构造器。 */
@@ -185,6 +195,15 @@ public class LoginAccountService implements AccountLoginService {
             return CompletableFuture.completedFuture(0L);
         }
         return onWorkers(() -> findReconnectingPlayerSync(account, zoneId));
+    }
+
+    @Override
+    public CompletableFuture<Integer> handlePassportEvent(byte[] payload) {
+        PassportSessionEnforcer enforcer = passportEnforcer;
+        if (enforcer == null) {
+            return CompletableFuture.completedFuture(PassportSessionEnforcer.RESULT_UNAVAILABLE);
+        }
+        return onWorkers(() -> enforcer.handleEvent(payload));
     }
 
     /**
@@ -322,6 +341,14 @@ public class LoginAccountService implements AccountLoginService {
         }
         if (auth.isEmpty()) {
             return AccountDeletionService.tipReply(LoginErrorTip.login_error.kLoginAccountNotFound_VALUE);
+        }
+        // 官方通行证申请注销的重新认证须过同一道通行证状态核对（登录被拒的令牌申请注销同样拒回 2059）
+        PassportSessionEnforcer enforcer = passportEnforcer;
+        if (enforcer != null && PassportProvider.AUTH_TYPE.equals(auth.get().authType())) {
+            int rejectTip = enforcer.checkLogin(auth.get().account(), auth.get().identityIssuedAt());
+            if (rejectTip != 0) {
+                return AccountDeletionService.tipReply(rejectTip);
+            }
         }
         return accountDeletion.request(auth.get().account(), AccountLifecycle.SOURCE_USER,
                 "apple".equals(authType), req.getAuthorizationCode());

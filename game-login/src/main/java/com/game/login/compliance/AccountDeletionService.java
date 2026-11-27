@@ -1,5 +1,7 @@
 package com.game.login.compliance;
 
+import com.game.discovery.presence.PlayerPushes;
+import com.game.login.auth.PassportProvider;
 import com.game.login.dispatch.Tips;
 import com.game.login.ownership.OwnerTakeovers;
 import com.game.login.token.LoginTokens;
@@ -67,6 +69,29 @@ public final class AccountDeletionService implements SmartLifecycle {
     private final MeterRegistry meters;
     private final AtomicBoolean running = new AtomicBoolean();
     private volatile ScheduledExecutorService scheduler;
+    private volatile PlayerPushes pushes;
+    private volatile java.util.function.Consumer<String> passportUserDeleter;
+    private volatile List<java.util.function.LongPredicate> rolePurgeCleanups = List.of();
+    // shortcut: 角色行删除与跨域参与者清理跨库非同事务，进程内记录待重试角色号，进程重启后需独立墓碑发件箱升级
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.Set<Long>> pendingPurges =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    public AccountDeletionService withPlayerPushes(PlayerPushes pushes) {
+        this.pushes = pushes;
+        return this;
+    }
+
+    /** 注入官方通行证删用户回调（角色全删完之后、删游戏账号行之前执行；失败即阻断 finish 待下轮重试）。 */
+    public AccountDeletionService withPassportUserDeleter(java.util.function.Consumer<String> deleter) {
+        this.passportUserDeleter = deleter;
+        return this;
+    }
+
+    /** 注入跨服务删角收尾清理（如 guild 帮主自动让位/解散、match 删剧本与待摘评级榜）；任一失败延迟 finish 等下轮重试。 */
+    public AccountDeletionService withRolePurgeCleanups(List<java.util.function.LongPredicate> cleanups) {
+        this.rolePurgeCleanups = cleanups == null ? List.of() : List.copyOf(cleanups);
+        return this;
+    }
 
     public AccountDeletionService(PlayerStore store, LoginTokens tokens, OwnerTakeovers takeovers,
                                   RoleDeletionPrecheck precheck, Duration coolingOff,
@@ -119,7 +144,7 @@ public final class AccountDeletionService implements SmartLifecycle {
                         maskAccount(account), e.getClass().getSimpleName());
             }
         }
-        signOutQuietly(account);
+        signOutQuietly(account, LoginErrorTip.login_error.kLoginAccountDeletionPending_VALUE);
         log.info("[account-deletion] scheduled account={} source={} execute_after_ms={}",
                 maskAccount(account), source, outcome.lifecycle().deletionExecuteAfterMs());
         return reply;
@@ -177,16 +202,44 @@ public final class AccountDeletionService implements SmartLifecycle {
         List<PlayerRow> roles = store.listPlayers(account);
         boolean pending = false;
         for (PlayerRow role : roles) {
-            kickRoleIfHeld(role);
+            kickRole(role, LoginErrorTip.login_error.kLoginAccountDeletionInProgress_VALUE);
             RoleRemovalStatus status = store.removeRoleForDeletion(account, role.getPlayerId(), precheck);
             if (status == RoleRemovalStatus.BUSY || status == RoleRemovalStatus.BLOCKED) {
                 log.info("[account-deletion] role not ready for removal player={} status={}",
                         Long.toUnsignedString(role.getPlayerId()), status);
                 pending = true;
+            } else if (!runRolePurgeCleanups(role.getPlayerId())) {
+                pendingPurges.computeIfAbsent(account, k -> java.util.concurrent.ConcurrentHashMap.newKeySet())
+                        .add(role.getPlayerId());
+                pending = true;
+            }
+        }
+        var retries = pendingPurges.get(account);
+        if (retries != null && !retries.isEmpty()) {
+            for (Long pid : List.copyOf(retries)) {
+                if (runRolePurgeCleanups(pid)) {
+                    retries.remove(pid);
+                } else {
+                    pending = true;
+                }
+            }
+            if (retries.isEmpty()) {
+                pendingPurges.remove(account, retries);
             }
         }
         if (pending) {
             return StepResult.WAITING;
+        }
+        java.util.function.Consumer<String> deleter = passportUserDeleter;
+        var passportSub = PassportProvider.subjectOf(account);
+        if (deleter != null && passportSub.isPresent()) {
+            try {
+                deleter.accept(passportSub.get());
+            } catch (RuntimeException e) {
+                log.error("[account-deletion] passport delete-user failed account={} err={}",
+                        masked, e.getClass().getSimpleName());
+                return StepResult.FAILED;
+            }
         }
         try {
             FinishDeletionOutcome fin = store.finishAccountDeletion(account);
@@ -202,7 +255,7 @@ public final class AccountDeletionService implements SmartLifecycle {
         }
     }
 
-    private void signOutQuietly(String account) {
+    private void signOutQuietly(String account, int reasonTipId) {
         try {
             tokens.revokeAll(account);
         } catch (RuntimeException e) {
@@ -211,7 +264,7 @@ public final class AccountDeletionService implements SmartLifecycle {
         }
         try {
             for (PlayerRow role : store.listPlayers(account)) {
-                kickRoleIfHeld(role);
+                kickRole(role, reasonTipId);
             }
         } catch (RuntimeException e) {
             log.info("[account-deletion] list roles for kick failed account={} err={}",
@@ -219,11 +272,39 @@ public final class AccountDeletionService implements SmartLifecycle {
         }
     }
 
-    private void kickRoleIfHeld(PlayerRow role) {
-        if (takeovers == null || role.getOwnerEpoch() <= 0) {
-            return;
+    /** 先向 gate 下发带原因的踢线（推 34 号并通知 scene 立即退场），再对仍持权的角色发归属接管（直接结束挂机月卡离线托管与断线保留）。 */
+    private void kickRole(PlayerRow role, int reasonTipId) {
+        PlayerPushes gatePushes = pushes;
+        if (gatePushes != null && reasonTipId > 0) {
+            try {
+                gatePushes.kick(role.getPlayerId(), reasonTipId)
+                        .toCompletableFuture()
+                        .orTimeout(2, TimeUnit.SECONDS)
+                        .join();
+            } catch (RuntimeException e) {
+                log.debug("[account-deletion] gate kick push failed player={} tip={} err={}",
+                        Long.toUnsignedString(role.getPlayerId()), reasonTipId, e.getClass().getSimpleName());
+            }
         }
-        takeovers.request(role.getPlayerId(), role.getOwnerEpoch());
+        if (takeovers != null && role.getOwnerEpoch() > 0) {
+            takeovers.request(role.getPlayerId(), role.getOwnerEpoch());
+        }
+    }
+
+    private boolean runRolePurgeCleanups(long playerId) {
+        for (java.util.function.LongPredicate cleanup : rolePurgeCleanups) {
+            try {
+                if (!cleanup.test(playerId)) {
+                    log.warn("[account-deletion] participant purge returned false player={}", Long.toUnsignedString(playerId));
+                    return false;
+                }
+            } catch (RuntimeException e) {
+                log.warn("[account-deletion] participant purge failed player={} err={}",
+                        Long.toUnsignedString(playerId), e.getClass().getSimpleName());
+                return false;
+            }
+        }
+        return true;
     }
 
     static AccountDeletionResponse toProtoReply(AccountDeletionOutcome outcome) {

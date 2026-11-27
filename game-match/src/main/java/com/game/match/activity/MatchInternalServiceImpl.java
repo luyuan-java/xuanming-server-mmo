@@ -49,37 +49,40 @@ public class MatchInternalServiceImpl implements MatchInternalService {
     private final ServiceCallSignatures outcomeSignatures;
     private final com.game.match.script.BattleScriptService scripts;
     private final ServiceCallSignatures opsSignatures;
+    private final javax.sql.DataSource dataSource;
 
     public MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props,
             org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchStore> outcomes,
             org.springframework.core.env.Environment environment) {
         this(service,workers,props,environment.getProperty("MMORPG_MATCH_INTERNAL_SECRET_GUILD"),outcomes.getIfAvailable(),
                 environment.getProperty(MatchInternalService.OUTCOME_SECRET_ENV),
-                null, environment.getProperty(MatchInternalService.OPS_SECRET_ENV));
+                null, environment.getProperty(MatchInternalService.OPS_SECRET_ENV), null);
     }
     @org.springframework.beans.factory.annotation.Autowired
     public MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props,
             org.springframework.beans.factory.ObjectProvider<com.game.match.global.GlobalMatchStore> outcomes,
             org.springframework.beans.factory.ObjectProvider<com.game.match.script.BattleScriptService> scripts,
+            org.springframework.beans.factory.ObjectProvider<javax.sql.DataSource> dataSource,
             org.springframework.core.env.Environment environment) {
         this(service,workers,props,environment.getProperty("MMORPG_MATCH_INTERNAL_SECRET_GUILD"),outcomes.getIfAvailable(),
                 environment.getProperty(MatchInternalService.OUTCOME_SECRET_ENV),
-                scripts.getIfAvailable(), environment.getProperty(MatchInternalService.OPS_SECRET_ENV));
+                scripts.getIfAvailable(), environment.getProperty(MatchInternalService.OPS_SECRET_ENV),
+                dataSource.getIfAvailable());
     }
     public MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props) {
         this(service,workers,props,System.getenv("MMORPG_MATCH_INTERNAL_SECRET_GUILD"),null,System.getenv(MatchInternalService.OUTCOME_SECRET_ENV),
-                null, System.getenv(MatchInternalService.OPS_SECRET_ENV));
+                null, System.getenv(MatchInternalService.OPS_SECRET_ENV), null);
     }
     MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props, String cancellationSecret) {
-        this(service,workers,props,cancellationSecret,null,null,null,null);
+        this(service,workers,props,cancellationSecret,null,null,null,null,null);
     }
     public MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props,
             com.game.match.script.BattleScriptService scripts, String opsSecret) {
-        this(service,workers,props,null,null,null,scripts,opsSecret);
+        this(service,workers,props,null,null,null,scripts,opsSecret,null);
     }
     private MatchInternalServiceImpl(ActivityBattleService service, MatchWorkers workers, MatchProperties props, String cancellationSecret,
             com.game.match.global.GlobalMatchStore outcomes,String outcomeSecret,
-            com.game.match.script.BattleScriptService scripts, String opsSecret) {
+            com.game.match.script.BattleScriptService scripts, String opsSecret, javax.sql.DataSource dataSource) {
         this.service = Objects.requireNonNull(service, "service");
         this.workers = Objects.requireNonNull(workers, "workers");
         this.budgetMs = props.requestBudget().toMillis();
@@ -93,6 +96,7 @@ public class MatchInternalServiceImpl implements MatchInternalService {
         this.scripts=scripts;
         this.opsSignatures=opsSecret==null||opsSecret.isBlank()?null
                 :new ServiceCallSignatures(Map.of(MatchInternalService.OPS_CALLER,opsSecret),System::currentTimeMillis);
+        this.dataSource = dataSource;
     }
 
     @Override
@@ -267,5 +271,73 @@ public class MatchInternalServiceImpl implements MatchInternalService {
             reply.complete(service.unavailableGuildWar(request));
         }
         return reply;
+    }
+
+    @Override
+    public CompletableFuture<Boolean> purgeRemovedRole(long playerId) {
+        if (playerId == 0L) {
+            return CompletableFuture.completedFuture(true);
+        }
+        if (dataSource == null) {
+            return CompletableFuture.completedFuture(true);
+        }
+        CompletableFuture<Boolean> reply = new CompletableFuture<>();
+        try {
+            workers.execute(() -> {
+                try {
+                    purgeRemovedRoleInTx(dataSource, playerId, System.currentTimeMillis());
+                    reply.complete(true);
+                } catch (Exception e) {
+                    log.error("[match] purgeRemovedRole failed player={} err={}",
+                            Long.toUnsignedString(playerId), e.toString());
+                    reply.complete(false);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            reply.complete(false);
+        }
+        return reply;
+    }
+
+    /** 账号注销删角收尾（单事务）：先记待摘评级榜 → 清战报/试炼卡/论剑个人 → 删评分行 → 删战斗剧本与选用（保留审核流水）。 */
+    public static void purgeRemovedRoleInTx(javax.sql.DataSource ds, long playerId, long nowMs) throws java.sql.SQLException {
+        try (java.sql.Connection c = ds.getConnection()) {
+            boolean prevAuto = c.getAutoCommit();
+            c.setAutoCommit(false);
+            try {
+                com.game.match.global.RatingRankOutbox.queueRankRemovalsInTx(c, playerId, nowMs);
+                try {
+                    com.game.match.report.BattleReportStore.purgePlayerReports(c, playerId);
+                } catch (java.sql.SQLException e) {
+                    String s = e.getSQLState();
+                    if (!"42S02".equals(s) && !"42102".equals(s)) {
+                        throw e;
+                    }
+                }
+                try (java.sql.PreparedStatement ps = c.prepareStatement("DELETE FROM match_rating WHERE player_id=?")) {
+                    ps.setObject(1, com.game.pbmysql.PbMysql.uint64(playerId));
+                    ps.executeUpdate();
+                } catch (java.sql.SQLException e) {
+                    String s = e.getSQLState();
+                    if (!"42S02".equals(s) && !"42102".equals(s)) {
+                        throw e;
+                    }
+                }
+                com.game.match.script.BattleScriptStore.purgePlayerScripts(c, playerId);
+                c.commit();
+            } catch (Exception e) {
+                try {
+                    c.rollback();
+                } catch (java.sql.SQLException rb) {
+                    e.addSuppressed(rb);
+                }
+                throw e;
+            } finally {
+                try {
+                    c.setAutoCommit(prevAuto);
+                } catch (java.sql.SQLException ignored) {
+                }
+            }
+        }
     }
 }
