@@ -3,13 +3,11 @@ package com.game.match.jianghu;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.game.api.proto.SessionContext;
-import com.game.proto.common.base.CurrencyType;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.JianghuDuelBattleContext;
 import com.game.proto.chat.PublishSystemWorldNoticeRequest;
 import com.game.proto.chat.SystemWorldNoticeTemplate;
 import com.game.proto.eBattleOutcome;
-import com.game.proto.mail.SendMailRequest;
 import com.game.proto.match.ConfirmJianghuDuelMemberRequest;
 import com.game.proto.match.CreateJianghuDuelInviteRequest;
 import com.game.proto.match.DismissJianghuGrudgeRequest;
@@ -38,7 +36,6 @@ class JianghuDuelParityTest {
         AtomicLong clock = new AtomicLong(1_730_000_000_000L);
         AtomicLong ids = new AtomicLong(100L);
         List<PublishSystemWorldNoticeRequest> notices = new ArrayList<>();
-        List<SendMailRequest> refundMails = new ArrayList<>();
         Map<Long, List<Long>> teams = Map.of(
                 1001L, List.of(1001L, 1002L, 1003L),
                 2001L, List.of(2001L, 2002L, 2003L));
@@ -65,11 +62,6 @@ class JianghuDuelParityTest {
                     @Override
                     public void publishWorldNotice(PublishSystemWorldNoticeRequest request) {
                         notices.add(request);
-                    }
-
-                    @Override
-                    public void sendSilverRefundMail(SendMailRequest request) {
-                        refundMails.add(request);
                     }
                 },
                 clock::get,
@@ -136,7 +128,8 @@ class JianghuDuelParityTest {
         // 4. VOID 异常局严格禁止 match 侧再发退款邮件（单通道防双退银两：仅由 scene JianghuService 退还）
         BattleResultEvent voidEv = makeResult(99L, eBattleOutcome.BATTLE_OUTCOME_VOID, 0);
         assertThat(svc.applyBattleResult(voidEv, revs)).isFalse();
-        assertThat(refundMails).isEmpty();
+        assertThat(java.util.Arrays.stream(JianghuDuelService.Ports.class.getDeclaredMethods())
+                .map(java.lang.reflect.Method::getName)).doesNotContain("sendSilverRefundMail");
 
         // 5. 未知 writ_tier 不得抛 NPE
         BattleResultEvent unknownTier = makeResult(100L, eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN, 4).toBuilder()

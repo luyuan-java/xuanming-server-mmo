@@ -85,6 +85,20 @@ public final class TournamentService {
         long send(long playerId, TournamentStore.ClaimableReward reward, String title, String body) throws Exception;
     }
 
+    /** 邮件服务业务拒绝异常（用于向客户端透传 kMailRecipientBoxFull 等明确提示码，其余错误照旧回内部错）。 */
+    public static final class MailRejectedException extends RuntimeException {
+        private final int tipId;
+
+        public MailRejectedException(int tipId) {
+            super("mail rejected tip=" + tipId);
+            this.tipId = tipId;
+        }
+
+        public int tipId() {
+            return tipId;
+        }
+    }
+
     private final TournamentStore store;
     private final LongSupplier idGenerator;
     private final MatchLauncher launcher;
@@ -375,6 +389,15 @@ public final class TournamentService {
                             ? r.mailBody() : TournamentTables.DEFAULT_MAIL_BODY;
                     try {
                         mailId = mailSender.send(playerId, r, title, body);
+                    } catch (MailRejectedException mailRejected) {
+                        int rejectedTip = mailRejected.tipId();
+                        log.warn("[tournament] reward mail rejected player={} reward={} tip={}",
+                                Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()), rejectedTip);
+                        if (failedTip == 0) {
+                            failedTip = rejectedTip == com.game.table.MailErrorTip.mail_error.kMailRecipientBoxFull_VALUE
+                                    ? rejectedTip : ERR_INTERNAL;
+                        }
+                        continue;
                     } catch (Exception mailErr) {
                         log.error("[tournament] send reward mail failed player={} reward={}: {}",
                                 Long.toUnsignedString(playerId), Long.toUnsignedString(r.rewardId()), mailErr.getMessage());

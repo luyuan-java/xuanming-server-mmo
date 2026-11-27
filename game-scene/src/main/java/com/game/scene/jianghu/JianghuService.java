@@ -9,7 +9,10 @@ import com.game.proto.GetJianghuProfileRequest;
 import com.game.proto.GetJianghuProfileResponse;
 import com.game.proto.JianghuClearMarkMode;
 import com.game.proto.JianghuDuelBattleContext;
+import com.game.proto.JianghuDuelPrepareFee;
 import com.game.proto.JianghuPlayerEligibilityEntry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.game.proto.JianghuProfileView;
 import com.game.proto.PlayerJianghuComp;
 import com.game.proto.SetJianghuRefuseStrangersRequest;
@@ -44,6 +47,8 @@ import java.util.function.Supplier;
  * </ul>
  */
 public final class JianghuService {
+
+    private static final Logger log = LoggerFactory.getLogger(JianghuService.class);
 
     public static final int DEFAULT_GOLD_WRIT_ITEM_ID = 3415;
     public static final int DEFAULT_CLEAR_ITEM_ID = 3416;
@@ -270,6 +275,137 @@ public final class JianghuService {
         return resp.build();
     }
 
+    /**
+     * 备战资费只读预检（批 X / r2-jh#1）：
+     * <ul>
+     *   <li>若存在别的局未结清待退银两（{@code pending_silver_fee_battle_id != 0 && != battleId}），一律拒回 {@code kFeatureUnavailable} 且不动标记；</li>
+     *   <li>普通战书核对可交易银两 {@link Wallet#GOLD}，金帖核对主背包道具 3415。</li>
+     * </ul>
+     */
+    public int validatePrepareFee(ScenePlayer player, long battleId, JianghuDuelPrepareFee fee) {
+        if (fee == null || fee.getWritTier() == 0) {
+            return 0;
+        }
+        if (!isEnabled()) {
+            return JianghuErrorTip.jianghu_error.kJianghuDuelDisabled_VALUE;
+        }
+        if (player == null || player.frozen() || battleId == 0L) {
+            return CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
+        }
+        PlayerJianghuComp cur = stateOf(player.playerId());
+        long pendingBattleId = cur.getPendingSilverFeeBattleId();
+        if (pendingBattleId != 0L && pendingBattleId != battleId) {
+            return CommonErrorTip.common_error.kFeatureUnavailable_VALUE;
+        }
+        if (fee.getWritTier() == 1) {
+            if (pendingBattleId == battleId) {
+                return 0;
+            }
+            long cost = fee.getSilverCost() > 0 ? fee.getSilverCost() : silverWritCost();
+            if (player.wallet().balance(Wallet.GOLD) < cost) {
+                return JianghuErrorTip.jianghu_error.kJianghuInsufficientWritOrSilver_VALUE;
+            }
+            return 0;
+        }
+        if (fee.getWritTier() == 2) {
+            int itemId = fee.getItemConfigId() > 0 ? fee.getItemConfigId() : goldWritItemId();
+            if (countItem(player, itemId) < 1) {
+                return JianghuErrorTip.jianghu_error.kJianghuInsufficientWritOrSilver_VALUE;
+            }
+            return 0;
+        }
+        return CommonErrorTip.common_error.kInvalidParameter_VALUE;
+    }
+
+    /**
+     * 备战锁落定后原子预扣生死状资费并登记待退标记与 SQL 终局复核时刻（批 X / r2-jh#1）。
+     * 别的局未结清时拒绝且绝不覆盖旧标记。
+     */
+    public int commitPrepareFee(ScenePlayer player, long battleId, JianghuDuelPrepareFee fee, long reviewAfterMs) {
+        int precheck = validatePrepareFee(player, battleId, fee);
+        if (precheck != 0 || fee == null || fee.getWritTier() == 0) {
+            return precheck;
+        }
+        long nowMs = clockMs.getAsLong();
+        PlayerJianghuComp cur = stateOf(player.playerId());
+        if (fee.getWritTier() == 1) {
+            if (cur.getPendingSilverFeeBattleId() == battleId) {
+                return 0;
+            }
+            long cost = fee.getSilverCost() > 0 ? fee.getSilverCost() : silverWritCost();
+            long refId = fee.getDuelInviteId() != 0L ? fee.getDuelInviteId() : battleId;
+            var deduct = currency.deduct(player, Wallet.GOLD, cost, AssetAudit.Reason.JIANGHU_DUEL_FEE, refId);
+            if (!deduct.ok()) {
+                return JianghuErrorTip.jianghu_error.kJianghuInsufficientWritOrSilver_VALUE;
+            }
+            statesByPlayer.put(player.playerId(), cur.toBuilder()
+                    .setPendingSilverFeeBattleId(battleId)
+                    .setPendingSilverFeeAmount(cost)
+                    .setPendingSilverFeeReviewAfterMs(reviewAfterMs)
+                    .build());
+            return 0;
+        }
+        if (fee.getWritTier() == 2) {
+            int itemId = fee.getItemConfigId() > 0 ? fee.getItemConfigId() : goldWritItemId();
+            long refId = fee.getDuelInviteId() != 0L ? fee.getDuelInviteId() : battleId;
+            var prep = bags.prepareSelfConsume(player, Map.of(itemId, 1L));
+            if (prep.tip() != 0) {
+                return JianghuErrorTip.jianghu_error.kJianghuInsufficientWritOrSilver_VALUE;
+            }
+            prep.commit(AssetAudit.Reason.JIANGHU_DUEL_FEE, refId);
+            return 0;
+        }
+        return CommonErrorTip.common_error.kInvalidParameter_VALUE;
+    }
+
+    /**
+     * 单通道退还本局普通战书预扣银两（批 X / r2-jh#2）：
+     * 玩家冻结或不可改时不动标记；严格「先入账成功、再清标记」；{@link AssetAudit.Reason#JIANGHU_DUEL_REFUND} 豁免获取封禁。
+     */
+    public boolean refundPendingSilverFee(ScenePlayer player, long battleId) {
+        if (player == null || player.frozen() || battleId == 0L) {
+            return false;
+        }
+        PlayerJianghuComp cur = stateOf(player.playerId());
+        if (cur.getPendingSilverFeeBattleId() != battleId || cur.getPendingSilverFeeAmount() <= 0L) {
+            return false;
+        }
+        long amount = cur.getPendingSilverFeeAmount();
+        long nowMs = clockMs.getAsLong();
+        var added = currency.add(player, Wallet.GOLD, amount, AssetAudit.Reason.JIANGHU_DUEL_REFUND,
+                battleId, nowMs / 1000L);
+        if (!added.ok()) {
+            log.warn("jianghu silver fee refund credit failed; keeping marker player={} battle_id={} amount={} change={}",
+                    Long.toUnsignedString(player.playerId()), Long.toUnsignedString(battleId), amount, added);
+            return false;
+        }
+        statesByPlayer.put(player.playerId(), cur.toBuilder()
+                .setPendingSilverFeeBattleId(0L)
+                .setPendingSilverFeeAmount(0L)
+                .setPendingSilverFeeReviewAfterMs(0L)
+                .build());
+        return true;
+    }
+
+    /** 缺陷兜底（批 X §7.3）：SQL 终局已 COMPLETE 且结算已在本实体应用但标记残留时清掉不退并记 ERROR，避免永久卡新局。 */
+    public boolean consumePendingSilverFee(ScenePlayer player, long battleId) {
+        if (player == null || player.frozen() || battleId == 0L) {
+            return false;
+        }
+        PlayerJianghuComp cur = stateOf(player.playerId());
+        if (cur.getPendingSilverFeeBattleId() != battleId) {
+            return false;
+        }
+        log.error("jianghu pending silver fee marker remained after COMPLETE settlement; clearing without refund player={} battle_id={} amount={}",
+                Long.toUnsignedString(player.playerId()), Long.toUnsignedString(battleId), cur.getPendingSilverFeeAmount());
+        statesByPlayer.put(player.playerId(), cur.toBuilder()
+                .setPendingSilverFeeBattleId(0L)
+                .setPendingSilverFeeAmount(0L)
+                .setPendingSilverFeeReviewAfterMs(0L)
+                .build());
+        return true;
+    }
+
     /** 天墉生死状隔离战后社交印记结算（零经验/零银两/零 660 材料，仅维护 30 分钟战败印记与雪耻清除）。 */
     public void applyDuelSettlement(ScenePlayer player, BattleSettlementData settlement) {
         if (player == null || settlement == null || !settlement.hasJianghuDuel()) {
@@ -277,16 +413,17 @@ public final class JianghuService {
         }
         long nowMs = clockMs.getAsLong();
         PlayerJianghuComp cur = normalizeExpired(player, stateOf(player.playerId()), nowMs);
-        long pendingRefund = cur.getPendingSilverFeeBattleId() == settlement.getBattleId()
-                ? cur.getPendingSilverFeeAmount() : 0L;
-        PlayerJianghuComp.Builder b = cur.toBuilder().setPendingSilverFeeBattleId(0L).setPendingSilverFeeAmount(0L);
         if (settlement.getTotalRounds() == 0 || settlement.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_VOID) {
-            if (pendingRefund > 0L) {
-                currency.add(player, Wallet.GOLD, pendingRefund, AssetAudit.Reason.JIANGHU_DUEL_REFUND,
-                        settlement.getBattleId(), nowMs / 1000L);
-            }
-            statesByPlayer.put(player.playerId(), b.build());
+            // 批 X：作废 / 0 回合严格先入账成功再清标记，入账失败保留标记交终局复核重试
+            statesByPlayer.put(player.playerId(), cur);
+            refundPendingSilverFee(player, settlement.getBattleId());
             return;
+        }
+        PlayerJianghuComp.Builder b = cur.toBuilder();
+        if (cur.getPendingSilverFeeBattleId() == settlement.getBattleId()) {
+            b.setPendingSilverFeeBattleId(0L)
+                    .setPendingSilverFeeAmount(0L)
+                    .setPendingSilverFeeReviewAfterMs(0L);
         }
         JianghuDuelBattleContext duel = settlement.getJianghuDuel();
         boolean playerWon = (settlement.getPlayerTeamIndex() == 0 && settlement.getOutcome() == eBattleOutcome.BATTLE_OUTCOME_SIDE_A_WIN)

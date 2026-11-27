@@ -595,7 +595,8 @@ public class GuildConfiguration {
 
     @Bean
     public com.game.guild.war.GuildWarStore guildWarStore(DataSource dataSource, SchemaReady guildSchemaReady) throws SQLException {
-        com.game.guild.war.GuildWarStore warStore = new com.game.guild.war.GuildWarStore(dataSource);
+        com.game.guild.war.GuildWarStore warStore = new com.game.guild.war.GuildWarStore(dataSource)
+                .withRoleFence(com.game.guild.war.GuildWarStore.RoleFence.PLAYER_TABLE);
         warStore.ensureSchema();
         return warStore;
     }
@@ -697,6 +698,16 @@ public class GuildConfiguration {
                         war.expireDueBounties(16, Deadline.after(3_000));
                     } catch (Exception e) {
                         log.warn("到期追杀令退款扫描异常", e);
+                    }
+                    try {
+                        war.convertOwedCredits(64, Deadline.after(3_000));
+                    } catch (Exception e) {
+                        log.warn("帮战待入账补插异常", e);
+                    }
+                    try {
+                        war.purgeTerminalBounties(200);
+                    } catch (Exception e) {
+                        log.warn("终态追杀令过期清理异常", e);
                     }
                 });
             } catch (java.util.concurrent.RejectedExecutionException ignored) {

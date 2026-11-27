@@ -376,8 +376,11 @@ public class MatchFeatureConfiguration {
             SendMailResponse response = clients.call(target, timeout, svc -> svc.sendPersonalMail(signed))
                     .get(timeout.toMillis() + 300L, TimeUnit.MILLISECONDS);
             if (response == null || response.getErrorMessage().getId() != 0 || response.getMailId() == 0L) {
-                throw new IllegalStateException("mail admin rejected tip="
-                        + (response == null ? -1 : response.getErrorMessage().getId()));
+                int tipId = response == null ? -1 : response.getErrorMessage().getId();
+                if (tipId > 0) {
+                    throw new TournamentService.MailRejectedException(tipId);
+                }
+                throw new IllegalStateException("mail admin rejected tip=" + tipId);
             }
             return response.getMailId();
         };

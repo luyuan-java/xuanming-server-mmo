@@ -4,16 +4,12 @@ import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.match.dispatch.MatchMethodHandler;
 import com.game.match.dispatch.MatchMethods;
-import com.game.proto.common.base.CurrencyType;
 import com.game.proto.contracts.kafka.BattleResultEvent;
 import com.game.proto.JianghuDuelBattleContext;
 import com.game.proto.TipInfoMessage;
 import com.game.proto.chat.PublishSystemWorldNoticeRequest;
 import com.game.proto.chat.SystemWorldNoticeTemplate;
 import com.game.proto.eBattleOutcome;
-import com.game.proto.mail.MailAttachments;
-import com.game.proto.mail.MailCurrency;
-import com.game.proto.mail.SendMailRequest;
 import com.game.proto.match.ConfirmJianghuDuelMemberRequest;
 import com.game.proto.match.ConfirmJianghuDuelMemberResponse;
 import com.game.proto.match.CreateJianghuDuelInviteRequest;
@@ -118,9 +114,6 @@ public final class JianghuDuelService {
         }
 
         default void publishWorldNotice(PublishSystemWorldNoticeRequest request) {
-        }
-
-        default void sendSilverRefundMail(SendMailRequest request) {
         }
     }
 
@@ -246,7 +239,6 @@ public final class JianghuDuelService {
     private final Map<Long, DailyCounter> dailyCounters = new HashMap<>();
     private final Map<GrudgeKey, GrudgeState> grudges = new HashMap<>();
     private final Set<Long> appliedBattleIds = ConcurrentHashMap.newKeySet();
-    private final Set<Long> refundedInviteIds = ConcurrentHashMap.newKeySet();
 
     public JianghuDuelService(Supplier<JianghuRuleTable> ruleSupplier, Ports ports,
                               LongSupplier clockMs, LongSupplier idGenerator) {
@@ -786,35 +778,6 @@ public final class JianghuDuelService {
         list.sort(Comparator.comparingLong((Map.Entry<GrudgeKey, GrudgeState> e) -> e.getValue().lastBattleMs).reversed());
         for (int i = MAX_RIVALS; i < list.size(); i++) {
             grudges.remove(list.get(i).getKey());
-        }
-    }
-
-    private void refundSilverOnce(long duelInviteId, long payerId, long silverCost) {
-        if (duelInviteId == 0L || payerId == 0L || silverCost <= 0L) {
-            return;
-        }
-        if (!refundedInviteIds.add(duelInviteId)) {
-            return;
-        }
-        try {
-            // expire_ms 传 0 交由 game-mail 套用默认 30 天有效期，确保同 request_id 跨秒重试摘要字节级一致
-            ports.sendSilverRefundMail(SendMailRequest.newBuilder()
-                    .setSenderKind(6)
-                    .setRequestId(duelInviteId)
-                    .setRecipientPlayerId(payerId)
-                    .setTitle("天墉生死状战书银两退还")
-                    .setBody("您发起的天墉生死状未能正常开战或作废，已全额退还普通战书银两，请查收附件。")
-                    .setAttachments(MailAttachments.newBuilder()
-                            .addCurrencies(MailCurrency.newBuilder()
-                                    .setCurrencyType(CurrencyType.CURRENCY_TYPE_GOLD_VALUE)
-                                    .setAmount(silverCost)
-                                    .build())
-                            .build())
-                    .setExpireMs(0L)
-                    .build());
-        } catch (RuntimeException e) {
-            refundedInviteIds.remove(duelInviteId);
-            throw e;
         }
     }
 

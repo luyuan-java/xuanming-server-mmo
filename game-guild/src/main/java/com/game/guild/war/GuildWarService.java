@@ -1599,7 +1599,7 @@ public final class GuildWarService {
                 }
                 break;
             } catch (GuildWarStore.WarRuleException e) {
-                if ("bounty_daily_cap".equals(e.code) && !winnerCapped) {
+                if (("bounty_daily_cap".equals(e.code) || "bounty_winner_deleted".equals(e.code)) && !winnerCapped) {
                     winnerCapped = true;
                     continue;
                 }
@@ -1689,6 +1689,25 @@ public final class GuildWarService {
             }
         }
         return expired;
+    }
+
+    /** 补插帮战待入账表（r2-gw#5/#6）：未决满窗或冻结期间记账的银两按原 op_id 转为正式资产指令并尝试即时投递。 */
+    public int convertOwedCredits(int limit, Deadline d) throws SQLException {
+        if (!useAssetChannel()) {
+            return 0;
+        }
+        long now = now();
+        List<AssetOp> ops = store.convertCreditOwed(limit, now, now + assetLeaseMs,
+                () -> AssetOpDecisions.leaseToken(tokens));
+        for (AssetOp op : ops) {
+            syncDeliverWarOp(op, d);
+        }
+        return ops.size();
+    }
+
+    /** 分批清理 30 天保留期已过的终态追杀令（r2-gw#7）：绝不删未终结状态 1/2。 */
+    public int purgeTerminalBounties(int limit) throws SQLException {
+        return store.purgeTerminalBounties(now(), limit);
     }
 
     private String lookupGuildName(long guildId, Map<Long, String> cache, Deadline d) {

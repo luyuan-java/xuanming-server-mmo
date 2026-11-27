@@ -806,6 +806,18 @@ class TournamentParityTest {
             assertThat(sentTitles).containsExactly("冻结标题#1", "冻结标题#3");
             assertThat(sentBodies).containsExactly("冻结正文#1", "冻结正文#3");
 
+            // 2b. 邮箱满透传 kMailRecipientBoxFull（§7.2 复核补项），奖励保持 CLAIMABLE
+            TournamentService boxFullSvc = new TournamentService(store, idGen::incrementAndGet, null, null,
+                    (pid, reward, title, body) -> {
+                        throw new TournamentService.MailRejectedException(
+                                com.game.table.MailErrorTip.mail_error.kMailRecipientBoxFull_VALUE);
+                    });
+            var boxFull = boxFullSvc.claimReward(501L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build());
+            assertThat(boxFull.getErrorMessage().getId())
+                    .isEqualTo(com.game.table.MailErrorTip.mail_error.kMailRecipientBoxFull_VALUE);
+            assertThat(boxFull.getClaimedRewardsList()).isEmpty();
+            assertThat(store.claimableRewards(501L, 1)).hasSize(1);
+
             // 3. 恢复后重领 #1：仍使用逐字节相同的冻结标题与正文，全部领完
             failFirst.set(false);
             var retry = mailSvc.claimReward(501L, ClaimTournamentRewardRequest.newBuilder().setSeasonId(1).build());

@@ -127,6 +127,17 @@ public final class PlayerBattleService implements BattleHooks {
         BattleRouting of(ScenePlayer player);
     }
 
+    /** 战斗终局 SQL 复核结果（批 X：待退银两与道具预留共用同一次 SQL 终局复核，仅 ABORTED / NOT_FOUND 才退还）。 */
+    public enum BattleTerminalVerdict {
+        PENDING, COMPLETE, ABORTED, NOT_FOUND
+    }
+
+    /** 向 match 发起单局 SQL 终局复核（异步返回，回调切回场景逻辑线程执行）。 */
+    @FunctionalInterface
+    public interface BattleTerminalReviewer {
+        CompletableFuture<BattleTerminalVerdict> queryTerminalVerdict(long battleId);
+    }
+
     private final BattleLocks locks;
     private final BattleSettlementService settlements;
     private final SceneBattleTables tables;
@@ -143,6 +154,9 @@ public final class PlayerBattleService implements BattleHooks {
     private com.game.scene.trial.TrialJournalService trialJournalService;
     private com.game.scene.festivalbeast.FestivalBeastService festivalBeastService;
     private com.game.scene.season.SeasonService seasonService;
+    private com.game.scene.jianghu.JianghuService jianghuService;
+    private BattleTerminalReviewer terminalReviewer;
+    private final Set<Long> feeReviewInFlight = new HashSet<>();
     private com.game.scene.attribute.AttributeService attributeService;
     private int notifyAttributePanelChanged;
     private int notifyPetListChanged;
@@ -162,6 +176,16 @@ public final class PlayerBattleService implements BattleHooks {
 
     public PlayerBattleService withSeasonService(com.game.scene.season.SeasonService service) {
         this.seasonService = service;
+        return this;
+    }
+
+    public PlayerBattleService withJianghuService(com.game.scene.jianghu.JianghuService service) {
+        this.jianghuService = service;
+        return this;
+    }
+
+    public PlayerBattleService withBattleTerminalReviewer(BattleTerminalReviewer reviewer) {
+        this.terminalReviewer = reviewer;
         return this;
     }
 
@@ -424,6 +448,14 @@ public final class PlayerBattleService implements BattleHooks {
                 : snapshot;
         // 快照构建后，在冻结提交点再次校验原工作代次截止。
         if(Long.compareUnsigned(prepareDeadline,clock.epochMillis())<=0)return prepareRejected(INVALID_PARAMETER,Prepare.INVALID);
+        // 批 X：生死状普通战书/金帖备战资费预检（别的局待退银两未结清时拒绝新备战且不动标记）
+        final com.game.proto.JianghuDuelPrepareFee jianghuFee = request.hasJianghuDuelFee() ? request.getJianghuDuelFee() : null;
+        if (jianghuFee != null && jianghuFee.getWritTier() != 0 && jianghuService != null) {
+            int feeTip = jianghuService.validatePrepareFee(player, battleId, jianghuFee);
+            if (feeTip != OK) {
+                return prepareRejected(feeTip, Prepare.INVALID);
+            }
+        }
         BattleFreeze freeze = new BattleFreeze(battleId, request.getBattleNodeId(), Phase.PREPARING, deadline, prepareDeadline, true);
         freeze.setLockPending(true);
         player.battle().setFreeze(freeze);
@@ -433,7 +465,7 @@ public final class PlayerBattleService implements BattleHooks {
         long ttl = BattleRedis.lockTtlSec(prepareDeadline, clock.epochMillis());
         onLogic(locks.prepareLock(playerId, battleId, request.getBattleNodeId(), deadline, prepareDeadline, ttl), (held, error) -> {
             try {
-                onPrepareLocked(player, freeze, preparedSnapshot, held, error, reply);
+                onPrepareLocked(player, freeze, preparedSnapshot, jianghuFee, held, error, reply);
             } catch (RuntimeException e) {
                 abandonPrepare(player, freeze);
                 throw e;
@@ -491,7 +523,8 @@ public final class PlayerBattleService implements BattleHooks {
         return true;
     }
 
-    private void onPrepareLocked(ScenePlayer player, BattleFreeze freeze, BattlePlayerSnapshot snapshot, String held, Throwable error,
+    private void onPrepareLocked(ScenePlayer player, BattleFreeze freeze, BattlePlayerSnapshot snapshot,
+                                 com.game.proto.JianghuDuelPrepareFee jianghuFee, String held, Throwable error,
                                  CompletableFuture<PrepareBattleResponse> reply) {
         long playerId = player.playerId();
         long battleId = freeze.battleId();
@@ -535,6 +568,16 @@ public final class PlayerBattleService implements BattleHooks {
             metrics.prepare(Prepare.CANCELLED);
             reply.complete(prepareResponse(FEATURE_UNAVAILABLE));
             return;
+        }
+        if (jianghuFee != null && jianghuFee.getWritTier() != 0 && jianghuService != null) {
+            int commitTip = jianghuService.commitPrepareFee(player, battleId, jianghuFee, freeze.effectiveDeadlineMs());
+            if (commitTip != OK) {
+                clearFreeze(player, LockAction.DELETE_PREPARING);
+                metrics.prepare(Prepare.INVALID);
+                reply.complete(prepareResponse(commitTip));
+                return;
+            }
+            world.requestSave(player);
         }
         metrics.prepare(Prepare.OK);
         log.info("备战冻结 player={} battle_id={} node={} deadline={} prepare_deadline={}", Long.toUnsignedString(playerId),
@@ -621,6 +664,10 @@ public final class PlayerBattleService implements BattleHooks {
         log.info("取消备战，解冻 player={} battle_id={}", Long.toUnsignedString(playerId), Long.toUnsignedString(battleId));
         if (festivalBeastService != null) {
             festivalBeastService.onBattlePrepareCancelledOrVoid(world, player, battleId);
+        }
+        // 批 X：scene 不再读已废弃的 skip_jianghu_silver_refund，取消备战一律走单通道先入账再清标记
+        if (jianghuService != null && jianghuService.refundPendingSilverFee(player, battleId)) {
+            world.requestSave(player);
         }
         // 只删备战锁：这条删除若被排到紧随其后的确认之后，锁已标 F、迟到确认已重建 FIGHTING，不能再删（审计 FRZ-7）
         return clearFreeze(player, LockAction.DELETE_PREPARING);
@@ -1081,6 +1128,7 @@ public final class PlayerBattleService implements BattleHooks {
                             writeOff(player, battleId, AckTrigger.REAPER);
                         }
                     }
+                    reviewPendingSilverFeeIfDue(player, now);
                 }
                 // PENDING：恢复读在途，账本由它回来后的第 4 步销
             } catch (RuntimeException e) {
@@ -1088,6 +1136,57 @@ public final class PlayerBattleService implements BattleHooks {
             }
         }
         metrics.frozen(preparing, fighting);
+    }
+
+    /**
+     * 批 X：对过期的待退生死状普通战书银两发起 SQL 终局复核（与道具预留同口径）：
+     * 仅在 SQL 终局为 ABORTED 或无原件（NOT_FOUND）时退还；COMPLETE 且已在本实体应用时清掉标记兜底；PENDING 或出错保留标记下拍再问。
+     */
+    private void reviewPendingSilverFeeIfDue(ScenePlayer player, long now) {
+        if (jianghuService == null || terminalReviewer == null || player.frozen()) {
+            return;
+        }
+        com.game.proto.PlayerJianghuComp comp = jianghuService.stateOf(player.playerId());
+        long pendingBattleId = comp.getPendingSilverFeeBattleId();
+        if (pendingBattleId == 0L) {
+            return;
+        }
+        BattleFreeze freeze = player.battle().freeze();
+        if (freeze != null && freeze.battleId() == pendingBattleId) {
+            return;
+        }
+        if (Long.compareUnsigned(now, comp.getPendingSilverFeeReviewAfterMs()) < 0) {
+            return;
+        }
+        long playerId = player.playerId();
+        if (!feeReviewInFlight.add(playerId)) {
+            return;
+        }
+        onLogic(terminalReviewer.queryTerminalVerdict(pendingBattleId), (verdict, error) -> {
+            feeReviewInFlight.remove(playerId);
+            if (error != null || verdict == null || verdict == BattleTerminalVerdict.PENDING) {
+                return;
+            }
+            if (world.playerById(playerId) != player || player.frozen()) {
+                return;
+            }
+            BattleFreeze curFreeze = player.battle().freeze();
+            if (curFreeze != null && curFreeze.battleId() == pendingBattleId) {
+                return;
+            }
+            if (verdict == BattleTerminalVerdict.ABORTED || verdict == BattleTerminalVerdict.NOT_FOUND) {
+                if (jianghuService.refundPendingSilverFee(player, pendingBattleId)) {
+                    world.requestSave(player);
+                }
+            } else if (verdict == BattleTerminalVerdict.COMPLETE) {
+                boolean locallyApplied = (player.battleLedger().invalidReason() == null
+                        && player.battleLedger().has(pendingBattleId))
+                        || player.battle().writtenOff(pendingBattleId);
+                if (locallyApplied && jianghuService.consumePendingSilverFee(player, pendingBattleId)) {
+                    world.requestSave(player);
+                }
+            }
+        });
     }
 
     /**

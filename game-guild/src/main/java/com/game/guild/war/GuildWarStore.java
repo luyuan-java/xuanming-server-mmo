@@ -146,6 +146,8 @@ public class GuildWarStore {
     public interface RoleFence {
         CreditFenceState classifyInTx(Connection c, long playerId) throws SQLException;
 
+        RoleFence OPEN = (c, playerId) -> CreditFenceState.NORMAL;
+
         RoleFence PLAYER_TABLE = (c, playerId) -> {
             if (playerId == 0L) {
                 return CreditFenceState.NORMAL;
@@ -173,7 +175,7 @@ public class GuildWarStore {
     public static final long TERMINAL_BOUNTY_RETENTION_MS = 30L * 24 * 3600 * 1000L;
 
     private final DataSource dataSource;
-    private volatile RoleFence roleFence = RoleFence.PLAYER_TABLE;
+    private volatile RoleFence roleFence = RoleFence.OPEN;
 
     public GuildWarStore withRoleFence(RoleFence fence) {
         this.roleFence = Objects.requireNonNull(fence, "roleFence");
@@ -900,6 +902,17 @@ public class GuildWarStore {
                 c.setAutoCommit(false);
                 try {
                     CreditFenceState fence = roleFence.classifyInTx(c, key.playerId());
+                    if (fence == CreditFenceState.NORMAL) {
+                        // 严格遵循 P -> Q -> 24 锁序，先锁 seq 行（与 settle/expire 同向，避免潜在间隙锁成环）
+                        try (PreparedStatement lockSeq = c.prepareStatement(
+                                "SELECT player_id FROM guild_player_op_seq WHERE player_id = ? AND stream = ? FOR UPDATE")) {
+                            lockSeq.setLong(1, key.playerId());
+                            lockSeq.setInt(2, AssetStream.ASSET_STREAM_GUILD_CREDIT_VALUE);
+                            try (ResultSet ignored = lockSeq.executeQuery()) {
+                                // 仅加锁
+                            }
+                        }
+                    }
                     long guildId;
                     int kindNum;
                     int txType;
