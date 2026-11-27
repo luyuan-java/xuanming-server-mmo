@@ -13,6 +13,7 @@ import com.game.api.proto.SessionContext;
 import com.game.common.deadline.Deadline;
 import com.game.contract.MessageIdRegistry;
 import com.game.contract.MessageMethod;
+import com.game.guild.jianghu.GuildJianghuGrudgeService;
 import com.game.guild.metrics.GuildMetrics;
 import com.game.guild.metrics.GuildMetrics.RequestResult;
 import com.game.guild.rules.GuildTip;
@@ -33,6 +34,7 @@ import com.game.proto.guild.CreateGuildRequest;
 import com.game.proto.guild.DisbandGuildRequest;
 import com.game.proto.guild.DonateToGuildRequest;
 import com.game.proto.guild.GetGuildDonateOptionsRequest;
+import com.game.proto.guild.GetGuildJianghuGrudgeWallRequest;
 import com.game.proto.guild.GetGuildShopRequest;
 import com.game.proto.guild.GetGuildWarBattleResultRequest;
 import com.game.proto.guild.GetGuildWarOverviewRequest;
@@ -166,6 +168,13 @@ public final class GuildDispatcher {
     public GuildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
                            GuildRankService ranks, GuildEconomyService economy, GuildActivityService activities,
                            GuildWarService war, Executor executor, GuildMetrics metrics, long budgetMillis) {
+        this(registry, guilds, manage, ranks, economy, activities, war, null, executor, metrics, budgetMillis);
+    }
+
+    public GuildDispatcher(MessageIdRegistry registry, GuildService guilds, GuildManageService manage,
+                           GuildRankService ranks, GuildEconomyService economy, GuildActivityService activities,
+                           GuildWarService war, GuildJianghuGrudgeService jianghuGrudge,
+                           Executor executor, GuildMetrics metrics, long budgetMillis) {
         this.registry = registry;
         this.executor = executor;
         this.metrics = metrics;
@@ -219,8 +228,13 @@ public final class GuildDispatcher {
             client(byId, GuildMethods.ISSUE_GUILD_WAR_FEUD, IssueGuildWarFeudRequest.class, (s, r, d) -> war.issueGuildWarFeud(s.getPlayerId(), r, d));
             client(byId, GuildMethods.RESPOND_GUILD_WAR_FEUD, RespondGuildWarFeudRequest.class, (s, r, d) -> war.respondGuildWarFeud(s.getPlayerId(), r, d));
         }
-        for (String method : GuildMethods.JIANGHU_PLACEHOLDERS) {
-            other(byId, method, Kind.PLACEHOLDER);
+        if (jianghuGrudge == null) {
+            for (String method : GuildMethods.JIANGHU_PLACEHOLDERS) {
+                other(byId, method, Kind.PLACEHOLDER);
+            }
+        } else {
+            client(byId, GuildMethods.GET_GUILD_JIANGHU_GRUDGE_WALL, GetGuildJianghuGrudgeWallRequest.class,
+                    (s, r, d) -> jianghuGrudge.getWallForPlayer(s.getPlayerId(), d));
         }
         if(activities==null){
             // 旧切片构造器兼容；生产装配必须显式注入完整活动服务。

@@ -127,4 +127,16 @@ class GuildActivityRuntimeTest {
         runtime.tick();
         verify(store).leaseLaunch(eq(2L), anyLong(), any());
     }
+
+    @Test void 江湖生死状终局路由到帮派恩怨墙结算器() throws Exception {
+        java.util.List<BattleResultEvent> seen = new java.util.ArrayList<>();
+        runtime.setJianghuGrudgeSettler(seen::add);
+        BattleResultEvent duel = BattleResultEvent.newBuilder()
+                .setBattleId(909L)
+                .setMatchMode(com.game.proto.match.MatchMode.MATCH_MODE_JIANGHU_DUEL_VALUE)
+                .build();
+        runtime.settle(duel);
+        assertEquals(List.of(duel), seen);
+        verifyNoInteractions(store, redis);
+    }
 }

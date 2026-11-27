@@ -43,10 +43,15 @@ public final class GuildActivityRuntime implements SmartLifecycle {
     private final GuildTrialCancellation cancellation;
     private volatile boolean running;
     private volatile java.util.function.Consumer<BattleResultEvent> guildWarSettler;
+    private volatile java.util.function.Consumer<BattleResultEvent> jianghuGrudgeSettler;
     private volatile Consumer<String, byte[]> consumer;
 
     public void setGuildWarSettler(java.util.function.Consumer<BattleResultEvent> settler) {
         this.guildWarSettler = settler;
+    }
+
+    public void setJianghuGrudgeSettler(java.util.function.Consumer<BattleResultEvent> settler) {
+        this.jianghuGrudgeSettler = settler;
     }
 
     /** 经与同道历练共用的 MatchInternalService 发起帮战 V2 零匹配池直打。 */
@@ -223,6 +228,14 @@ public final class GuildActivityRuntime implements SmartLifecycle {
     public void settle(BattleResultEvent event) throws Exception {
         if (event.getActivityContext().getKindValue() == com.game.proto.eBattleActivityKind.BATTLE_ACTIVITY_KIND_GUILD_WAR_VALUE) {
             var settler = this.guildWarSettler;
+            if (settler != null) {
+                settler.accept(event);
+                count("result", true);
+            }
+            return;
+        }
+        if (event.getMatchMode() == com.game.proto.match.MatchMode.MATCH_MODE_JIANGHU_DUEL_VALUE) {
+            var settler = this.jianghuGrudgeSettler;
             if (settler != null) {
                 settler.accept(event);
                 count("result", true);
