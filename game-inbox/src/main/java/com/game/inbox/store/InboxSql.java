@@ -56,6 +56,8 @@ final class InboxSql {
     static final String ITEM_COLUMNS = "`shard`,`player_id`,`domain`,`seq`,`msg_type`,`producer_kind`,`request_id`,`content_sha256`,`payload`,"
             + "`state`,`directive`,`void_reason`,`delivery_count`,`last_delivered_epoch`,`last_delivered_ms`,`outcome_reason`,"
             + "`finalized_by`,`decided_epoch`,`issued_at_ms`,`created_ms`,`updated_ms`,`operator_name`,`note`,`owner_account`,`owner_revision`";
+    /** 按玩家对账仅需判定列（不读 payload，避免大载荷耗尽调用预算）。 */
+    static final String RECONCILE_ITEM_COLUMNS = "`player_id`,`domain`,`seq`,`msg_type`,`request_id`,`state`,`outcome_reason`,`finalized_by`,`updated_ms`";
     static final String AUDIT_COLUMNS = "`shard`,`player_id`,`domain`,`seq`,`action`,`operator`,`peer_addr`,`reason`,`created_ms`,"
             + "`msg_type`,`request_id`,`issued_at_ms`,`content_sha256`,`payload`,`void_reason`";
 
@@ -145,6 +147,21 @@ final class InboxSql {
                 .setNote(text(row, "note"))
                 .setOwnerAccount(text(row, "owner_account"))
                 .setOwnerRevision(u64(row, "owner_revision"))
+                .build();
+    }
+
+    /** 仅解码单人对账所需的判定列，不读 payload。 */
+    static player_inbox_item_row reconcileItem(ResultSet row) throws SQLException {
+        return player_inbox_item_row.newBuilder()
+                .setPlayerId(u64(row, "player_id"))
+                .setDomain(u32(row, "domain"))
+                .setSeq(u64(row, "seq"))
+                .setMsgType(u32(row, "msg_type"))
+                .setRequestId(u64(row, "request_id"))
+                .setState(u32(row, "state"))
+                .setOutcomeReason(u32(row, "outcome_reason"))
+                .setFinalizedBy(u32(row, "finalized_by"))
+                .setUpdatedMs(u64(row, "updated_ms"))
                 .build();
     }
 

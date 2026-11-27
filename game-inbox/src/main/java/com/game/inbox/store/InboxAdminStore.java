@@ -4,6 +4,7 @@ import static com.game.inbox.store.InboxSql.ITEM_COLUMNS;
 import static com.game.inbox.store.InboxSql.ITEM_PK;
 import static com.game.inbox.store.InboxSql.ITEM_TABLE;
 import static com.game.inbox.store.InboxSql.PENDING;
+import static com.game.inbox.store.InboxSql.RECONCILE_ITEM_COLUMNS;
 import static com.game.inbox.store.InboxSql.STREAM_COLUMNS;
 import static com.game.inbox.store.InboxSql.STREAM_PK;
 import static com.game.inbox.store.InboxSql.STREAM_TABLE;
@@ -376,6 +377,14 @@ public final class InboxAdminStore {
      * （回 StoreUnavailable 并记 ERROR：那份账本当不了证据，回空 diffs 会被读成「无差异」）。
      */
     public ReconcilePlayerInboxResponse reconcilePlayer(Deadline budget, ReconcilePlayerInboxRequest req) throws SQLException {
+        return reconcilePlayer(budget, req, PLAYER_ITEMS_LIMIT);
+    }
+
+    /** 按主键 (domain, seq) 键集翻页读完该玩家全部条目（只读判定列，不读 payload）；预算耗尽抛错，绝不回半份结论。 */
+    ReconcilePlayerInboxResponse reconcilePlayer(Deadline budget, ReconcilePlayerInboxRequest req, int pageSize) throws SQLException {
+        if (pageSize <= 0) {
+            throw new IllegalArgumentException("pageSize must be positive: " + pageSize);
+        }
         ReconcilePlayerInboxResponse.Builder resp = ReconcilePlayerInboxResponse.newBuilder();
         PlayerInboxDomain domain = req.getDomain();
         if (req.getPlayerId() == 0 || (domain != PlayerInboxDomain.PLAYER_INBOX_DOMAIN_UNSPECIFIED && registry.domain(domain).isEmpty())) {
@@ -392,19 +401,6 @@ public final class InboxAdminStore {
             throw new SQLException("玩家 " + Long.toUnsignedString(playerId) + " 的已落盘收件箱账本结构不合法（" + invalid + "）；对账结论未知");
         }
         int shard = InboxShards.rowShard(playerId);
-        StringBuilder sql = new StringBuilder("SELECT " + ITEM_COLUMNS + " FROM " + ITEM_TABLE + " WHERE `shard` = ? AND `player_id` = ?");
-        List<Object> args = new ArrayList<>(List.of(shard, u64(playerId)));
-        if (domain != PlayerInboxDomain.PLAYER_INBOX_DOMAIN_UNSPECIFIED) {
-            sql.append(" AND `domain` = ?");
-            args.add(u32(domain.getNumber()));
-        }
-        sql.append(" ORDER BY `domain` ASC, `seq` ASC LIMIT ?");
-        args.add(PLAYER_ITEMS_LIMIT + 1);
-        List<player_inbox_item_row> rows = jdbc.read(budget, s -> s.list(sql.toString(), InboxSql::item, args.toArray()));
-        if (rows.size() > PLAYER_ITEMS_LIMIT) {
-            rows = rows.subList(0, PLAYER_ITEMS_LIMIT);
-            log.error("[PlayerInbox] ReconcilePlayer 只读了玩家 {} 的前 {} 行；结论不完整", Long.toUnsignedString(playerId), PLAYER_ITEMS_LIMIT);
-        }
         List<PlayerInboxDomain> domains = domain == PlayerInboxDomain.PLAYER_INBOX_DOMAIN_UNSPECIFIED ? registry.domains() : List.of(domain);
         for (PlayerInboxDomain d : domains) {
             player_inbox_stream stream = jdbc.read(budget, s -> InboxStore.readStream(s, shard, playerId, d.getNumber()));
@@ -415,13 +411,43 @@ public final class InboxAdminStore {
             resp.addCursors(PlayerInboxReconcileCursor.newBuilder().setDomain(d).setLedgerDecidedThrough(decidedThrough)
                     .setInboxNextSeq(stream == null ? 0 : stream.getNextSeq()));
         }
-        for (player_inbox_item_row row : rows) {
-            PlayerInboxReconcileDiffKind kind = LedgerProofs.reconcileDiff(row, InboxLedgerRules.findCursor(read.ledger(), row.getDomain()));
-            if (kind == PlayerInboxReconcileDiffKind.PLAYER_INBOX_RECONCILE_DIFF_UNSPECIFIED) {
-                continue;
+        int afterDomain = 0;
+        long afterSeq = 0;
+        while (true) {
+            AuthorityJdbc.check(budget);
+            final int cursorDomain = afterDomain;
+            final long cursorSeq = afterSeq;
+            List<player_inbox_item_row> page;
+            if (domain != PlayerInboxDomain.PLAYER_INBOX_DOMAIN_UNSPECIFIED) {
+                page = jdbc.read(budget, s -> s.list(
+                        "SELECT " + RECONCILE_ITEM_COLUMNS + " FROM " + ITEM_TABLE
+                                + " WHERE `shard` = ? AND `player_id` = ? AND `domain` = ? AND `seq` > ?"
+                                + " ORDER BY `seq` ASC LIMIT ?",
+                        InboxSql::reconcileItem,
+                        shard, u64(playerId), u32(domain.getNumber()), u64(cursorSeq), pageSize));
+            } else {
+                page = jdbc.read(budget, s -> s.list(
+                        "SELECT " + RECONCILE_ITEM_COLUMNS + " FROM " + ITEM_TABLE
+                                + " WHERE `shard` = ? AND `player_id` = ?"
+                                + " AND (`domain` > ? OR (`domain` = ? AND `seq` > ?))"
+                                + " ORDER BY `domain` ASC, `seq` ASC LIMIT ?",
+                        InboxSql::reconcileItem,
+                        shard, u64(playerId), u32(cursorDomain), u32(cursorDomain), u64(cursorSeq), pageSize));
             }
-            resp.addDiffs(PlayerInboxReconcileDiff.newBuilder().setDomainValue(row.getDomain()).setSeq(row.getSeq()).setKind(kind)
-                    .setStateValue(row.getState()).setRequestId(row.getRequestId()));
+            for (player_inbox_item_row row : page) {
+                PlayerInboxReconcileDiffKind kind = LedgerProofs.reconcileDiff(row, InboxLedgerRules.findCursor(read.ledger(), row.getDomain()));
+                if (kind == PlayerInboxReconcileDiffKind.PLAYER_INBOX_RECONCILE_DIFF_UNSPECIFIED) {
+                    continue;
+                }
+                resp.addDiffs(PlayerInboxReconcileDiff.newBuilder().setDomainValue(row.getDomain()).setSeq(row.getSeq()).setKind(kind)
+                        .setStateValue(row.getState()).setRequestId(row.getRequestId()));
+            }
+            if (page.size() < pageSize) {
+                break;
+            }
+            player_inbox_item_row last = page.getLast();
+            afterDomain = last.getDomain();
+            afterSeq = last.getSeq();
         }
         return resp.build();
     }
