@@ -161,6 +161,7 @@ public final class RankedStore {
                     .setTeamSize(teamSize)
                     .setUseFreePreset(false);
             long minRatingCenti = 0L;
+            long maxRatingCenti = 0L;
             boolean hasMemberRating = false;
             if (roster != null) {
                 for (long pid : roster) {
@@ -172,9 +173,13 @@ public final class RankedStore {
                             ctx.putMemberWinStreaks(pid, row.get().getCurrentWinStreak());
                         }
                     }
-                    if (!hasMemberRating || ratingCenti < minRatingCenti) {
+                    if (!hasMemberRating) {
                         minRatingCenti = ratingCenti;
+                        maxRatingCenti = ratingCenti;
                         hasMemberRating = true;
+                    } else {
+                        if (ratingCenti < minRatingCenti) minRatingCenti = ratingCenti;
+                        if (ratingCenti > maxRatingCenti) maxRatingCenti = ratingCenti;
                     }
                 }
             }
@@ -183,6 +188,10 @@ public final class RankedStore {
                     && minRatingCenti >= Integer.toUnsignedLong(tables.rule().getSkillBanMinRatingCenti())) {
                 ctx.setSkillBanSlotsPerTeam(ruleBanSlots);
             }
+            long spectateMinCenti = Integer.toUnsignedLong(tables.rule().getTierQingfengCenti());
+            if (spectateMinCenti <= 0L) spectateMinCenti = 152_000L;
+            ctx.setPeakRatingCenti(maxRatingCenti)
+                    .setAllowPublicSpectate(hasMemberRating && maxRatingCenti >= spectateMinCenti);
             if (roster != null && roster.size() >= 2) {
                 List<Long> sideA;
                 List<Long> sideB;

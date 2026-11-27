@@ -877,7 +877,7 @@ class RankedBattleEngineTest {
     @Test
     void 论剑V6宿敌战前脱敏雪耻复仇与问道名局配招快照() {
         SeasonSealEffect seal101 = makeSeal(1, 101, 7, "破阵锐印");
-        SeasonSealEffect seal103 = makeSeal(1, 103, 8, "固阵守印");
+        SeasonSealEffect seal103 = makeSeal(1, 103, 1, "固阵守印");
         BattlePetSnapshot petFox = BattlePetSnapshot.newBuilder()
                 .setPetId(9501L).setOwnerPlayerId(6601L).setPetTableId(1).setPetName("灵狐")
                 .setLevel(30).setMaxHealth(2000).setMaxMana(500).setPhysicalAttack(100).setDefense(50)
@@ -966,8 +966,12 @@ class RankedBattleEngineTest {
         assertThat(settleA.getStarterPetTableId()).isEqualTo(2);
         assertThat(settleA.getPlayerDisplayName()).isEqualTo("青云");
         assertThat(settleA.getCoreSkillIdsList()).containsExactlyElementsOf(expectedSkills);
+        assertThat(settleA.getRematchOpponentId()).isEqualTo(6602L);
+        assertThat(settleA.getRematchOpponentName()).isEqualTo("玄烈");
 
         BattleSettlementData settleB = engine.buildSettlement(6602L);
         assertThat(settleB.getRevengedRival()).isFalse();
+        assertThat(settleB.getRematchOpponentId()).isEqualTo(6601L);
+        assertThat(settleB.getRematchOpponentName()).isEqualTo("青云");
     }
 }

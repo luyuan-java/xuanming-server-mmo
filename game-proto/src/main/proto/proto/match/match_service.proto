@@ -318,6 +318,9 @@ message BattleWatchSummary {
   repeated string player_names = 4;
   uint64 created_at_ms = 5;
   bool featured = 6;         // 运营标记的赛事局(列表排在最前,优先升全服广播)
+  // 论剑 V7 正式高段排位实时围观元数据（非正式排位为 0）。
+  uint32 ranked_team_size = 7;
+  int64 ranked_peak_rating_centi = 8;
 }
 
 // 内部记录(由 SQL 成局组出,含路由所需的 battle 节点 id,不下发客户端)

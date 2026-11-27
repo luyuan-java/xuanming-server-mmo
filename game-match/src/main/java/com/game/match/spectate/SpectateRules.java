@@ -116,6 +116,8 @@ public final class SpectateRules {
                 .setBattleConfigId(placement.getBattleConfigId())
                 .addAllPlayerNames(placement.getPlayerNamesList())
                 .setCreatedAtMs(placement.getCreatedAtMs())
+                .setRankedTeamSize(placement.getRankedTeamSize())
+                .setRankedPeakRatingCenti(placement.getRankedPeakRatingCenti())
                 .build();
     }
 

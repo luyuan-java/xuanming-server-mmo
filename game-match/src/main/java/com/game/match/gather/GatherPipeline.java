@@ -416,13 +416,18 @@ public final class GatherPipeline {
                         .ifPresent(create::setTrialContext);
             }
             // 观战可见性与战报录制标记在建房时决定一次、随建房原件冻结；落点记录抄同一份可见性
-            create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext()));
+            create.setSpectateVisibility(SpectateVisibilityPolicy.decide(mode, plan.activityContext(),
+                    create.hasCustomDuelRules() ? create.getCustomDuelRules() : null, rankedContext));
             create.setRecordReplay(com.game.match.report.BattleReplayPolicy.decide(mode));
             if (scriptResolver != null && (rankedContext == null || !rankedContext.getUseFreePreset())) {
                 create.addAllTeamScripts(scriptResolver.resolveForBattle(battleId, mode.getNumber(), plan.battleConfigId(), create.getPlayersList()));
             }
             CreateBattleRequest createRequest = create.build();
             record.setSpectateVisibility(createRequest.getSpectateVisibilityValue());
+            if (rankedContext != null && !rankedContext.getUseFreePreset() && rankedContext.getSeasonId() != 0) {
+                record.setRankedTeamSize(rankedContext.getTeamSize())
+                        .setRankedPeakRatingCenti(rankedContext.getPeakRatingCenti());
+            }
 
             // 4.1 先写落点记录，再建房
             BattlePlacement placement = pointAt(record, node, 1);

@@ -8,6 +8,8 @@ import static com.game.table.SkillErrorTip.skill_error.*;
 import com.game.player.store.state.ClientRequestRecordState;
 import com.game.player.store.state.CraftedSkillBookEntryState;
 import com.game.player.store.state.PlayerCraftState;
+import com.game.proto.AckCraftProxyDigestResponse;
+import com.game.proto.CraftProxyDigestSummary;
 import com.game.proto.CraftProxyStallInfo;
 import com.game.proto.CraftSkillBookRequest;
 import com.game.proto.CraftSkillBookResponse;
@@ -74,6 +76,12 @@ public final class SkillCraftService {
     }
 
     public record StallOutcome(SetCraftProxyStallResponse response, boolean mutated) {
+    }
+
+    public record GetStateOutcome(GetSkillCraftingStateResponse response, boolean mutated) {
+    }
+
+    public record AckOutcome(AckCraftProxyDigestResponse response, boolean mutated) {
     }
 
     private final SkillCraftTables tables;
@@ -224,19 +232,80 @@ public final class SkillCraftService {
                 .setProxyStallOpen(craft.getProxyStallOpen())
                 .setProxyForgeFeeGold(craft.getProxyForgeFeeGold())
                 .setProxyScrollFeeGold(craft.getProxyScrollFeeGold())
-                .setCraftUnlockGateEnabled(craftUnlockGateEnabled);
+                .setCraftUnlockGateEnabled(craftUnlockGateEnabled)
+                .setProxyOrdersCompleted(craft.getProxyOrdersCompleted())
+                .setSupremeForgedCount(craft.getSupremeForgedCount())
+                .setRareBooksCraftedCount(craft.getRareBooksCraftedCount())
+                .setMasterShowcaseTag(craft.getMasterShowcaseTag())
+                .setEquippedCraftTitleId(craft.getEquippedCraftTitleId())
+                .addAllUnlockedCraftTitleIds(EquipCraftQualityRules.unlockedCraftTitleIds(
+                        forgeExp, scrollExp, craft.getSupremeForgedCount(),
+                        craft.getRareBooksCraftedCount(), craft.getProxyOrdersCompleted()));
+        if (craft.getUnreadProxyDigestOrders() != 0) {
+            out.setUnreadProxyDigest(CraftProxyDigestSummary.newBuilder()
+                    .setOrdersCompleted(craft.getUnreadProxyDigestOrders())
+                    .setSupremeForgedCount(craft.getUnreadProxyDigestSupreme())
+                    .setRareBooksCraftedCount(craft.getUnreadProxyDigestRare())
+                    .setNetGoldEarned(craft.getUnreadProxyDigestNetGold())
+                    .setLastBuyerName(craft.getUnreadProxyDigestLastBuyer())
+                    .setNewlyUnlockedTitleMask(craft.getUnreadProxyDigestNewTitlesMask())
+                    .build());
+        }
         return out.build();
     }
 
-    /** 459 查询分卷宗制书快照、未学技能书架、手艺熟练度与代打摊位配置。 */
-    public GetSkillCraftingStateResponse getState(ScenePlayer player) {
+    /** 459 查询分卷宗制书快照、未学技能书架、手艺熟练度与代打摊位配置（同时回账离线/跨线待结算口碑）。 */
+    public GetStateOutcome getStateWithDrain(ScenePlayer player) {
         if (!player.clientRequestLedger().isValid()) {
-            return GetSkillCraftingStateResponse.newBuilder().setErrorMessage(tip(kServiceUnavailable_VALUE)).build();
+            return new GetStateOutcome(GetSkillCraftingStateResponse.newBuilder()
+                    .setErrorMessage(tip(kServiceUnavailable_VALUE)).build(), false);
         }
-        return GetSkillCraftingStateResponse.newBuilder()
+        boolean drained = proxyDirectory != null && proxyDirectory.drainPendingReputation(player);
+        return new GetStateOutcome(GetSkillCraftingStateResponse.newBuilder()
                 .setErrorMessage(tip(OK))
                 .setState(buildStateSnapshot(player))
-                .build();
+                .build(), drained);
+    }
+
+    public GetSkillCraftingStateResponse getState(ScenePlayer player) {
+        return getStateWithDrain(player).response();
+    }
+
+    /** 573 宗师确认查阅离线/跨线代打营业战报（幂等清空 unread_proxy_digest_*，不重复扣费）。 */
+    public AckOutcome ackProxyDigest(ScenePlayer player) {
+        if (!player.clientRequestLedger().isValid()) {
+            return new AckOutcome(AckCraftProxyDigestResponse.newBuilder()
+                    .setErrorMessage(tip(kServiceUnavailable_VALUE)).build(), false);
+        }
+        int busy = checkWritable(player);
+        if (busy != OK) {
+            return new AckOutcome(AckCraftProxyDigestResponse.newBuilder()
+                    .setErrorMessage(tip(busy))
+                    .setState(buildStateSnapshot(player))
+                    .build(), false);
+        }
+        boolean drained = proxyDirectory != null && proxyDirectory.drainPendingReputation(player);
+        PlayerCraftState craft = player.craft().state();
+        boolean hasUnread = craft.getUnreadProxyDigestOrders() != 0
+                || craft.getUnreadProxyDigestSupreme() != 0
+                || craft.getUnreadProxyDigestRare() != 0
+                || craft.getUnreadProxyDigestNetGold() != 0L
+                || !craft.getUnreadProxyDigestLastBuyer().isEmpty()
+                || craft.getUnreadProxyDigestNewTitlesMask() != 0;
+        if (hasUnread) {
+            player.craft().replace(craft.toBuilder()
+                    .setUnreadProxyDigestOrders(0)
+                    .setUnreadProxyDigestSupreme(0)
+                    .setUnreadProxyDigestRare(0)
+                    .setUnreadProxyDigestNetGold(0L)
+                    .clearUnreadProxyDigestLastBuyer()
+                    .setUnreadProxyDigestNewTitlesMask(0)
+                    .build());
+        }
+        return new AckOutcome(AckCraftProxyDigestResponse.newBuilder()
+                .setErrorMessage(tip(OK))
+                .setState(buildStateSnapshot(player))
+                .build(), drained || hasUnread);
     }
 
     /** 460 拓印/定向制书（含巧匠/宗师额外返 2 张绑定残页、主城宗师原子代制与 client_request_id 幂等）。 */
@@ -435,6 +504,17 @@ public final class SkillCraftService {
             mailOutbox.enqueueProxyFee(player, proxyMasterId, proxyNetGold, reqId,
                     EquipmentCraftService.playerDisplayName(player));
         }
+        ScenePlayer creditedProxyMaster = null;
+        if (proxyMasterId != 0L && proxyDirectory != null) {
+            ScenePlayer onlineMaster = world == null ? null : world.playerById(proxyMasterId);
+            creditedProxyMaster = proxyDirectory.recordOrderReputation(
+                    proxyMasterId,
+                    0,
+                    mode == CraftSkillBookRequest.CraftMode.TARGETED_RARE ? 1 : 0,
+                    proxyNetGold,
+                    EquipmentCraftService.playerDisplayName(player),
+                    onlineMaster);
+        }
 
         PlayerCraftState.Builder nextCraft = craft.toBuilder()
                 .addSkillBooks(builtBook)
@@ -462,7 +542,7 @@ public final class SkillCraftService {
                 .setCraftedBook(toProtoBook(builtBook))
                 .setBonusFragmentsGranted(bonusFragments)
                 .setState(buildStateSnapshot(player))
-                .build(), true, null);
+                .build(), true, creditedProxyMaster);
     }
 
     /** 461 研习未学技能书：永久解锁技能并给人物或宝宝直接获得 1 重，绝不顶掉任何已有技能。 */
@@ -656,7 +736,7 @@ public final class SkillCraftService {
                 .build(), true);
     }
 
-    /** 463 宗师开启/关闭主城原子代打摊位（铸器/制卷至少一项满宗师 >=60 熟练度，手工费 50..100 银两）。 */
+    /** 463 宗师开启/关闭主城原子代打摊位（铸器/制卷至少一项满宗师 >=60 熟练度，手工费 50..100 银两；支持招牌与已解锁雅号）。 */
     public StallOutcome setProxyStall(ScenePlayer player, SetCraftProxyStallRequest request) {
         if (!player.clientRequestLedger().isValid()) {
             return new StallOutcome(SetCraftProxyStallResponse.newBuilder()
@@ -666,9 +746,27 @@ public final class SkillCraftService {
         if (busy != OK) {
             return failStall(player, busy);
         }
+        if (proxyDirectory != null) {
+            proxyDirectory.drainPendingReputation(player);
+        }
         PlayerCraftState craft = player.craft().state();
+        int showcaseTag = request.getMasterShowcaseTag();
+        if (Integer.compareUnsigned(showcaseTag, EquipCraftQualityRules.MAX_MASTER_SHOWCASE_TAG) > 0) {
+            return failStall(player, kInvalidParameter_VALUE);
+        }
+        int craftTitleId = request.getEquippedCraftTitleId();
+        if (craftTitleId != 0 && !EquipCraftQualityRules.isCraftTitleUnlocked(
+                craftTitleId, craft.getForgeMasteryExp(), craft.getScrollMasteryExp(),
+                craft.getSupremeForgedCount(), craft.getRareBooksCraftedCount(),
+                craft.getProxyOrdersCompleted())) {
+            return failStall(player, kInvalidParameter_VALUE);
+        }
         if (!request.getOpen()) {
-            player.craft().replace(craft.toBuilder().setProxyStallOpen(false).build());
+            player.craft().replace(craft.toBuilder()
+                    .setProxyStallOpen(false)
+                    .setMasterShowcaseTag(showcaseTag)
+                    .setEquippedCraftTitleId(craftTitleId)
+                    .build());
             if (proxyDirectory != null) {
                 proxyDirectory.syncPlayer(player);
             }
@@ -702,6 +800,8 @@ public final class SkillCraftService {
                 .setProxyStallOpen(true)
                 .setProxyForgeFeeGold(forgeMaster ? request.getProxyForgeFeeGold() : 0L)
                 .setProxyScrollFeeGold(scrollMaster ? request.getProxyScrollFeeGold() : 0L)
+                .setMasterShowcaseTag(showcaseTag)
+                .setEquippedCraftTitleId(craftTitleId)
                 .build());
         if (proxyDirectory != null) {
             proxyDirectory.syncPlayer(player);

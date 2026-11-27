@@ -152,12 +152,15 @@ public final class ChallengeService {
         }
         long challengeId = issued.getAsLong();
         int configId = request.getBattleConfigId();
+        long effectiveTtlMs = (request.hasCustomRules() && request.getCustomRules().getRematchSourceBattleId() != 0L)
+                ? Math.min(challengeTtlMs, 15_000L)
+                : challengeTtlMs;
 
         InviteResult invited;
         try {
-            if(global==null)invited = store.invite(challengeId, challengerId, targetId, configId, challengeTtlMs, d);
+            if(global==null)invited = store.invite(challengeId, challengerId, targetId, configId, effectiveTtlMs, d);
             else {
-                var original=global.store().invite(session,challengeId,targetId,configId,challengeTtlMs);
+                var original=global.store().invite(session,challengeId,targetId,configId,effectiveTtlMs);
                 if(original==null)invited=new InviteResult.Pending();
                 else {challengeId=original.getChallengeId();invited=new InviteResult.Created(original.getExpiresMs());}
             }
@@ -171,13 +174,16 @@ public final class ChallengeService {
             return inviteRejected(ChallengeResult.PENDING, MatchTip.CHALLENGE_PENDING);
         }
 
-        ChallengeInviteS2C invite = ChallengeInviteS2C.newBuilder()
+        ChallengeInviteS2C.Builder inviteBuilder = ChallengeInviteS2C.newBuilder()
                 .setChallengeId(challengeId)
                 .setChallengerId(challengerId)
                 .setChallengerName(publicName(challengerId,d))
                 .setBattleConfigId(configId)
-                .setExpiresAtMs(created.expiresAtMs())
-                .build();
+                .setExpiresAtMs(created.expiresAtMs());
+        if (request.hasCustomRules()) {
+            inviteBuilder.setCustomRules(request.getCustomRules());
+        }
+        ChallengeInviteS2C invite = inviteBuilder.build();
         PlayerPushes.Outcome pushed;
         try {
             pushed = d.await(push(PushKind.INVITE, targetId, inviteMessageId, invite, challengeId), "推切磋邀请");

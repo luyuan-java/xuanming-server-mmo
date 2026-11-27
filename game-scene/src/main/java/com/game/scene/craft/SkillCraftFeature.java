@@ -1,6 +1,7 @@
 package com.game.scene.craft;
 
 import com.game.contract.MessageIdRegistry;
+import com.game.proto.AckCraftProxyDigestRequest;
 import com.game.proto.AttributePanelChangedS2C;
 import com.game.proto.CraftSkillBookRequest;
 import com.game.proto.DismantleSkillBookRequest;
@@ -41,8 +42,13 @@ public final class SkillCraftFeature implements SceneFeature {
     @Override
     public void register(Registrar r) {
         r.on(SERVICE, "GetSkillCraftingState", GetSkillCraftingStateRequest.class,
-                FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
-                (call, request) -> call.reply(service.getState(call.player())));
+                FreezePolicy.READ_ONLY, BattlePolicy.ALLOW, (call, request) -> {
+                    var outcome = service.getStateWithDrain(call.player());
+                    if (outcome.mutated()) {
+                        call.world().requestKeyProgressSave(call.player());
+                    }
+                    call.reply(outcome.response());
+                });
         r.on(SERVICE, "CraftSkillBook", CraftSkillBookRequest.class,
                 FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
                     var outcome = service.craftSkillBook(call.player(), request, call.world());
@@ -89,5 +95,13 @@ public final class SkillCraftFeature implements SceneFeature {
         r.on(SERVICE, "ListCraftProxyStalls", ListCraftProxyStallsRequest.class,
                 FreezePolicy.READ_ONLY, BattlePolicy.ALLOW,
                 (call, request) -> call.reply(service.listProxyStalls(call.world())));
+        r.on(SERVICE, "AckCraftProxyDigest", AckCraftProxyDigestRequest.class,
+                FreezePolicy.GATED, BattlePolicy.GATED, (call, request) -> {
+                    var outcome = service.ackProxyDigest(call.player());
+                    if (outcome.mutated()) {
+                        call.world().requestKeyProgressSave(call.player());
+                    }
+                    call.reply(outcome.response());
+                });
     }
 }

@@ -71,6 +71,15 @@ public final class EquipCraftQualityRules {
     /** 永久技能稀世占比硬红线 <= 10%。 */
     public static final int MAX_RARE_SKILL_RATIO_BPS = 1000;
 
+    // ── V2 名匠口碑、6 档零属性雅号与西市 24h 极品热榜 Top 3 ──
+    public static final int MAX_MASTER_SHOWCASE_TAG = 4;
+    public static final int CRAFT_TITLE_MAX_ID = 6;
+    public static final int CRAFT_TITLE_BAILIAN_SUPREME_REQ = 5;
+    public static final int CRAFT_TITLE_TIANGONG_SUPREME_REQ = 20;
+    public static final int CRAFT_TITLE_WANJUAN_RARE_BOOKS_REQ = 3;
+    public static final int CRAFT_TITLE_WANJUAN_ORDERS_REQ = 15;
+    public static final int HOT_RANK_TOP_LIMIT = 3;
+
     public record PolishResult(int newTier, int newPityCount, boolean guaranteedByPity) {
     }
 
@@ -199,6 +208,67 @@ public final class EquipCraftQualityRules {
     public static long proxyNetGold(long grossFee) {
         long tax = proxyTaxGold(grossFee);
         return Long.compareUnsigned(grossFee, tax) > 0 ? grossFee - tax : 0L;
+    }
+
+    public static String craftTitleName(int titleId) {
+        return switch (titleId) {
+            case 1 -> "铸器宗师";
+            case 2 -> "百炼宗师";
+            case 3 -> "天工神匠";
+            case 4 -> "制卷宗师";
+            case 5 -> "万卷书圣";
+            case 6 -> "双绝天工";
+            default -> "";
+        };
+    }
+
+    public static boolean isCraftTitleUnlocked(int titleId, int forgeExp, int scrollExp,
+                                               int supremeForgedCount, int rareBooksCraftedCount,
+                                               int proxyOrdersCompleted) {
+        boolean forgeMaster = masteryTierForExp(forgeExp) >= MASTERY_MASTER;
+        boolean scrollMaster = masteryTierForExp(scrollExp) >= MASTERY_MASTER;
+        return switch (titleId) {
+            case 1 -> forgeMaster;
+            case 2 -> forgeMaster && Integer.compareUnsigned(supremeForgedCount, CRAFT_TITLE_BAILIAN_SUPREME_REQ) >= 0;
+            case 3 -> forgeMaster && Integer.compareUnsigned(supremeForgedCount, CRAFT_TITLE_TIANGONG_SUPREME_REQ) >= 0;
+            case 4 -> scrollMaster;
+            case 5 -> scrollMaster && (Integer.compareUnsigned(rareBooksCraftedCount, CRAFT_TITLE_WANJUAN_RARE_BOOKS_REQ) >= 0
+                    || Integer.compareUnsigned(proxyOrdersCompleted, CRAFT_TITLE_WANJUAN_ORDERS_REQ) >= 0);
+            case 6 -> forgeMaster && scrollMaster;
+            default -> false;
+        };
+    }
+
+    public static java.util.List<Integer> unlockedCraftTitleIds(int forgeExp, int scrollExp,
+                                                                int supremeForgedCount, int rareBooksCraftedCount,
+                                                                int proxyOrdersCompleted) {
+        java.util.List<Integer> out = new java.util.ArrayList<>();
+        for (int id = 1; id <= CRAFT_TITLE_MAX_ID; id++) {
+            if (isCraftTitleUnlocked(id, forgeExp, scrollExp, supremeForgedCount, rareBooksCraftedCount, proxyOrdersCompleted)) {
+                out.add(id);
+            }
+        }
+        return out;
+    }
+
+    public static int unlockedCraftTitleMask(int forgeExp, int scrollExp,
+                                             int supremeForgedCount, int rareBooksCraftedCount,
+                                             int proxyOrdersCompleted) {
+        int mask = 0;
+        for (int id = 1; id <= CRAFT_TITLE_MAX_ID; id++) {
+            if (isCraftTitleUnlocked(id, forgeExp, scrollExp, supremeForgedCount, rareBooksCraftedCount, proxyOrdersCompleted)) {
+                mask |= (1 << (id - 1));
+            }
+        }
+        return mask;
+    }
+
+    public static int newlyUnlockedCraftTitleMask(int beforeMask, int afterMask) {
+        return afterMask & ~beforeMask;
+    }
+
+    public static long hotRankScore(int recent24hOrders, int recent24hSupreme) {
+        return Integer.toUnsignedLong(recent24hSupreme) * 3L + Integer.toUnsignedLong(recent24hOrders);
     }
 
     private static int clampTier(int tier) {

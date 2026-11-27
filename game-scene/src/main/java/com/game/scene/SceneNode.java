@@ -506,6 +506,7 @@ public class SceneNode implements SmartLifecycle {
         BagFeature bagFeature = new BagFeature(bags);
         EquipmentService equipment = new EquipmentService(equipmentRules, bags, currency, attributes, metrics);
         String proxyStallKey = redisKeys.craftProxyStalls(zoneId);
+        String proxyReputationKey = redisKeys.craftProxyReputation(zoneId);
         com.game.scene.craft.CraftProxyStallDirectory craftProxyDirectory = new com.game.scene.craft.CraftProxyStallDirectory(
                 new com.game.scene.craft.CraftProxyStallDirectory.BackingStore() {
                     @Override
@@ -526,6 +527,34 @@ public class SceneNode implements SmartLifecycle {
                                 .fastRemoveAsync(field).thenAccept(ignored -> { })
                                 .exceptionally(err -> {
                                     log.warn("craft_proxy_stall_del_failed zone={} master_id={}", zoneId,
+                                            Long.toUnsignedString(masterPlayerId), err);
+                                    return null;
+                                });
+                    }
+                    @Override
+                    public java.util.concurrent.CompletionStage<Void> incrReputationAsync(long masterPlayerId,
+                                                                                         String fieldSuffix, long delta) {
+                        String field = Long.toUnsignedString(masterPlayerId) + ":" + fieldSuffix;
+                        return redis.getScript(StringCodec.INSTANCE)
+                                .evalAsync(org.redisson.api.RScript.Mode.READ_WRITE,
+                                        "return redis.call('HINCRBY', KEYS[1], ARGV[1], tonumber(ARGV[2]))",
+                                        org.redisson.api.RScript.ReturnType.INTEGER,
+                                        java.util.List.of(proxyReputationKey), field, Long.toString(delta))
+                                .thenAccept(ignored -> { })
+                                .exceptionally(err -> {
+                                    log.warn("craft_proxy_reputation_incr_failed zone={} field={} delta={}",
+                                            zoneId, field, delta, err);
+                                    return null;
+                                });
+                    }
+                    @Override
+                    public java.util.concurrent.CompletionStage<Void> setLastBuyerAsync(long masterPlayerId,
+                                                                                        String buyerName) {
+                        String field = Long.toUnsignedString(masterPlayerId) + ":b";
+                        return redis.<String, String>getMap(proxyReputationKey, StringCodec.INSTANCE)
+                                .fastPutAsync(field, buyerName).thenAccept(ignored -> { })
+                                .exceptionally(err -> {
+                                    log.warn("craft_proxy_reputation_buyer_failed zone={} master_id={}", zoneId,
                                             Long.toUnsignedString(masterPlayerId), err);
                                     return null;
                                 });
@@ -731,6 +760,9 @@ public class SceneNode implements SmartLifecycle {
             } else if (grant == PetService.StarterGrantResult.MARKED_EXISTING) {
                 sceneWorld.requestSave(player);
             }
+            if (craftProxyDirectory.drainPendingReputation(player)) {
+                sceneWorld.requestKeyProgressSave(player);
+            }
         });
         battle.withInboxFailureHandler((player,failure)->sceneWorld.discardUnpersistedBattleEffect(player,player.ownerEpoch(),failure));
         repository.onFinalApplied(sceneWorld::onFinalApplied);
@@ -930,7 +962,16 @@ public class SceneNode implements SmartLifecycle {
                         snapshot.put(new String(entry.getKey(), java.nio.charset.StandardCharsets.UTF_8), entry.getValue());
                     }
                 }
-                postToLogic(() -> craftProxyDirectory.applyRemoteSnapshot(snapshot));
+                java.util.Map<String, String> repSnapshot = redis.<String, String>getMap(proxyReputationKey, StringCodec.INSTANCE).readAllMap();
+                postToLogic(() -> {
+                    craftProxyDirectory.applyRemoteSnapshot(snapshot);
+                    craftProxyDirectory.applyRemoteReputationSnapshot(repSnapshot);
+                    for (var online : sceneWorld.playersSnapshot()) {
+                        if (craftProxyDirectory.drainPendingReputation(online)) {
+                            sceneWorld.requestKeyProgressSave(online);
+                        }
+                    }
+                });
             } catch (Exception e) {
                 log.warn("craft_proxy_stall_poll_failed zone={}", zoneId, e);
             }

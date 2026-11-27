@@ -746,7 +746,9 @@ public final class GlobalMatchService implements AutoCloseable {
             // 观战可见性与战报录制标记建房时决定一次，随 formation 持久的 create_request 冻结
             var mode = MatchMode.forNumber(f.getMode());
             request.setSpectateVisibility(com.game.match.spectate.SpectateVisibilityPolicy.decide(mode,
-                    request.hasActivityContext()?request.getActivityContext():null));
+                    request.hasActivityContext() ? request.getActivityContext() : null,
+                    request.hasCustomDuelRules() ? request.getCustomDuelRules() : null,
+                    rankedContext));
             request.setRecordReplay(com.game.match.report.BattleReplayPolicy.decide(mode));
             if(scriptResolver!=null && (rankedContext == null || !rankedContext.getUseFreePreset())) {
                 request.addAllTeamScripts(scriptResolver.resolveForBattle(f.getBattleId(),f.getMode(),f.getConfigId(),snapshots));

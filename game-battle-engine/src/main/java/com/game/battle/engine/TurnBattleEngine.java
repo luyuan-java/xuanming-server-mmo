@@ -3160,6 +3160,27 @@ public final class TurnBattleEngine {
                     break;
                 }
             }
+            // 论剑 V7：正式 1V1 排位正常终局透传对阵对手身份，供结算页 15 秒切磋「不服再战」（零排位分）。
+            if (outcome != eBattleOutcome.BATTLE_OUTCOME_ONGOING && completedRounds() > 0) {
+                int allyHumans = 0;
+                int enemyHumans = 0;
+                BattleUnit soleEnemy = null;
+                for (BattleUnit other : ctx.units()) {
+                    if (!other.isPlayer()) {
+                        continue;
+                    }
+                    if (other.teamIndex() == actor.teamIndex()) {
+                        allyHumans++;
+                    } else {
+                        enemyHumans++;
+                        soleEnemy = other;
+                    }
+                }
+                if (allyHumans == 1 && enemyHumans == 1 && soleEnemy != null && soleEnemy.actorId() != 0L) {
+                    settlement.setRematchOpponentId(soleEnemy.actorId())
+                            .setRematchOpponentName(soleEnemy.state().getName());
+                }
+            }
         }
 
         for (BattleUnit other : ctx.units()) {

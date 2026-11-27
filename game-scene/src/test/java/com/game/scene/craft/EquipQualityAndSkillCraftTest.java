@@ -1032,4 +1032,215 @@ class EquipQualityAndSkillCraftTest {
         f.attributes.equipmentChanged(player);
         assertThat(player.attributes().equipment().effects().getPhysicalAttackBps()).isEqualTo(800);
     }
+
+    @Test
+    void playerCraft恢复修改存盘保留未知字段往返() {
+        var unknown = com.google.protobuf.UnknownFieldSet.newBuilder()
+                .addField(9999, com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(123456L).build())
+                .build();
+        PlayerCraftState original = PlayerCraftState.newBuilder()
+                .setForgeMasteryExp(60)
+                .setUnreadProxyDigestOrders(2)
+                .setUnknownFields(unknown)
+                .build();
+        var craft = com.game.scene.player.PlayerCraft.restore(original);
+        craft.replace(craft.state().toBuilder()
+                .setUnreadProxyDigestOrders(0)
+                .setProxyOrdersCompleted(2)
+                .build());
+        PlayerCraftState saved = craft.toState();
+        assertThat(saved.getProxyOrdersCompleted()).isEqualTo(2);
+        assertThat(saved.getUnreadProxyDigestOrders()).isZero();
+        assertThat(saved.getUnknownFields().getField(9999).getVarintList()).containsExactly(123456L);
+    }
+
+    @Test
+    void 离线名匠口碑_百炼宗师雅号解锁_未读战报幂等确认与西市极品热榜Top3() throws Exception {
+        BattleFixture f = new BattleFixture();
+        ScenePlayer master1 = f.enter(11, 4101L);
+        ScenePlayer master2 = f.enter(12, 4102L);
+        ScenePlayer master3 = f.enter(13, 4103L);
+        ScenePlayer master4 = f.enter(14, 4104L);
+        ScenePlayer buyer = f.enter(15, 4201L);
+        assertThat(f.attributes.gmSetLevel(buyer, 60)).isZero();
+        assertThat(f.currency.add(buyer, Wallet.GOLD, 50_000L, Reason.GM_GRANT).ok()).isTrue();
+
+        // master1 已有 4 件极品（再出 1 件极品解锁 2 号雅号“百炼宗师”）
+        master1.craft().replace(PlayerCraftState.newBuilder()
+                .setForgeMasteryExp(EquipCraftQualityRules.MASTER_EXP_THRESHOLD)
+                .setScrollMasteryExp(EquipCraftQualityRules.MASTER_EXP_THRESHOLD)
+                .setSupremeForgedCount(4)
+                .build());
+        for (ScenePlayer m : List.of(master2, master3, master4)) {
+            m.craft().replace(PlayerCraftState.newBuilder()
+                    .setForgeMasteryExp(EquipCraftQualityRules.MASTER_EXP_THRESHOLD)
+                    .setScrollMasteryExp(EquipCraftQualityRules.MASTER_EXP_THRESHOLD)
+                    .build());
+        }
+        for (ScenePlayer m : List.of(master1, master2, master3, master4)) {
+            SetCraftProxyStallResponse opened = call(f, m, SKILL_SERVICE, "SetCraftProxyStall",
+                    SetCraftProxyStallRequest.newBuilder()
+                            .setOpen(true).setProxyForgeFeeGold(100L).setProxyScrollFeeGold(80L).build(),
+                    SetCraftProxyStallResponse.parser());
+            assertThat(opened.getErrorMessage().getId()).isZero();
+        }
+        f.completeSaves(com.game.scene.world.PlayerRepository.ProgressResult.SAVED);
+
+        // master1 下线离场（模拟离线/跨线状态）
+        f.world.onPlayerLeave(BattleFixture.LINK, com.game.api.proto.PlayerLeave.newBuilder()
+                .setSessionId(11).setPlayerId(master1.playerId()).build());
+        f.repo.completeAll();
+        assertThat(f.world.playerById(4101L)).isNull();
+
+        // 准备买家装备与稀世书材料
+        GetEquipmentCraftRulesResponse rules = call(f, buyer, BAG_SERVICE, "GetEquipmentCraftRules",
+                GetEquipmentCraftRulesRequest.getDefaultInstance(), GetEquipmentCraftRulesResponse.parser());
+        var recipe = rules.getRecipesList().stream().filter(r -> r.getProduct().getEquipProfile() == 1).findFirst().orElseThrow();
+        var affix = rules.getAffixesList().stream().filter(a -> a.getPool() == 1 && !a.getPolishExempt()).findFirst().orElseThrow();
+        SkillScrollCraftTable rareScroll = f.skillCraftTables.enabledScrolls().stream()
+                .filter(s -> s.getRarityTier() == 1).findFirst().orElseThrow();
+        int rareSkillId = f.skillCraftTables.scrollSkillIds(rareScroll.getId()).getFirst();
+
+        Map<Integer, Long> mats = new java.util.LinkedHashMap<>();
+        mats.merge(recipe.getMaterialConfigId(), 200L, Long::sum);
+        mats.merge(affix.getMaterialConfigId(), 200L, Long::sum);
+        mats.merge(rareScroll.getRareScrollItemId(), 10L, Long::sum);
+        mats.merge(rareScroll.getRareInkItemId(), 10L, Long::sum);
+        assertThat(f.bags.addItems(buyer, BagType.INVENTORY, mats, false, Reason.GM_GRANT, 0, "").tip()).isZero();
+
+        // 造 3 件白板装分别找 master1(离线极品)、master2(在线极品)、master3(在线凡品) 代打
+        long[] equipIds = new long[3];
+        long forgeRev = 0L;
+        for (int i = 0; i < 3; i++) {
+            CommitEquipmentCraftResponse base = call(f, buyer, BAG_SERVICE, "CommitEquipmentCraft",
+                    CommitEquipmentCraftRequest.newBuilder()
+                            .setClientRequestId(8001L + i)
+                            .setRulesFingerprint(rules.getRulesFingerprint())
+                            .setExpectedForgeRevision(forgeRev++)
+                            .setChoice(EquipmentCraftChoice.newBuilder()
+                                    .setOperation(EquipmentCraftChoice.Operation.CREATE_ITEM)
+                                    .setConfigId(recipe.getProduct().getConfigId()))
+                            .build(), CommitEquipmentCraftResponse.parser());
+            assertThat(base.getErrorMessage().getId()).isZero();
+            equipIds[i] = base.getItemId();
+        }
+
+        // 1) master1 离线极品单（95 净银两，score += 4）
+        f.craft.setQualityRollForTest(bound -> 9999);
+        CommitEquipmentCraftResponse r1 = call(f, buyer, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(8011L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(forgeRev++)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.INSTALL_AFFIX)
+                                .setItemId(equipIds[0]).setAffixSlot(1).setAffixId(affix.getAffixId())
+                                .setProxyMasterPlayerId(4101L))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(r1.getErrorMessage().getId()).isZero();
+        assertThat(r1.getResultQualityTier()).isEqualTo(5);
+
+        // 2) master1 离线稀世制书单（76 净银两，score += 1 -> 总 score=5）
+        CraftSkillBookResponse rRare = call(f, buyer, SKILL_SERVICE, "CraftSkillBook",
+                CraftSkillBookRequest.newBuilder()
+                        .setMode(CraftSkillBookRequest.CraftMode.TARGETED_RARE)
+                        .setScrollId(rareScroll.getId())
+                        .setTargetSkillTableId(rareSkillId)
+                        .setExpectedRevision(0L)
+                        .setClientRequestId(8012L)
+                        .setProxyMasterPlayerId(4101L)
+                        .build(), CraftSkillBookResponse.parser());
+        assertThat(rRare.getErrorMessage().getId()).isZero();
+
+        // 3) master2 在线极品单（score = 4）
+        f.craft.setQualityRollForTest(bound -> 9999);
+        CommitEquipmentCraftResponse r2 = call(f, buyer, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(8013L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(forgeRev++)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.INSTALL_AFFIX)
+                                .setItemId(equipIds[1]).setAffixSlot(1).setAffixId(affix.getAffixId())
+                                .setProxyMasterPlayerId(4102L))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(r2.getErrorMessage().getId()).isZero();
+
+        // 4) master3 在线凡品单（score = 1）；master4 无单（score = 0）
+        f.craft.setQualityRollForTest(bound -> 0);
+        CommitEquipmentCraftResponse r3 = call(f, buyer, BAG_SERVICE, "CommitEquipmentCraft",
+                CommitEquipmentCraftRequest.newBuilder()
+                        .setClientRequestId(8014L)
+                        .setRulesFingerprint(rules.getRulesFingerprint())
+                        .setExpectedForgeRevision(forgeRev++)
+                        .setChoice(EquipmentCraftChoice.newBuilder()
+                                .setOperation(EquipmentCraftChoice.Operation.INSTALL_AFFIX)
+                                .setItemId(equipIds[2]).setAffixSlot(1).setAffixId(affix.getAffixId())
+                                .setProxyMasterPlayerId(4103L))
+                        .build(), CommitEquipmentCraftResponse.parser());
+        assertThat(r3.getErrorMessage().getId()).isZero();
+
+        // 查询西市名匠摊位：离线 master1 实时叠加待回账口碑与 Top 1 热榜，master2=Top 2，master3=Top 3，master4=0
+        ListCraftProxyStallsResponse stalls = call(f, buyer, SKILL_SERVICE, "ListCraftProxyStalls",
+                ListCraftProxyStallsRequest.getDefaultInstance(), ListCraftProxyStallsResponse.parser());
+        assertThat(stalls.getStallsList()).hasSize(4);
+        var byId = new java.util.HashMap<Long, com.game.proto.CraftProxyStallInfo>();
+        for (var s : stalls.getStallsList()) byId.put(s.getMasterPlayerId(), s);
+        assertThat(byId.get(4101L).getProxyOrdersCompleted()).isEqualTo(2);
+        assertThat(byId.get(4101L).getSupremeForgedCount()).isEqualTo(5);
+        assertThat(byId.get(4101L).getRareBooksCraftedCount()).isEqualTo(1);
+        assertThat(byId.get(4101L).getRecent24HOrders()).isEqualTo(2);
+        assertThat(byId.get(4101L).getRecent24HSupreme()).isEqualTo(1);
+        assertThat(byId.get(4101L).getHotRank()).isEqualTo(1);
+        assertThat(byId.get(4102L).getHotRank()).isEqualTo(2);
+        assertThat(byId.get(4103L).getHotRank()).isEqualTo(3);
+        assertThat(byId.get(4104L).getHotRank()).isZero();
+
+        // master1 重新上线登录（携带离线前落盘的存档与新 epoch=2）：自动回账待结算口碑，解锁百炼宗师(2)，生成未读战报
+        com.game.player.store.state.PlayerState savedMaster1 = f.repo.saves().stream()
+                .filter(s -> s.playerId() == 4101L)
+                .reduce((first, second) -> second)
+                .orElseThrow()
+                .state();
+        ScenePlayer master1Back = f.enter(19, 4101L, 2L, f.scene1, savedMaster1);
+        GetSkillCraftingStateResponse stBack = call(f, master1Back, SKILL_SERVICE, "GetSkillCraftingState",
+                GetSkillCraftingStateRequest.getDefaultInstance(), GetSkillCraftingStateResponse.parser());
+        assertThat(stBack.getErrorMessage().getId()).isZero();
+        var snap = stBack.getState();
+        assertThat(snap.getProxyOrdersCompleted()).isEqualTo(2);
+        assertThat(snap.getSupremeForgedCount()).isEqualTo(5);
+        assertThat(snap.getRareBooksCraftedCount()).isEqualTo(1);
+        assertThat(snap.getUnlockedCraftTitleIdsList()).contains(1, 2, 4, 6);
+        assertThat(snap.hasUnreadProxyDigest()).isTrue();
+        assertThat(snap.getUnreadProxyDigest().getOrdersCompleted()).isEqualTo(2);
+        assertThat(snap.getUnreadProxyDigest().getSupremeForgedCount()).isEqualTo(1);
+        assertThat(snap.getUnreadProxyDigest().getRareBooksCraftedCount()).isEqualTo(1);
+        assertThat(snap.getUnreadProxyDigest().getNetGoldEarned()).isEqualTo(171L);
+        assertThat(snap.getUnreadProxyDigest().getLastBuyerName()).isNotEmpty();
+        assertThat(snap.getUnreadProxyDigest().getNewlyUnlockedTitleMask() & (1 << 1)).isNotZero();
+
+        // 佩戴新解锁的“百炼宗师”(2) + 招牌(1)
+        SetCraftProxyStallResponse equipTitle = call(f, master1Back, SKILL_SERVICE, "SetCraftProxyStall",
+                SetCraftProxyStallRequest.newBuilder()
+                        .setOpen(true).setProxyForgeFeeGold(100L).setProxyScrollFeeGold(80L)
+                        .setMasterShowcaseTag(1).setEquippedCraftTitleId(2).build(),
+                SetCraftProxyStallResponse.parser());
+        assertThat(equipTitle.getErrorMessage().getId()).isZero();
+        assertThat(equipTitle.getState().getEquippedCraftTitleId()).isEqualTo(2);
+        assertThat(equipTitle.getState().getMasterShowcaseTag()).isEqualTo(1);
+
+        // 幂等确认战报（573）：首次清空，二次调用保持幂等成功且口碑不回退
+        com.game.proto.AckCraftProxyDigestResponse ack1 = call(f, master1Back, SKILL_SERVICE, "AckCraftProxyDigest",
+                com.game.proto.AckCraftProxyDigestRequest.getDefaultInstance(),
+                com.game.proto.AckCraftProxyDigestResponse.parser());
+        assertThat(ack1.getErrorMessage().getId()).isZero();
+        assertThat(ack1.getState().hasUnreadProxyDigest()).isFalse();
+        assertThat(ack1.getState().getProxyOrdersCompleted()).isEqualTo(2);
+
+        com.game.proto.AckCraftProxyDigestResponse ack2 = call(f, master1Back, SKILL_SERVICE, "AckCraftProxyDigest",
+                com.game.proto.AckCraftProxyDigestRequest.getDefaultInstance(),
+                com.game.proto.AckCraftProxyDigestResponse.parser());
+        assertThat(ack2.getErrorMessage().getId()).isZero();
+        assertThat(ack2.getState().hasUnreadProxyDigest()).isFalse();
+    }
 }

@@ -223,6 +223,16 @@ message SkillScrollCatalogInfo {
   repeated uint32 skill_table_ids = 16; // 本卷宗包含的永久技能列表（按 ID 升序）。
 }
 
+// 宗师未读离线/跨线代打营业战报摘要（由 PlayerCraftComp 持久化，AckCraftProxyDigest 幂等清零）。
+message CraftProxyDigestSummary {
+  uint32 orders_completed = 1;          // 尚未查阅的代打累计成交单数。
+  uint32 supreme_forged_count = 2;      // 尚未查阅的极品产出数。
+  uint32 rare_books_crafted_count = 3;  // 尚未查阅的稀世制书数。
+  uint64 net_gold_earned = 4;           // 尚未查阅的税后 95% 净银两总额（已寄往邮箱）。
+  string last_buyer_name = 5;           // 最近一位下单侠士名。
+  uint32 newly_unlocked_title_mask = 6; // 本期间新解锁的零属性名匠雅号位图（bit (title_id - 1)）。
+}
+
 message SkillCraftingStateSnapshot {
   uint64 scroll_craft_revision = 1;
   SkillCraftMasterySnapshot forge_mastery = 2;
@@ -249,6 +259,8 @@ message SkillCraftingStateSnapshot {
   bool team_free_proxy = 21;
   bytes claimed_scroll_milestone_bits = 22;
   repeated SkillBookWantedOrderInfo my_wanted_orders = 23;
+  // ── 离线/跨线名匠代打未读营业战报 ──
+  CraftProxyDigestSummary unread_proxy_digest = 24;
 }
 
 message GetSkillCraftingStateRequest {}
@@ -373,6 +385,16 @@ message CraftProxyStallInfo {
   // ── V5 同队情义零费代打 ──
   bool team_free_proxy = 14;
   bool viewer_gets_free_proxy = 15; // true = 当前查询者与该宗师同队且可享受 0 银两情义代打。
+  // ── 西市 24 小时极品热榜只读统计 ──
+  uint32 recent_24h_orders = 16;   // 近期热度单数（含离线未回账订单实时叠加）。
+  uint32 recent_24h_supreme = 17;  // 近期极品产出数（含离线未回账极品实时叠加）。
+  uint32 hot_rank = 18;            // 全区极品热榜名次（1..3 = Top 3 榜位，0 = 未入前三）。
+}
+
+message AckCraftProxyDigestRequest {}
+message AckCraftProxyDigestResponse {
+  TipInfoMessage error_message = 1;
+  SkillCraftingStateSnapshot state = 2;
 }
 
 message ListCraftProxyStallsRequest {}
@@ -528,4 +550,5 @@ service SceneSkillClientPlayer {
   rpc ListSkillBookWantedOrders (ListSkillBookWantedOrdersRequest) returns (ListSkillBookWantedOrdersResponse);
   rpc FulfillSkillBookWantedOrder (FulfillSkillBookWantedOrderRequest) returns (FulfillSkillBookWantedOrderResponse);
   rpc RentSkillLoadoutSlots (RentSkillLoadoutSlotsRequest) returns (RentSkillLoadoutSlotsResponse);
+  rpc AckCraftProxyDigest (AckCraftProxyDigestRequest) returns (AckCraftProxyDigestResponse);
 }

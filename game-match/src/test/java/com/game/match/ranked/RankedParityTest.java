@@ -404,8 +404,28 @@ class RankedParityTest {
                     .build();
             assertThat(ratingStore.apply(b1).outcome()).isEqualTo(RatingStore.Outcome.APPLIED);
 
-            // 再匹配时：buildRankedContext 透传宿敌记录，p1 对 p2 标记可雪耻
+            // 再匹配时：buildRankedContext 透传宿敌记录，p1 对 p2 标记可雪耻；高段排位同步开启 V7 公开实时观战与最高分冻结
             RankedMatchContext ctx = rankedStore.buildRankedContext(1, List.of(p1, p2), Map.of()).orElseThrow();
+            assertThat(ctx.getAllowPublicSpectate()).isTrue();
+            assertThat(ctx.getPeakRatingCenti()).isGreaterThanOrEqualTo(165_000L);
+            assertThat(com.game.match.spectate.SpectateVisibilityPolicy.decide(
+                    com.game.proto.match.MatchMode.MATCH_MODE_PVP_TEAM, null, null, ctx))
+                    .isEqualTo(com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC);
+            assertThat(com.game.match.spectate.SpectateVisibilityPolicy.decide(
+                    com.game.proto.match.MatchMode.MATCH_MODE_PVP_TEAM, null, null,
+                    ctx.toBuilder().setAllowPublicSpectate(false).build()))
+                    .isEqualTo(com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);
+            assertThat(com.game.match.spectate.SpectateVisibilityPolicy.decide(
+                    com.game.proto.match.MatchMode.MATCH_MODE_PVP_TEAM, null, null,
+                    ctx.toBuilder().setUseFreePreset(true).build()))
+                    .isEqualTo(com.game.proto.eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);
+            var summary = com.game.match.spectate.SpectateRules.summaryOf(
+                    com.game.match.proto.BattlePlacement.newBuilder()
+                            .setBattleId(66002L).setMode(MatchModes.PVP_TEAM).setBattleConfigId(5)
+                            .setRankedTeamSize(ctx.getTeamSize()).setRankedPeakRatingCenti(ctx.getPeakRatingCenti())
+                            .build());
+            assertThat(summary.getRankedTeamSize()).isEqualTo(1);
+            assertThat(summary.getRankedPeakRatingCenti()).isEqualTo(ctx.getPeakRatingCenti());
             assertThat(ctx.getRivalryEncountersList())
                     .anySatisfy(r -> {
                         assertThat(r.getPlayerId()).isEqualTo(p1);

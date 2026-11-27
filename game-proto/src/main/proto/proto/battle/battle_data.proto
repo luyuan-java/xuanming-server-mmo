@@ -531,6 +531,9 @@ message BattleSettlementData {
   uint64 season_seal_contribution_value = 52; // 主贡献累计值（101/102 削盾量、103 减伤+共鸣增盾量、104 回蓝+共鸣省蓝量）
   uint32 season_seal_trigger_count = 53;      // 本场赛季印基础效果触发次数
   uint32 season_seal_resonance_count = 54;    // 本场「技印共鸣」触发次数
+  // 论剑 V7：正式 1V1 排位终局对阵对手身份（仅双方各 1 名真人且非无效局填充，用于战后 15 秒切磋「不服再战」，零排位分）。
+  uint64 rematch_opponent_id = 55;
+  string rematch_opponent_name = 56;
 }
 
 // ---- 出战宝宝的结算数据(随主人的 BattleSettlementData 一起回 scene)----
@@ -654,6 +657,10 @@ message RankedMatchContext {
   uint32 skill_ban_slots_per_team = 10;
   // 论剑 V6 成局时由 match 冻结的对阵宿敌记录（含双方本季已有交手的全部主客视角条目）。
   repeated RankedRivalryEncounter rivalry_encounters = 11;
+  // 论剑 V7：高段正式排位公开实时观战（青锋及以上段位冻结为 true，低段新手局保持 false 避免压力）。
+  bool allow_public_spectate = 12;
+  // 论剑 V7：成局时本场参战者最高赛季积分（centi，随建房原件冻结供实时围观列表排序展示）。
+  int64 peak_rating_centi = 13;
 }
 
 // 玩家本局有效参与事实(battle 房间在终局前冻结进 BattleResultEvent,重放不重算)。
@@ -759,6 +766,7 @@ message CustomDuelRules {
   uint32 challenger_character_preset_id = 6;       // 公平模板切磋时发起者所选人物预设（0=默认 101）
   uint32 challenger_pet_preset_id = 7;             // 公平模板切磋时发起者所选灵宠预设（0=默认 203）
   uint32 skill_ban_slots_per_team = 8;             // 战前纯禁招每队槽数（白名单 0 或 3；禁止与 use_free_preset=true 同开）
+  uint64 rematch_source_battle_id = 9;             // 论剑 V7 战后不服再战来源局 ID（0=普通自定义切磋；非 0 时服务端缩短应答 TTL 至 15s）
 }
 
 // ---- 战报一键看配装·脱敏公开构筑摘要(严禁含私密概率/背包/冷却) ----

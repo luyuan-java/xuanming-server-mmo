@@ -3,6 +3,8 @@ package com.game.match.spectate;
 import com.game.match.proto.BattlePlacement;
 import com.game.proto.BattleActivityContext;
 import com.game.proto.CreateBattleRequest;
+import com.game.proto.CustomDuelRules;
+import com.game.proto.RankedMatchContext;
 import com.game.proto.eBattleActivityKind;
 import com.game.proto.eSpectateVisibility;
 import com.game.proto.match.MatchMode;
@@ -80,6 +82,21 @@ public final class SpectateVisibilityPolicy {
         }
         // 表外的值（UNRECOGNIZED）回私密，不是放行的缺省
         return BY_MODE.getOrDefault(mode, eSpectateVisibility.SPECTATE_VISIBILITY_PRIVATE);
+    }
+
+    /** 扩展道友切磋坊（allow_public_spectate）与论剑 V7 高段正式自养排位公开实时观战决策；活动局保持严格隔离。 */
+    public static eSpectateVisibility decide(MatchMode mode, BattleActivityContext activity,
+                                             CustomDuelRules customDuelRules, RankedMatchContext rankedContext) {
+        boolean nonActivity = activity == null || activity.getKind() == eBattleActivityKind.BATTLE_ACTIVITY_KIND_NONE;
+        if (nonActivity && mode == MatchMode.MATCH_MODE_PVP_TEAM
+                && rankedContext != null && !rankedContext.getUseFreePreset() && rankedContext.getAllowPublicSpectate()) {
+            return eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC;
+        }
+        if (nonActivity && mode == MatchMode.MATCH_MODE_PVP_CHALLENGE
+                && customDuelRules != null && customDuelRules.getAllowPublicSpectate()) {
+            return eSpectateVisibility.SPECTATE_VISIBILITY_PUBLIC;
+        }
+        return decide(mode, activity);
     }
 
     /** 决策表里显式表态过的模式（只读；测试据此钉住「每个枚举都在表里」）。 */

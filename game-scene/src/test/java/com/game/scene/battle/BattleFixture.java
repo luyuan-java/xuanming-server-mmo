@@ -318,6 +318,7 @@ public final class BattleFixture {
                     attributes.initializeOnLoad(player);
                     pets.initializeOnLoad(player);
                     missions.initializeOnLoad(player);
+                    proxyDirectory.drainPendingReputation(player);
                     if (player.craft().state().getProxyStallOpen()) {
                         proxyDirectory.syncPlayer(player);
                     }

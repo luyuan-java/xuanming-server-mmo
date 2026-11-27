@@ -474,6 +474,21 @@ public final class EquipmentCraftService {
             // 95% 净银两写入买家同事务 PlayerState.mail_outbox，落盘确认后经 game-mail -> asset_op 异步入账。
             mailOutbox.enqueueProxyFee(player, prepared.proxyMasterPlayerId, proxyNetGold, reqId, playerDisplayName(player));
         }
+        ScenePlayer creditedProxyMaster = null;
+        if (prepared.proxyMasterPlayerId != 0L && proxyDirectory != null) {
+            boolean supremeProduced = (op == EquipmentCraftChoice.Operation.INSTALL_AFFIX
+                    || op == EquipmentCraftChoice.Operation.POLISH_AFFIX)
+                    && !prepared.polishExempt
+                    && resultQualityTier == EquipCraftQualityRules.MAX_QUALITY_TIER;
+            ScenePlayer onlineMaster = world == null ? null : world.playerById(prepared.proxyMasterPlayerId);
+            creditedProxyMaster = proxyDirectory.recordOrderReputation(
+                    prepared.proxyMasterPlayerId,
+                    supremeProduced ? 1 : 0,
+                    0,
+                    proxyNetGold,
+                    playerDisplayName(player),
+                    onlineMaster);
+        }
         // 本人打造/装条/打磨自然涨 1 点铸器熟练度（无体力、无日清、只增不减；代打、重铸、解封、继承与无损升档不涨）。
         if (prepared.proxyMasterPlayerId == 0L
                 && op != EquipmentCraftChoice.Operation.REFORGE_AFFIX
@@ -501,7 +516,7 @@ public final class EquipmentCraftService {
         }
         return new CommitResult(appliedCraft(player, reqId, resultItemId, newRevision,
                 resultQualityTier, resultPolishPityCount, guaranteedByPity, false, bagView),
-                wornChanged, true, null);
+                wornChanged, true, creditedProxyMaster);
     }
 
     /** 407 查询装备材料自选快照。 */

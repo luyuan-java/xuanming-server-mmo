@@ -312,6 +312,11 @@ public final class RedisKeys {
         return worldZonePrefix(zoneId) + "craft-proxy-stalls";
     }
 
+    /** 本 zone 跨节点/离线名匠代打口碑与 24h 极品热榜原子账本（Hash：字段为 {@code <mid>:o/:s/:r/:g/:24o/:24s/:b}，与摊位目录同槽）。 */
+    public String craftProxyReputation(int zoneId) {
+        return worldZonePrefix(zoneId) + "craft-proxy-reputation";
+    }
+
     /** 玩家主动切线冷却（STRING，短 TTL）；全局 player 维度，跨节点/zone不重置。 */
     public String channelSwitchCooldown(long playerId) {
         return prefix + "player:" + Long.toUnsignedString(playerId) + ":channel-switch-cooldown";

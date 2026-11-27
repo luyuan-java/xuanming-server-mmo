@@ -243,6 +243,7 @@ class InBattleGateMatrixTest {
             new Row(502, SKILL, "SaveSkillLoadout", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
             new Row(503, SKILL, "SwitchSkillLoadout", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
             new Row(565, SKILL, "RentSkillLoadoutSlots", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
+            new Row(573, SKILL, "AckCraftProxyDigest", BattlePolicy.GATED, SKILL_UPGRADE_BUSY),
             // 批次 5.4：226 跨 zone 传送自己判战斗在途（基线 kZoneTravelInBattle，player_lifecycle.cpp:2784-2788），计在 zone_travel 闸上
             new Row(226, SCENE, "TravelToZone", BattlePolicy.GATED, ZONE_TRAVEL_IN_BATTLE),
             // ALLOW：只读
@@ -811,6 +812,7 @@ class InBattleGateMatrixTest {
                 .setSchemeId(2).setStateVersion(1L).setRequestId("battle-loadout-000002").build());
         out.put(SKILL + "RentSkillLoadoutSlots", s -> com.game.proto.RentSkillLoadoutSlotsRequest.newBuilder()
                 .setClientRequestId(9204L).setTargetRentedSlots(1).setAddPeriods(1).setExpectedCostDiamond(30L).build());
+        out.put(SKILL + "AckCraftProxyDigest", s -> com.game.proto.AckCraftProxyDigestRequest.getDefaultInstance());
         out.put(ACTIVITY + "GetFestivalBeastDetail", s -> com.game.proto.GetFestivalBeastDetailRequest.getDefaultInstance());
         out.put(ACTIVITY + "StartFestivalBeastChallenge", s -> com.game.proto.StartFestivalBeastChallengeRequest.newBuilder()
                 .setClientRequestId("11111111-1111-4111-8111-111111111111")

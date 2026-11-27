@@ -571,3 +571,4 @@
 570=MatchServiceCreateTrialChallengeCard
 571=MatchServiceGetTrialChallengeCard
 572=MatchServiceGetSharedTrialReplay
+573=SceneSkillClientPlayerAckCraftProxyDigest
