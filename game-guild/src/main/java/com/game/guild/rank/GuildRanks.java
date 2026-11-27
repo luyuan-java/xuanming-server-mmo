@@ -140,6 +140,144 @@ public final class GuildRanks {
         this.tmpTtlMillis = tmpTtlMillis;
     }
 
+    /** 解散墓碑保留时长（24 小时，对齐主仓 guild_ranking_architecture_zh.md）。 */
+    public static final long TOMBSTONE_TTL_MS = 24L * 3_600_000L;
+
+    /**
+     * 无全服锁按版本条件写分（主仓第 23 条）：同槽 Lua 校验墓碑与 {@code score_version}，乱序旧写与解散后迟到写自动丢弃，
+     * 写分请求彼此并行、不再串行抢 {@code game:guild:{rank}:lock}。
+     */
+    public boolean writeVersioned(long guildId, int zoneId, long score, long scoreVersion, long nowMs, Deadline deadline) {
+        String member = Long.toUnsignedString(guildId);
+        try {
+            String zoneKey = zoneId != 0 ? redisKeys.guildRankZone(zoneId) : null;
+            String zoneMember = zoneId != 0 ? Integer.toUnsignedString(zoneId) : null;
+            boolean written = deadline.await(redis.writeVersioned(
+                    redisKeys.guildRankVersions(), redisKeys.guildRankTombstones(),
+                    redisKeys.guildRankAll(), redisKeys.guildRankZones(), zoneKey, zoneMember,
+                    nowMs, scoreVersion, Long.toString(score), member), "版本写榜 " + member);
+            metrics.rankOp(RankOp.ADD, RankOutcome.OK);
+            return written;
+        } catch (RuntimeException e) {
+            metrics.rankOp(RankOp.ADD, RankOutcome.ERROR);
+            log.error("[guild] 版本写榜失败 guild={} zone={} ver={}: {}", member, Integer.toUnsignedString(zoneId),
+                    Long.toUnsignedString(scoreVersion), rootMessage(e));
+            return false;
+        }
+    }
+
+    /**
+     * 无全服锁解散立墓碑并摘榜：同一段 Lua 清理过期墓碑、写入 24h 墓碑、删除版本记录并从全服榜及全部区榜 ZREM。
+     */
+    public boolean disbandTombstone(long guildId, int hintZone, long nowMs, Deadline deadline) {
+        String member = Long.toUnsignedString(guildId);
+        try {
+            Set<String> zoneMembers = deadline.await(redis.members(redisKeys.guildRankZones()), "读区榜索引");
+            Set<String> rankKeys = new LinkedHashSet<>();
+            rankKeys.add(redisKeys.guildRankAll());
+            for (int zone : parseZones(zoneMembers)) {
+                rankKeys.add(redisKeys.guildRankZone(zone));
+            }
+            if (hintZone != 0) {
+                rankKeys.add(redisKeys.guildRankZone(hintZone));
+            }
+            boolean ok = deadline.await(redis.tombstoneRemove(
+                    redisKeys.guildRankVersions(), redisKeys.guildRankTombstones(), List.copyOf(rankKeys),
+                    nowMs, nowMs + TOMBSTONE_TTL_MS, TOMBSTONE_TTL_MS, member), "墓碑摘榜 " + member);
+            metrics.rankOp(RankOp.REMOVE, ok ? RankOutcome.OK : RankOutcome.ERROR);
+            return ok;
+        } catch (RuntimeException e) {
+            metrics.rankOp(RankOp.REMOVE, RankOutcome.ERROR);
+            log.error("[guild] 墓碑摘榜失败 guild={} zone={}: {}", member, Integer.toUnsignedString(hintZone), rootMessage(e));
+            return false;
+        }
+    }
+
+    /**
+     * 按版本合并重建排行（维护锁仅用于重建与合服折叠互斥，不阻塞线上写分）：
+     * 不整键 DEL/RENAME 替换，逐条经 {@code writeVersioned} 合并（并发更高版本写分不被覆盖）；
+     * 对榜上多出的旧成员先回库复核 {@code existsInDb}，确已不存在才摘除（快照之后新建的帮会永不被误删）。
+     */
+    public RebuildResult rebuildVersioned(List<com.game.guild.store.GuildStore.VersionedScore> snapshot,
+                                          java.util.function.LongPredicate existsInDb, long nowMs) {
+        Lease lease = acquire(maxWaitMillis, () -> Deadline.after(REBUILD_CALL_TIMEOUT_MS), true);
+        if (lease == null) {
+            metrics.rankOp(RankOp.REBUILD, RankOutcome.LOCK_TIMEOUT);
+            throw new IllegalStateException("等排行维护锁超时，无法按版本合并重建帮会排行");
+        }
+        try (lease) {
+            Set<String> inSnapshot = new LinkedHashSet<>(snapshot.size() * 2);
+            Set<Integer> zones = new LinkedHashSet<>();
+            for (var row : snapshot) {
+                String member = Long.toUnsignedString(row.guildId());
+                inSnapshot.add(member);
+                if (row.zoneId() != 0) {
+                    zones.add(row.zoneId());
+                }
+                String zoneKey = row.zoneId() != 0 ? redisKeys.guildRankZone(row.zoneId()) : null;
+                String zoneMember = row.zoneId() != 0 ? Integer.toUnsignedString(row.zoneId()) : null;
+                await(redis.writeVersioned(redisKeys.guildRankVersions(), redisKeys.guildRankTombstones(),
+                        redisKeys.guildRankAll(), redisKeys.guildRankZones(), zoneKey, zoneMember,
+                        nowMs, row.scoreVersion(), Long.toString(row.score()), member), "重建合并 " + member);
+            }
+            Set<String> existing = await(redis.allMembers(redisKeys.guildRankAll()), "读现存全服榜成员");
+            Set<String> zoneMembers = await(redis.members(redisKeys.guildRankZones()), "读区榜索引");
+            List<String> allRankKeys = new ArrayList<>();
+            allRankKeys.add(redisKeys.guildRankAll());
+            for (int z : parseZones(zoneMembers)) {
+                allRankKeys.add(redisKeys.guildRankZone(z));
+            }
+            for (String m : existing) {
+                if (inSnapshot.contains(m)) {
+                    continue;
+                }
+                long gid;
+                try {
+                    gid = Long.parseUnsignedLong(m);
+                } catch (NumberFormatException ignored) {
+                    continue;
+                }
+                // 回库复核：快照后并发新建的帮会仍在库中，绝不删除
+                if (!existsInDb.test(gid)) {
+                    await(redis.tombstoneRemove(redisKeys.guildRankVersions(), redisKeys.guildRankTombstones(),
+                            allRankKeys, nowMs, nowMs + TOMBSTONE_TTL_MS, TOMBSTONE_TTL_MS, m), "重建清理幽灵帮 " + m);
+                }
+            }
+            metrics.rankOp(RankOp.REBUILD, RankOutcome.OK);
+            return new RebuildResult(snapshot.size(), zones.size());
+        } catch (RuntimeException e) {
+            metrics.rankOp(RankOp.REBUILD, RankOutcome.ERROR);
+            throw e;
+        }
+    }
+
+    /** 合服区榜折叠（与重建互斥持维护锁）：按版本合并进目标区榜，再按读到的版本条件摘除源区榜。 */
+    public int foldZoneVersioned(int sourceZoneId, int targetZoneId,
+                                 List<com.game.guild.store.GuildStore.VersionedScore> sourceGuilds, long nowMs) {
+        Lease lease = acquire(maxWaitMillis, () -> Deadline.after(REBUILD_CALL_TIMEOUT_MS), true);
+        if (lease == null) {
+            metrics.rankOp(RankOp.REBUILD, RankOutcome.LOCK_TIMEOUT);
+            throw new IllegalStateException("等排行维护锁超时，无法执行合服区榜折叠");
+        }
+        int folded = 0;
+        try (lease) {
+            String sourceKey = redisKeys.guildRankZone(sourceZoneId);
+            String targetKey = redisKeys.guildRankZone(targetZoneId);
+            String targetMember = Integer.toUnsignedString(targetZoneId);
+            for (var g : sourceGuilds) {
+                String member = Long.toUnsignedString(g.guildId());
+                await(redis.writeVersioned(redisKeys.guildRankVersions(), redisKeys.guildRankTombstones(),
+                        redisKeys.guildRankAll(), redisKeys.guildRankZones(), targetKey, targetMember,
+                        nowMs, g.scoreVersion(), Long.toString(g.score()), member), "合服写目标区榜 " + member);
+                if (await(redis.removeZoneIfVersionAtMost(redisKeys.guildRankVersions(), sourceKey,
+                        g.scoreVersion(), member), "合服摘源区榜 " + member)) {
+                    folded++;
+                }
+            }
+            return folded;
+        }
+    }
+
     // ------------------------------------------------------------------ 写（请求路径：失败只记日志，永不抛）
 
     /**

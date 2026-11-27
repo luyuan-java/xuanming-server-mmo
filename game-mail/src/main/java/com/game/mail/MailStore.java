@@ -589,11 +589,65 @@ public final class MailStore {
         }
     }
     public List<Long> due(Deadline d, long now) throws SQLException {
-        return sql.read(d,
-                s
-                -> s.list("SELECT op_id FROM mail_asset_op WHERE status=1 AND next_attempt_ms<=? AND lease_until_ms<? ORDER BY "
-                          + "next_attempt_ms,op_id LIMIT 32",
-                        r -> u64(r, 1), now, now));
+        return due(d, now, com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+
+    /** 按 64 片 HRW 分片拉取到期邮件附件重投行（{@code MOD(player_id,64) IN(...)} 放在 LIMIT 之前）。 */
+    public List<Long> due(Deadline d, long now, com.game.common.workshard.WorkShard.SqlFilter filter) throws SQLException {
+        if (filter == null || filter.isAll()) {
+            return sql.read(d,
+                    s -> s.list("SELECT op_id FROM mail_asset_op WHERE status=1 AND next_attempt_ms<=? AND lease_until_ms<? ORDER BY "
+                              + "next_attempt_ms,op_id LIMIT 32",
+                            r -> u64(r, 1), now, now));
+        }
+        if (filter.isNone()) {
+            return List.of();
+        }
+        List<Object> args = new ArrayList<>(filter.args().size() + 2);
+        args.addAll(filter.args());
+        args.add(now);
+        args.add(now);
+        String q = "SELECT op_id FROM mail_asset_op WHERE status=1 AND " + filter.sql()
+                + " AND next_attempt_ms<=? AND lease_until_ms<? ORDER BY next_attempt_ms,op_id LIMIT 32";
+        return sql.read(d, s -> s.list(q, r -> u64(r, 1), args.toArray()));
+    }
+
+    /**
+     * 按 {@code MOD(mail_id,64)} 分片清理已过期邮件（全服邮件无收件人，按邮件号分片，分片条件置于 LIMIT 之前）；
+     * 提交点复核 {@code expire_ms < ?} 且无进行中领取（{@code claim_state=2}），绝不删除 {@code mail_request_receipt} 判重收据。
+     */
+    public int cleanupExpired(Deadline d, long nowMs, int limit, com.game.common.workshard.WorkShard.SqlFilter filter)
+            throws SQLException {
+        if (limit <= 0 || (filter != null && filter.isNone())) {
+            return 0;
+        }
+        boolean sharded = filter != null && !filter.isAll();
+        String listSql = sharded
+                ? "SELECT mail_id FROM mail_message WHERE " + filter.sql() + " AND expire_ms<? ORDER BY mail_id LIMIT ?"
+                : "SELECT mail_id FROM mail_message WHERE expire_ms<? ORDER BY mail_id LIMIT ?";
+        List<Object> listArgs = new ArrayList<>();
+        if (sharded) {
+            listArgs.addAll(filter.args());
+        }
+        listArgs.add(nowMs);
+        listArgs.add(limit);
+        List<Long> expiredIds = sql.read(d, s -> s.list(listSql, r -> u64(r, 1), listArgs.toArray()));
+        int deleted = 0;
+        for (long mailId : expiredIds) {
+            if (d.expired() || Thread.currentThread().isInterrupted()) {
+                break;
+            }
+            int removed = sql.tx(d, s -> {
+                long pending = s.count("SELECT COUNT(*) FROM mail_state WHERE mail_id=? AND claim_state=2", U(mailId));
+                if (pending > 0) {
+                    return 0;
+                }
+                s.update("DELETE FROM mail_state WHERE mail_id=? AND claim_state<>2", U(mailId));
+                return s.update("DELETE FROM mail_message WHERE mail_id=? AND expire_ms<?", U(mailId), nowMs);
+            });
+            deleted += removed;
+        }
+        return deleted;
     }
     public Operation lease(Deadline d, long id, long now, long token) throws SQLException {
         return sql.tx(d, s -> {

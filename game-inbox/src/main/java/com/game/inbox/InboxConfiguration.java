@@ -160,14 +160,33 @@ public class InboxConfiguration {
         return new GmSanctions(store);
     }
 
+    @Bean(initMethod = "start", destroyMethod = "close")
+    com.game.discovery.workshard.RedisWorkShardMembership inboxWorkShardMembership(
+            RedissonClient redis, RedisKeys keys,
+            @org.springframework.beans.factory.annotation.Value("${game.instance-id:}") String configuredInstanceId,
+            @org.springframework.beans.factory.annotation.Value("${game.track:stable}") String track) {
+        String instanceId = configuredInstanceId == null || configuredInstanceId.isBlank()
+                ? "inbox-" + UUID.randomUUID()
+                : configuredInstanceId.strip();
+        return new com.game.discovery.workshard.RedisWorkShardMembership(redis, keys, "inbox", 0, instanceId, track);
+    }
+
     @Bean
     InboxMaintenance inboxMaintenance(RedissonClient redis, RedisKeys keys, InboxMaintenanceStore store, JdbcPlayerTables players,
-                                      InboxMetrics metrics, InboxProperties properties) {
+                                      InboxMetrics metrics, InboxProperties properties,
+                                      com.game.discovery.workshard.RedisWorkShardMembership shards,
+                                      io.micrometer.core.instrument.MeterRegistry meterRegistry) {
         LeaderLease lease = new LeaderLease(redis, keys, "inbox-" + UUID.randomUUID(), properties.leaderTtl());
         InboxMaintenance.Settings settings = new InboxMaintenance.Settings(
                 properties.notifyResendInterval(), properties.gaugeInterval(), properties.reconcileInterval(), properties.reconcileWindow());
+        com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(
+                meterRegistry, "inbox", "inbox_reconcile", shards.membership());
+        var liveness = com.game.discovery.workshard.LoopLivenessMeters.bind(
+                meterRegistry, new com.game.common.workshard.LoopLiveness("inbox", "reconcile"));
         return new InboxMaintenance(lease, store, players, metrics, settings, System::currentTimeMillis, System::nanoTime,
-                bound -> bound <= 0 ? 0 : ThreadLocalRandom.current().nextLong(bound));
+                bound -> bound <= 0 ? 0 : ThreadLocalRandom.current().nextLong(bound))
+                .withWorkShard(shards.membership())
+                .withReconcileLiveness(liveness);
     }
 
     /** 运维接口 /admin/inbox/** 的鉴权（独立口令 GAME_INBOX_ADMIN_TOKEN；没配置一律 503）。 */

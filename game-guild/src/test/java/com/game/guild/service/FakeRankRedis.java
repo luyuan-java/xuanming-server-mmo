@@ -60,6 +60,32 @@ final class FakeRankRedis implements GuildRankRedis {
     }
 
     @Override
+    public synchronized CompletionStage<Boolean> writeVersioned(String verKey, String tombKey, String allKey, String zonesKey,
+                                                                String zoneKey, String zoneMember, long nowMs, long scoreVersion,
+                                                                String score, String member) {
+        zsets.computeIfAbsent(allKey, k -> new HashMap<>()).put(member, Double.parseDouble(score));
+        if (zoneKey != null) {
+            zsets.computeIfAbsent(zoneKey, k -> new HashMap<>()).put(member, Double.parseDouble(score));
+            sets.computeIfAbsent(zonesKey, k -> new LinkedHashSet<>()).add(zoneMember);
+        }
+        journal.accept("rank.add " + member);
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
+    public synchronized CompletionStage<Boolean> tombstoneRemove(String verKey, String tombKey, List<String> rankKeys,
+                                                                 long nowMs, long expireMs, long tombTtlMs, String member) {
+        for (String key : rankKeys) {
+            Map<String, Double> zset = zsets.get(key);
+            if (zset != null) {
+                zset.remove(member);
+            }
+        }
+        journal.accept("rank.remove " + member);
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
     public synchronized CompletionStage<Set<String>> members(String setKey) {
         return CompletableFuture.completedFuture(new LinkedHashSet<>(sets.getOrDefault(setKey, Set.of())));
     }

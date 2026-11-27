@@ -22,6 +22,7 @@ class InMemoryGuildRankRedis implements GuildRankRedis {
     final Map<String, Long> ttls = new HashMap<>();
     final Map<String, Map<String, Double>> zsets = new HashMap<>();
     final Map<String, Set<String>> sets = new HashMap<>();
+    final Map<String, Map<String, Long>> hashes = new HashMap<>();
     final AtomicInteger tryLockCalls = new AtomicInteger();
     final AtomicInteger renewCalls = new AtomicInteger();
     final AtomicInteger unlockCalls = new AtomicInteger();
@@ -109,6 +110,77 @@ class InMemoryGuildRankRedis implements GuildRankRedis {
             sets.computeIfAbsent(zonesKey, k -> new LinkedHashSet<>()).add(zoneMember);
         }
         return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
+    public synchronized CompletionStage<Boolean> writeVersioned(String verKey, String tombKey, String allKey, String zonesKey,
+                                                                String zoneKey, String zoneMember, long nowMs, long scoreVersion,
+                                                                String score, String member) {
+        if (failing("writeVersioned")) {
+            return down();
+        }
+        Map<String, Double> tomb = zsets.get(tombKey);
+        if (tomb != null) {
+            tomb.entrySet().removeIf(e -> e.getValue() <= nowMs);
+            if (tomb.containsKey(member)) {
+                return CompletableFuture.completedFuture(false);
+            }
+        }
+        Map<String, Long> ver = hashes.computeIfAbsent(verKey, k -> new HashMap<>());
+        Long prev = ver.get(member);
+        if (prev != null && Long.compareUnsigned(prev, scoreVersion) > 0) {
+            return CompletableFuture.completedFuture(false);
+        }
+        ver.put(member, scoreVersion);
+        zsets.computeIfAbsent(allKey, k -> new HashMap<>()).put(member, Double.parseDouble(score));
+        if (zoneKey != null) {
+            zsets.computeIfAbsent(zoneKey, k -> new HashMap<>()).put(member, Double.parseDouble(score));
+            sets.computeIfAbsent(zonesKey, k -> new LinkedHashSet<>()).add(zoneMember);
+        }
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
+    public synchronized CompletionStage<Boolean> tombstoneRemove(String verKey, String tombKey, List<String> rankKeys,
+                                                                 long nowMs, long expireMs, long tombTtlMs, String member) {
+        if (failing("tombstoneRemove")) {
+            return down();
+        }
+        Map<String, Double> tomb = zsets.computeIfAbsent(tombKey, k -> new HashMap<>());
+        tomb.entrySet().removeIf(e -> e.getValue() <= nowMs);
+        tomb.put(member, (double) expireMs);
+        ttls.put(tombKey, tombTtlMs);
+        Map<String, Long> ver = hashes.get(verKey);
+        if (ver != null) {
+            ver.remove(member);
+        }
+        for (String key : rankKeys) {
+            Map<String, Double> z = zsets.get(key);
+            if (z != null) {
+                z.remove(member);
+            }
+        }
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
+    public synchronized CompletionStage<Boolean> removeZoneIfVersionAtMost(String verKey, String sourceZoneKey,
+                                                                           long maxVersion, String member) {
+        Map<String, Long> ver = hashes.get(verKey);
+        Long prev = ver == null ? null : ver.get(member);
+        if (prev != null && Long.compareUnsigned(prev, maxVersion) > 0) {
+            return CompletableFuture.completedFuture(false);
+        }
+        Map<String, Double> z = zsets.get(sourceZoneKey);
+        if (z != null) {
+            z.remove(member);
+        }
+        return CompletableFuture.completedFuture(true);
+    }
+
+    @Override
+    public synchronized CompletionStage<Set<String>> allMembers(String rankKey) {
+        return CompletableFuture.completedFuture(new LinkedHashSet<>(zsets.getOrDefault(rankKey, Map.of()).keySet()));
     }
 
     @Override

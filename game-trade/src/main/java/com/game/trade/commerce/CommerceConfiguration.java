@@ -178,22 +178,38 @@ public class CommerceConfiguration {
     public com.game.discovery.workshard.RedisWorkShardMembership tradeWorkShardMembership(
             RedissonClient redis, RedisKeys keys,
             @org.springframework.beans.factory.annotation.Value("${game.instance-id:}") String configuredInstanceId,
-            @org.springframework.beans.factory.annotation.Value("${game.track:stable}") String track) {
+            @org.springframework.beans.factory.annotation.Value("${game.track:stable}") String track,
+            org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters) {
         String instanceId = configuredInstanceId == null || configuredInstanceId.isBlank()
                 ? java.util.UUID.randomUUID().toString()
                 : configuredInstanceId.strip();
-        return new com.game.discovery.workshard.RedisWorkShardMembership(redis, keys, NodeTypes.TRADE, 0, instanceId, track);
+        var membership = new com.game.discovery.workshard.RedisWorkShardMembership(
+                redis, keys, NodeTypes.TRADE, 0, instanceId, track);
+        var registry = meters.getIfAvailable();
+        if (registry != null) {
+            com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "trade", "trade_op", membership.membership());
+            com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "trade", "trade_commerce", membership.membership());
+            com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "trade", "trade_ack", membership.membership());
+        }
+        return membership;
     }
     @Bean(initMethod = "start", destroyMethod = "close")
     public CommerceRuntime commerceRuntime(CommerceEngine e, ReliableAssetDelivery delivery,
         PersistedAssetLedgerReader ledger, org.springframework.beans.factory.ObjectProvider<OfficialMallClient> mall,
         org.springframework.beans.factory.ObjectProvider<RmbConsignmentService> rmb,
-        org.springframework.beans.factory.ObjectProvider<com.game.discovery.workshard.RedisWorkShardMembership> shards) {
+        org.springframework.beans.factory.ObjectProvider<com.game.discovery.workshard.RedisWorkShardMembership> shards,
+        org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters) {
         CommerceRuntime runtime = new CommerceRuntime(e, delivery, ledger, mall.getIfAvailable(), rmb.getIfAvailable());
         var membership = shards.getIfAvailable();
         if (membership != null) {
             runtime.withShardMembership(membership.membership());
         }
+        var live = new com.game.common.workshard.LoopLiveness("trade", "commerce_recovery", 120L, System::currentTimeMillis);
+        var registry = meters.getIfAvailable();
+        if (registry != null) {
+            com.game.discovery.workshard.LoopLivenessMeters.bind(registry, live);
+        }
+        runtime.withLiveness(live);
         return runtime;
     }
 }

@@ -28,6 +28,8 @@ public final class AssetOpCleanup {
     private final Duration terminalRetention;
     private final Duration counterRetention;
     private final LongSupplier clockMs;
+    private volatile com.game.common.workshard.WorkShard.Membership workShard;
+    private volatile com.game.common.workshard.LoopLiveness liveness;
     private final Object lifecycle = new Object();
     /** 持 {@link #lifecycle}。 */
     private ScheduledExecutorService scheduler;
@@ -44,6 +46,17 @@ public final class AssetOpCleanup {
         }
     }
 
+    /** 复用资产重投成员表按 player_id 分 64 片（类别键与重投分开）；未挂载或空表时全片清理。 */
+    public AssetOpCleanup withWorkShard(com.game.common.workshard.WorkShard.Membership membership) {
+        this.workShard = membership;
+        return this;
+    }
+
+    public AssetOpCleanup withLiveness(com.game.common.workshard.LoopLiveness liveness) {
+        this.liveness = liveness;
+        return this;
+    }
+
     /** 启动：首轮随机延迟 [0, interval)。重复调用是空操作。 */
     public void start() {
         long firstDelay;
@@ -54,16 +67,30 @@ public final class AssetOpCleanup {
             scheduler = Executors.newSingleThreadScheduledExecutor(
                     Thread.ofPlatform().name("guild-asset-cleanup").daemon(true).factory());
             firstDelay = ThreadLocalRandom.current().nextLong(interval.toMillis());
-            scheduler.scheduleWithFixedDelay(this::runOnce, firstDelay, interval.toMillis(), TimeUnit.MILLISECONDS);
+            scheduler.scheduleWithFixedDelay(this::runOnceGuarded, firstDelay, interval.toMillis(), TimeUnit.MILLISECONDS);
         }
         log.info("[GuildAsset] 账本清理已启动 interval={} 首轮延迟={}ms terminal_retention={} counter_retention={}", interval,
                 firstDelay, terminalRetention, counterRetention);
     }
 
+    private void runOnceGuarded() {
+        var live = this.liveness;
+        if (live != null) {
+            live.runGuarded(this::runOnce);
+            return;
+        }
+        runOnce();
+    }
+
     /** 跑一轮（失败只记日志，下一轮照常）。 */
     void runOnce() {
         try {
-            GuildAssetStore.CleanupReport report = store.cleanupOnce(clockMs.getAsLong(), terminalRetention, counterRetention);
+            var membership = this.workShard;
+            var filter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                    : membership.sqlFilter("guild_asset_cleanup", "player_id");
+            GuildAssetStore.CleanupReport report = filter.isAll()
+                    ? store.cleanupOnce(clockMs.getAsLong(), terminalRetention, counterRetention)
+                    : store.cleanupOnce(clockMs.getAsLong(), terminalRetention, counterRetention, filter);
             if (report.assetOpsDeleted() > 0 || report.countersDeleted() > 0 || report.clientRequestsDeleted() > 0) {
                 log.info("[GuildAsset] 清理一轮：终态指令行 {}，计数行 {}，幂等键去重记录 {}", report.assetOpsDeleted(),
                         report.countersDeleted(), report.clientRequestsDeleted());
@@ -79,6 +106,9 @@ public final class AssetOpCleanup {
         synchronized (lifecycle) {
             s = scheduler;
             scheduler = null;
+        }
+        if (liveness != null) {
+            liveness.close();
         }
         if (s == null) {
             return;

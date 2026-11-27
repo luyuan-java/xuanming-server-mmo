@@ -89,18 +89,27 @@ final class ReconcileRound {
      */
     static Result run(int startShard, Limits limits, PageReader pages, LedgerReader ledgers, ExecutorService readers, BooleanSupplier stop,
                       InboxMetrics metrics) throws SQLException {
-        Collected scan = collect(Math.floorMod(startShard, InboxShards.SHARD_COUNT), limits, pages, stop);
+        return run(startShard, limits, pages, ledgers, readers, stop, metrics, s -> true);
+    }
+
+    /**
+     * 跑一轮，仅扫描 {@code ownsShard} 为真的分片（多副本 HRW 64 片分工）。
+     * {@code stop} 为真（易主 / 关停 / 本轮预算用完）时不再发起新的读，返回已判定部分。
+     */
+    static Result run(int startShard, Limits limits, PageReader pages, LedgerReader ledgers, ExecutorService readers, BooleanSupplier stop,
+                      InboxMetrics metrics, java.util.function.IntPredicate ownsShard) throws SQLException {
+        java.util.function.IntPredicate filter = ownsShard == null ? s -> true : ownsShard;
+        Collected scan = collect(Math.floorMod(startShard, InboxShards.SHARD_COUNT), limits, pages, stop, filter);
         boolean truncated = !scan.capped.isEmpty() || scan.playerCapHit;
         if (truncated) {
             metrics.reconcileTruncated();
             log.error("[PlayerInbox] 对账轮次被截断（start_shard={}，扫了 {}/64 片）：{}；起始分片每个间隔前移 {} 片，截断持续时每片至多隔 {} 轮读完一次"
                             + "（没读到的分片沿用上一次读数），但被单片上限截掉的最老的行在这一片持续有新行时一直核对不到；缩短 game.inbox.reconcile-window 或调大上限",
-                    startShard, scan.scanned, scan.summary(limits), START_STRIDE, FULL_CYCLE_ROUNDS);
+                    startShard, scan.scannedShards.size(), scan.summary(limits), START_STRIDE, FULL_CYCLE_ROUNDS);
         }
-        List<ShardTally> tallies = new ArrayList<>(scan.scanned);
+        List<ShardTally> tallies = new ArrayList<>(scan.scannedShards.size());
         Map<Integer, Integer> tallyIndex = new HashMap<>();
-        for (int i = 0; i < scan.scanned; i++) {
-            int shard = (scan.start + i) % InboxShards.SHARD_COUNT;
+        for (int shard : scan.scannedShards) {
             boolean stopped = scan.playerCapHit && shard == scan.stoppedShard;
             tallyIndex.put(shard, tallies.size());
             tallies.add(new ShardTally(shard, 0, !scan.capped.contains(shard) && !stopped));
@@ -190,8 +199,8 @@ final class ReconcileRound {
         /** 每名玩家的行是从哪一片读出来的。 */
         final Map<Long, Integer> shardOf = new HashMap<>();
         final List<Integer> capped = new ArrayList<>();
+        final List<Integer> scannedShards = new ArrayList<>();
         final int start;
-        int scanned;
         boolean playerCapHit;
         int stoppedShard;
 
@@ -205,21 +214,25 @@ final class ReconcileRound {
                 parts.add(capped.size() + " 片 " + capped + " 读满单片上限 " + limits.perShard() + " 行（最新的已核对、最老的跳过）");
             }
             if (playerCapHit) {
-                parts.add("玩家数到上限 " + limits.maxPlayers() + "，停在 shard=" + stoppedShard + "，还有 " + (InboxShards.SHARD_COUNT - scanned)
+                parts.add("玩家数到上限 " + limits.maxPlayers() + "，停在 shard=" + stoppedShard + "，还有 " + (InboxShards.SHARD_COUNT - scannedShards.size())
                         + " 片没读到");
             }
             return String.join("；", parts);
         }
     }
 
-    private static Collected collect(int startShard, Limits limits, PageReader pages, BooleanSupplier stop) throws SQLException {
+    private static Collected collect(int startShard, Limits limits, PageReader pages, BooleanSupplier stop,
+                                     java.util.function.IntPredicate ownsShard) throws SQLException {
         Collected scan = new Collected(startShard);
         for (int i = 0; i < InboxShards.SHARD_COUNT; i++) {
             if (stop.getAsBoolean()) {
                 throw new SQLException("对账收集被打断（易主 / 关停 / 预算用完）");
             }
             int shard = (startShard + i) % InboxShards.SHARD_COUNT;
-            scan.scanned++;
+            if (!ownsShard.test(shard)) {
+                continue;
+            }
+            scan.scannedShards.add(shard);
             if (collectShard(scan, shard, limits, pages)) {
                 scan.playerCapHit = true;
                 scan.stoppedShard = shard;
@@ -274,6 +287,20 @@ final class ReconcileRound {
                 int shard = Math.floorMod(s.shard(), InboxShards.SHARD_COUNT);
                 byShard[shard] = s.complete() ? s.inconsistent() : Math.max(byShard[shard], s.inconsistent());
             }
+            return total();
+        }
+
+        /** 成员表变化后清理不再归本副本负责的分片读数，避免卸片后 gauge 残留在旧值；仍归本副本的分片告警保留。 */
+        int retainShards(java.util.function.IntPredicate ownsShard) {
+            for (int s = 0; s < InboxShards.SHARD_COUNT; s++) {
+                if (!ownsShard.test(s)) {
+                    byShard[s] = 0;
+                }
+            }
+            return total();
+        }
+
+        private int total() {
             int total = 0;
             for (int n : byShard) {
                 total += n;

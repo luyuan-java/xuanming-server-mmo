@@ -259,6 +259,16 @@ public final class RedisKeys {
         return prefix + "guild:{rank}:all";
     }
 
+    /** 帮会写分版本哈希 {@code game:guild:{rank}:ver}（HASH：field=guild_id，value=score_version；与 {@link #guildRankAll} 同槽）。 */
+    public String guildRankVersions() {
+        return prefix + "guild:{rank}:ver";
+    }
+
+    /** 帮会解散墓碑 {@code game:guild:{rank}:tomb}（ZSET：member=guild_id，score=过期 Unix ms，TTL 24h；与 {@link #guildRankAll} 同槽）。 */
+    public String guildRankTombstones() {
+        return prefix + "guild:{rank}:tomb";
+    }
+
     /** 帮会区榜 {@code game:guild:{rank}:zone:<zone_id>}（形状同 {@link #guildRankAll}；只放 zone ≠ 0 的帮）。基线 {@code guild_rank:zone:{z}}。 */
     public String guildRankZone(int zoneId) {
         return prefix + "guild:{rank}:zone:" + Integer.toUnsignedString(zoneId);

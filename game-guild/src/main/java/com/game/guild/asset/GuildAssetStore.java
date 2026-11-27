@@ -226,6 +226,14 @@ public interface GuildAssetStore {
      */
     List<Long> listDue(long nowMs, int limit, Deadline deadline);
 
+    /** 按 64 片 HRW 分片拉取到期行（{@code MOD(player_id,64) IN(...)} 放在 LIMIT 之前）。 */
+    default List<Long> listDue(long nowMs, int limit, Deadline deadline, com.game.common.workshard.WorkShard.SqlFilter filter) {
+        if (filter != null && filter.isNone()) {
+            return List.of();
+        }
+        return listDue(nowMs, limit, deadline);
+    }
+
     /**
      * 领取一行（Claim，asset_store.go:425-491）：自动提交的主键 CAS（{@code lease_until_ms < now} 才领）→ 回读整行 → 必须仍是 PENDING 且令牌
      * 是本次的，否则不下发（中间可能被人工终结——对一条已判 ABORTED 的捐献再扣一次 = 丢玩家的钱）→ payload 为空或解不开 → 毒行推迟。
@@ -300,6 +308,15 @@ public interface GuildAssetStore {
      * @throws Deadline.DependencyException 任一类出错（其余类的错误挂在 suppressed 上）
      */
     CleanupReport cleanupOnce(long nowMs, Duration terminalRetention, Duration counterRetention);
+
+    /** 按 64 片 HRW 分片清理终态指令、幂等去重记录与过期计数行（{@code MOD(player_id,64) IN(...)} 放在 LIMIT 之前）。 */
+    default CleanupReport cleanupOnce(long nowMs, Duration terminalRetention, Duration counterRetention,
+                                      com.game.common.workshard.WorkShard.SqlFilter filter) {
+        if (filter != null && filter.isNone()) {
+            return new CleanupReport(0, 0, 0);
+        }
+        return cleanupOnce(nowMs, terminalRetention, counterRetention);
+    }
 
     /** 读已清理终态行的最大截止；未知或故障必须抛异常，回档查询据此拒绝。 */
     default long terminalCleanupWatermark(Deadline deadline) {

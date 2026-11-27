@@ -427,6 +427,27 @@ public class GuildConfiguration {
      * 开启时任何一步失败都拒启：交叉校验、签名器（缺密钥）、循环参数（含退避基数取自配表 GuildRule.asset_op_retry_base_ms）。
      * 清理按自己的开关（与通道互相独立）。
      */
+    @Bean(initMethod = "start", destroyMethod = "close")
+    public com.game.discovery.workshard.RedisWorkShardMembership guildWorkShardMembership(
+            RedissonClient redis, RedisKeys redisKeys,
+            @org.springframework.beans.factory.annotation.Value("${game.zone-id:0}") int zoneId,
+            @org.springframework.beans.factory.annotation.Value("${game.instance-id:}") String configuredInstanceId,
+            @org.springframework.beans.factory.annotation.Value("${game.track:stable}") String track) {
+        String instanceId = configuredInstanceId == null || configuredInstanceId.isBlank()
+                ? "guild-" + java.util.UUID.randomUUID()
+                : configuredInstanceId.strip();
+        return new com.game.discovery.workshard.RedisWorkShardMembership(redis, redisKeys, "guild", zoneId, instanceId, track);
+    }
+
+    /** 集成测试兼容入口（不挂载分片成员表与 Micrometer 注册表）。 */
+    public GuildAssetRuntime guildAssetRuntime(GuildProperties props, ConfigTables guildConfigTables, GuildAssetStore store,
+                                               DataSource dataSource, RedissonClient redis, RedisKeys redisKeys,
+                                               GuildMetrics metrics, GuildWorkerPool settlePool, GuildWorkerPool workerPool,
+                                               ScheduledExecutorService timer, SceneAssetOpClients clients, NodeIdLease guildIdLease) {
+        return guildAssetRuntime(props, guildConfigTables, store, dataSource, redis, redisKeys, metrics, settlePool,
+                workerPool, timer, clients, guildIdLease, null, null);
+    }
+
     @Bean
     public GuildAssetRuntime guildAssetRuntime(GuildProperties props, ConfigTables guildConfigTables, GuildAssetStore store,
                                                DataSource dataSource, RedissonClient redis, RedisKeys redisKeys,
@@ -434,7 +455,9 @@ public class GuildConfiguration {
                                                @Qualifier("guildAssetSettlePool") GuildWorkerPool settlePool,
                                                @Qualifier("guildAssetWorkerPool") GuildWorkerPool workerPool,
                                                @Qualifier("guildAssetTimer") ScheduledExecutorService timer,
-                                               SceneAssetOpClients clients, NodeIdLease guildIdLease) {
+                                               SceneAssetOpClients clients, NodeIdLease guildIdLease,
+                                               com.game.discovery.workshard.RedisWorkShardMembership shards,
+                                               io.micrometer.core.instrument.MeterRegistry meterRegistry) {
         GuildProperties.AssetOp cfg = props.assetOp();
         AssetOpLoop loop = null;
         SceneEndpointSweeper sweeper = null;
@@ -459,8 +482,19 @@ public class GuildConfiguration {
             loop = new AssetOpLoop(loopConfig, store, caller, PersistedLedgerReader.of(dataSource), metrics,
                     System::currentTimeMillis, workerPool, settlePool, new SecureRandom(),
                     () -> ThreadLocalRandom.current().nextDouble());
+            if (shards != null) {
+                loop.withWorkShard(shards.membership());
+                if (meterRegistry != null) {
+                    com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(
+                            meterRegistry, "guild", "guild_asset_op", shards.membership());
+                }
+            }
+            if (meterRegistry != null) {
+                loop.withLiveness(com.game.discovery.workshard.LoopLivenessMeters.bind(
+                        meterRegistry, new com.game.common.workshard.LoopLiveness("guild", "asset_reconcile")));
+            }
             log.info("帮会资产通道已装配（caller=guild，签名密钥来自 GAME_ASSET_OP_SECRET_GUILD；定位 = {}location + scene 节点目录直连；"
-                    + "离线读已落盘账本已接线）", redisKeys.prefix());
+                    + "离线读已落盘账本与 64 片 HRW 分工已接线）", redisKeys.prefix());
         } else {
             log.error("帮会资产通道关闭（game.guild.asset-op.enabled=false）：捐献 / 兑换一律回 14026，不写任何行；升级、两个读页、清理与内部查询照常");
         }
@@ -468,6 +502,17 @@ public class GuildConfiguration {
         if (cfg.cleanupEnabled()) {
             cleanup = new AssetOpCleanup(store, cfg.cleanupInterval(), cfg.terminalRetention(), cfg.counterRetention(),
                     System::currentTimeMillis);
+            if (meterRegistry != null) {
+                cleanup.withLiveness(com.game.discovery.workshard.LoopLivenessMeters.bind(
+                        meterRegistry, new com.game.common.workshard.LoopLiveness("guild", "asset_cleanup")));
+            }
+            if (cfg.enabled() && shards != null) {
+                if (meterRegistry != null) {
+                    com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(
+                            meterRegistry, "guild", "guild_asset_cleanup", shards.membership());
+                }
+                cleanup.withWorkShard(shards.membership());
+            }
         } else {
             log.info("帮会资产账本清理关闭（game.guild.asset-op.cleanup-enabled=false）");
         }

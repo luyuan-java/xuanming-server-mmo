@@ -120,9 +120,25 @@ public final class BattleCompletionStore {
 
     /** 游标只用于公平扫描，不授予写权限；每次确认仍锁定原件。失败成员不会挡住后续成员。 */
     public java.util.List<BattleCompletionRow> pendingResults(long after) {
+        return pendingResults(after, com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+
+    /** 按 64 片分工扫描全局终局待投来源：片条件（MOD(battle_id,64) IN(...)）置于 LIMIT 之前。 */
+    public java.util.List<BattleCompletionRow> pendingResults(long after,
+            com.game.common.workshard.WorkShard.SqlFilter shardFilter) {
+        var filter = shardFilter == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL : shardFilter;
+        if (filter.isNone()) {
+            return java.util.List.of();
+        }
+        String shardClause = filter.isAll() ? "" : " AND " + filter.sql();
+        Object[] params = new Object[1 + filter.args().size()];
+        params[0] = PbMysql.uint64(after);
+        for (int i = 0; i < filter.args().size(); i++) {
+            params[1 + i] = filter.args().get(i);
+        }
         try(Connection c=source.getConnection()) {
             return db.findAll(c,BattleCompletionRow.class,
-                    "terminal_decision=1 AND result_published=0 AND battle_id>? ORDER BY battle_id LIMIT 16",PbMysql.uint64(after));
+                    "terminal_decision=1 AND result_published=0 AND battle_id>?"+shardClause+" ORDER BY battle_id LIMIT 16",params);
         } catch(SQLException failure) { throw new IllegalStateException("全局结果待投来源读取失败",failure); }
     }
     public java.util.List<BattlePlayerCompletionRow> pendingPlayers(long battle,long player) {
@@ -135,17 +151,40 @@ public final class BattleCompletionStore {
     /** 两类各保留8个名额；本轮固定最大battle，持续新流不能阻止旧失败项回头。 */
     public record PendingInboxBatch(long upperBattle,java.util.List<BattlePlayerCompletionRow> sources) { }
     public PendingInboxBatch pendingInbox(boolean first,long battle,long player,long upperBattle) {
+        return pendingInbox(first, battle, player, upperBattle, com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+
+    /** 按 64 片分工扫描个人终局待投来源（首投与等待确认共用 MOD(player_id,64) IN(...) 且位于 LIMIT 之前）。 */
+    public PendingInboxBatch pendingInbox(boolean first,long battle,long player,long upperBattle,
+            com.game.common.workshard.WorkShard.SqlFilter shardFilter) {
+        var filter = shardFilter == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL : shardFilter;
+        if (filter.isNone()) {
+            return new PendingInboxBatch(0, java.util.List.of());
+        }
+        String shardClause = filter.isAll() ? "" : " AND " + filter.sql();
         String stage=first?"inbox_seq=0":"inbox_seq>0";
         try(Connection c=source.getConnection()) {
             long stamp=nowMillis(c),upper=upperBattle;
-            if(upper==0)try(var query=c.prepareStatement("SELECT MAX(battle_id) FROM match_battle_player_completion WHERE applied=0 AND owner_revision>0 AND "+stage+" AND retry_ms<=?")) {
+            if(upper==0)try(var query=c.prepareStatement("SELECT MAX(battle_id) FROM match_battle_player_completion WHERE applied=0 AND owner_revision>0 AND "+stage+" AND retry_ms<=?"+shardClause)) {
                 query.setQueryTimeout(3);query.setLong(1,stamp);
+                for (int i = 0; i < filter.args().size(); i++) {
+                    query.setObject(2 + i, filter.args().get(i));
+                }
                 try(var rows=query.executeQuery()){if(rows.next()&&rows.getString(1)!=null)upper=Long.parseUnsignedLong(rows.getString(1));}
             }
             if(upper==0)return new PendingInboxBatch(0,java.util.List.of());
+            Object[] params = new Object[5 + filter.args().size()];
+            params[0] = stamp;
+            params[1] = PbMysql.uint64(upper);
+            params[2] = PbMysql.uint64(battle);
+            params[3] = PbMysql.uint64(battle);
+            params[4] = PbMysql.uint64(player);
+            for (int i = 0; i < filter.args().size(); i++) {
+                params[5 + i] = filter.args().get(i);
+            }
             var rows=db.findAll(c,BattlePlayerCompletionRow.class,
-                    "applied=0 AND owner_revision>0 AND "+stage+" AND retry_ms<=? AND battle_id<=? AND (battle_id>? OR (battle_id=? AND player_id>?)) ORDER BY battle_id,player_id LIMIT 8",
-                    stamp,PbMysql.uint64(upper),PbMysql.uint64(battle),PbMysql.uint64(battle),PbMysql.uint64(player));
+                    "applied=0 AND owner_revision>0 AND "+stage+" AND retry_ms<=? AND battle_id<=? AND (battle_id>? OR (battle_id=? AND player_id>?))"+shardClause+" ORDER BY battle_id,player_id LIMIT 8",
+                    params);
             return new PendingInboxBatch(upper,rows);
         } catch(SQLException failure){throw new IllegalStateException("个人来源到期分批读取失败",failure);}
     }

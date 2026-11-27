@@ -56,6 +56,49 @@ public final class RedissonGuildRankRedis implements GuildRankRedis {
             """;
 
     /**
+     * 无全服锁按版本条件写分（主仓第 23 条）：
+     * KEYS[1]=verHash, KEYS[2]=tombZset, KEYS[3]=allZset, KEYS[4]=zonesSet, KEYS[5]=zoneZset(可选);
+     * ARGV[1]=nowMs, ARGV[2]=version, ARGV[3]=score, ARGV[4]=member, ARGV[5]=zoneMember(可选).
+     */
+    static final String WRITE_VERSIONED = """
+            redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[1])
+            if redis.call('ZSCORE', KEYS[2], ARGV[4]) then return 0 end
+            local prev = redis.call('HGET', KEYS[1], ARGV[4])
+            if prev and tonumber(prev) > tonumber(ARGV[2]) then return 0 end
+            redis.call('HSET', KEYS[1], ARGV[4], ARGV[2])
+            redis.call('ZADD', KEYS[3], ARGV[3], ARGV[4])
+            if KEYS[5] then
+              redis.call('ZADD', KEYS[5], ARGV[3], ARGV[4])
+              redis.call('SADD', KEYS[4], ARGV[5])
+            end
+            return 1
+            """;
+
+    /**
+     * 无全服锁解散立墓碑并摘榜：
+     * KEYS[1]=verHash, KEYS[2]=tombZset, KEYS[3..]=rankKeys;
+     * ARGV[1]=nowMs, ARGV[2]=expireMs, ARGV[3]=tombTtlMs, ARGV[4]=member.
+     */
+    static final String TOMBSTONE_REMOVE = """
+            redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[1])
+            redis.call('ZADD', KEYS[2], ARGV[2], ARGV[4])
+            redis.call('PEXPIRE', KEYS[2], ARGV[3])
+            redis.call('HDEL', KEYS[1], ARGV[4])
+            for i = 3, #KEYS do
+              redis.call('ZREM', KEYS[i], ARGV[4])
+            end
+            return 1
+            """;
+
+    /** 合服折叠按版本条件从源区榜摘除：KEYS[1]=verHash, KEYS[2]=sourceZoneZset; ARGV[1]=maxVersion, ARGV[2]=member. */
+    static final String REMOVE_ZONE_IF_VERSION_AT_MOST = """
+            local prev = redis.call('HGET', KEYS[1], ARGV[2])
+            if prev and tonumber(prev) > tonumber(ARGV[1]) then return 0 end
+            redis.call('ZREM', KEYS[2], ARGV[2])
+            return 1
+            """;
+
+    /**
      * KEYS[1] = 锁，KEYS[2] = 全服榜，KEYS[3] = 区索引，KEYS[4] = 区榜（可缺）；
      * ARGV[1] = 令牌，ARGV[2] = 分数，ARGV[3] = 成员，ARGV[4] = 区索引成员（可缺）。
      */
@@ -176,6 +219,52 @@ public final class RedissonGuildRankRedis implements GuildRankRedis {
             args.add(ascii(zoneMember));
         }
         return flag(eval(RScript.Mode.READ_WRITE, ADD, RScript.ReturnType.INTEGER, keys, args.toArray()));
+    }
+
+    @Override
+    public CompletionStage<Boolean> writeVersioned(String verKey, String tombKey, String allKey, String zonesKey,
+                                                   String zoneKey, String zoneMember, long nowMs, long scoreVersion,
+                                                   String score, String member) {
+        List<String> keys = new ArrayList<>(List.of(verKey, tombKey, allKey, zonesKey));
+        List<byte[]> args = new ArrayList<>(List.of(ascii(nowMs), ascii(scoreVersion), ascii(score), ascii(member)));
+        if (zoneKey != null) {
+            keys.add(zoneKey);
+            args.add(ascii(zoneMember));
+        }
+        return flag(eval(RScript.Mode.READ_WRITE, WRITE_VERSIONED, RScript.ReturnType.INTEGER, keys, args.toArray()));
+    }
+
+    @Override
+    public CompletionStage<Boolean> tombstoneRemove(String verKey, String tombKey, List<String> rankKeys,
+                                                    long nowMs, long expireMs, long tombTtlMs, String member) {
+        List<String> keys = new ArrayList<>(rankKeys.size() + 2);
+        keys.add(verKey);
+        keys.add(tombKey);
+        keys.addAll(rankKeys);
+        return flag(eval(RScript.Mode.READ_WRITE, TOMBSTONE_REMOVE, RScript.ReturnType.INTEGER, keys,
+                ascii(nowMs), ascii(expireMs), ascii(tombTtlMs), ascii(member)));
+    }
+
+    @Override
+    public CompletionStage<Boolean> removeZoneIfVersionAtMost(String verKey, String sourceZoneKey,
+                                                              long maxVersion, String member) {
+        return flag(eval(RScript.Mode.READ_WRITE, REMOVE_ZONE_IF_VERSION_AT_MOST, RScript.ReturnType.INTEGER,
+                List.of(verKey, sourceZoneKey), ascii(maxVersion), ascii(member)));
+    }
+
+    @Override
+    public CompletionStage<Set<String>> allMembers(String rankKey) {
+        try {
+            return redis.<byte[]>getScoredSortedSet(rankKey, ByteArrayCodec.INSTANCE).valueRangeAsync(0, -1).thenApply(raw -> {
+                Set<String> out = new LinkedHashSet<>();
+                for (byte[] m : raw) {
+                    out.add(new String(m, StandardCharsets.US_ASCII));
+                }
+                return out;
+            });
+        } catch (RuntimeException e) {
+            return CompletableFuture.failedFuture(e);
+        }
     }
 
     @Override

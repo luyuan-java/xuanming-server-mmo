@@ -229,22 +229,48 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
 
     @Override
     public List<Long> listDue(long nowMs, int limit, Deadline deadline) {
-        if (limit <= 0) {
+        return listDue(nowMs, limit, deadline, com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+
+    @Override
+    public List<Long> listDue(long nowMs, int limit, Deadline deadline, com.game.common.workshard.WorkShard.SqlFilter filter) {
+        if (limit <= 0 || (filter != null && filter.isNone())) {
             return List.of();
         }
+        boolean sharded = filter != null && !filter.isAll();
+        String freshSql = sharded
+                ? "SELECT `op_id` FROM guild_asset_op WHERE `status` = ? AND " + filter.sql()
+                        + " AND `next_attempt_ms` <= ? AND `lease_until_ms` < ? AND `attempts` < ? ORDER BY `next_attempt_ms` ASC, `op_id` ASC LIMIT ?"
+                : LIST_DUE_FRESH;
+        String agedSql = sharded
+                ? "SELECT `op_id` FROM guild_asset_op WHERE `status` = ? AND " + filter.sql()
+                        + " AND `next_attempt_ms` <= ? AND `lease_until_ms` < ? AND `attempts` >= ? ORDER BY `next_attempt_ms` ASC, `op_id` ASC LIMIT ?"
+                : LIST_DUE_AGED;
         Deadline d = within(deadline, GuildLimits.ASSET_STORE_READ_BUDGET_MS);
         return tx.autocommit(d, db -> {
-            List<Long> fresh = db.ids(LIST_DUE_FRESH, PENDING, nowMs, nowMs, GuildLimits.ASSET_FRESH_ATTEMPT_LIMIT, limit);
+            List<Long> fresh = db.ids(freshSql, dueArgs(sharded ? filter.args() : List.of(),
+                    PENDING, nowMs, nowMs, GuildLimits.ASSET_FRESH_ATTEMPT_LIMIT, limit));
             if (fresh.size() >= limit) {
                 return fresh;
             }
             // 两段是两次独立的非锁读，期间 attempts 可能从 2 跳到 3，同一行两段都出现：按 op_id 去重，第一段排前
-            List<Long> aged = db.ids(LIST_DUE_AGED, PENDING, nowMs, nowMs, GuildLimits.ASSET_FRESH_ATTEMPT_LIMIT,
-                    limit - fresh.size());
+            List<Long> aged = db.ids(agedSql, dueArgs(sharded ? filter.args() : List.of(),
+                    PENDING, nowMs, nowMs, GuildLimits.ASSET_FRESH_ATTEMPT_LIMIT, limit - fresh.size()));
             Set<Long> merged = new LinkedHashSet<>(fresh);
             merged.addAll(aged);
             return List.copyOf(merged);
         });
+    }
+
+    private static Object[] dueArgs(List<Object> shardArgs, int status, long nowMs1, long nowMs2, int attemptLimit, int limit) {
+        List<Object> out = new ArrayList<>(shardArgs.size() + 5);
+        out.add(status);
+        out.addAll(shardArgs);
+        out.add(nowMs1);
+        out.add(nowMs2);
+        out.add(attemptLimit);
+        out.add(limit);
+        return out.toArray();
     }
 
     @Override
@@ -576,11 +602,22 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
 
     @Override
     public CleanupReport cleanupOnce(long nowMs, Duration terminalRetention, Duration counterRetention) {
+        return cleanupOnce(nowMs, terminalRetention, counterRetention, com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+
+    @Override
+    public CleanupReport cleanupOnce(long nowMs, Duration terminalRetention, Duration counterRetention,
+                                     com.game.common.workshard.WorkShard.SqlFilter filter) {
         if (terminalRetention.isNegative() || terminalRetention.isZero() || counterRetention.isNegative()
                 || counterRetention.isZero()) {
             throw new IllegalArgumentException("guild asset cleanup: retention must be positive (terminal=" + terminalRetention
                     + " counter=" + counterRetention + ")");
         }
+        if (filter != null && filter.isNone()) {
+            return new CleanupReport(0, 0, 0);
+        }
+        com.game.common.workshard.WorkShard.SqlFilter f = filter == null
+                ? com.game.common.workshard.WorkShard.SqlFilter.ALL : filter;
         long terminalMs = terminalRetention.toMillis();
         long opCutoffMs = Long.compareUnsigned(nowMs, terminalMs) > 0 ? nowMs - terminalMs : 0;
         CounterCutoffs cutoffs = counterCleanupCutoffs(nowMs, counterRetention.toMillis());
@@ -590,19 +627,19 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
         long clientRequests = 0;
         if (opCutoffMs > 0) {
             // 去重记录排在终态行之前、同一个截止（见接口注释）
-            clientRequests = cleanupInBatches(CleanupTable.CLIENT_REQUEST, () -> cleanupClientRequestsBatch(opCutoffMs), errors);
+            clientRequests = cleanupInBatches(CleanupTable.CLIENT_REQUEST, () -> cleanupClientRequestsBatch(opCutoffMs, f), errors);
             try {
                 // 先记水位再删；推进失败只跳过终态，去重记录与计数行仍照常清理（同基线）。
                 cleanupWatermark.advance(opCutoffMs, Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS));
-                ops = cleanupInBatches(CleanupTable.ASSET_OP, () -> cleanupTerminalOpsBatch(opCutoffMs), errors);
+                ops = cleanupInBatches(CleanupTable.ASSET_OP, () -> cleanupTerminalOpsBatch(opCutoffMs, f), errors);
             } catch (RuntimeException e) {
                 errors.add(new DependencyException("跳过终态指令清理：水位未获推进确认", e));
             }
         }
         long counters = cleanupInBatches(CleanupTable.DAILY_COUNTER,
-                () -> cleanupCountersBatch(GuildLimits.DAY_KEY_FLOOR, cutoffs.dayKey()), errors);
+                () -> cleanupCountersBatch(GuildLimits.DAY_KEY_FLOOR, cutoffs.dayKey(), f), errors);
         counters += cleanupInBatches(CleanupTable.DAILY_COUNTER,
-                () -> cleanupCountersBatch(GuildLimits.WEEK_KEY_FLOOR, cutoffs.weekKey()), errors);
+                () -> cleanupCountersBatch(GuildLimits.WEEK_KEY_FLOOR, cutoffs.weekKey(), f), errors);
         if (!errors.isEmpty()) {
             DependencyException failure = new DependencyException("guild asset cleanup failed (deleted ops=" + ops
                     + " counters=" + counters + " client_requests=" + clientRequests + ")", errors.getFirst());
@@ -672,11 +709,24 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
     }
 
     /** 普通读至多 500 个保留期外的三种终态 op_id（升序），逐行短事务点锁 + 点删并复核条件。 */
-    private Batch cleanupTerminalOpsBatch(long cutoffMs) {
+    private Batch cleanupTerminalOpsBatch(long cutoffMs, com.game.common.workshard.WorkShard.SqlFilter filter) {
+        boolean sharded = !filter.isAll();
+        String sql = sharded
+                ? "SELECT `op_id` FROM guild_asset_op WHERE `status` IN (?, ?, ?) AND " + filter.sql()
+                        + " AND `next_attempt_ms` < ? ORDER BY `op_id` ASC LIMIT ?"
+                : LIST_CLEANUP_TERMINAL_OPS;
+        List<Object> args = new ArrayList<>();
+        args.add(APPLIED);
+        args.add(REJECTED);
+        args.add(ABORTED);
+        if (sharded) {
+            args.addAll(filter.args());
+        }
+        args.add(cutoffMs);
+        args.add(GuildLimits.CLEANUP_BATCH_SIZE);
         List<Long> opIds;
         try {
-            opIds = tx.autocommit(Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS), db -> db.ids(LIST_CLEANUP_TERMINAL_OPS,
-                    APPLIED, REJECTED, ABORTED, cutoffMs, GuildLimits.CLEANUP_BATCH_SIZE));
+            opIds = tx.autocommit(Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS), db -> db.ids(sql, args.toArray()));
         } catch (RuntimeException e) {
             return new Batch(0, 0, e);
         }
@@ -697,11 +747,22 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
     }
 
     /** 普通读至多 500 个 created_ms 早于截止的去重记录主键（按创建时刻升序），逐行短事务点锁 + 点删并复核（基线 cleanupClientRequestsBatch）。 */
-    private Batch cleanupClientRequestsBatch(long cutoffMs) {
+    private Batch cleanupClientRequestsBatch(long cutoffMs, com.game.common.workshard.WorkShard.SqlFilter filter) {
+        boolean sharded = !filter.isAll();
+        String sql = sharded
+                ? "SELECT `player_id`, `client_request_id` FROM guild_client_request WHERE " + filter.sql()
+                        + " AND `created_ms` < ? ORDER BY `created_ms` ASC LIMIT ?"
+                : LIST_CLEANUP_CLIENT_REQUESTS;
+        List<Object> args = new ArrayList<>();
+        if (sharded) {
+            args.addAll(filter.args());
+        }
+        args.add(cutoffMs);
+        args.add(GuildLimits.CLEANUP_BATCH_SIZE);
         List<ClientRequestKey> keys;
         try {
-            keys = tx.autocommit(Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS), db -> db.list(LIST_CLEANUP_CLIENT_REQUESTS,
-                    rs -> new ClientRequestKey(GuildJdbc.u64(rs, 1), GuildJdbc.u64(rs, 2)), cutoffMs, GuildLimits.CLEANUP_BATCH_SIZE));
+            keys = tx.autocommit(Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS), db -> db.list(sql,
+                    rs -> new ClientRequestKey(GuildJdbc.u64(rs, 1), GuildJdbc.u64(rs, 2)), args.toArray()));
         } catch (RuntimeException e) {
             return new Batch(0, 0, e);
         }
@@ -721,12 +782,24 @@ public final class JdbcGuildAssetStore implements GuildAssetStore {
      * 普通读至多 500 个 period_key 落在 [floor, cutoff] 的计数行主键，逐行短事务点锁 + 点删并复核范围。前提：cutoff 来自
      * {@link #counterCleanupCutoffs}，从不删到仍可能被在途预留 upsert 写的上一周期行。
      */
-    private Batch cleanupCountersBatch(int floor, int cutoff) {
+    private Batch cleanupCountersBatch(int floor, int cutoff, com.game.common.workshard.WorkShard.SqlFilter filter) {
+        boolean sharded = !filter.isAll();
+        String sql = sharded
+                ? "SELECT player_id, counter_kind, ref_id, period_key FROM guild_daily_counter WHERE " + filter.sql()
+                        + " AND period_key BETWEEN ? AND ? ORDER BY player_id, counter_kind, ref_id, period_key LIMIT ?"
+                : LIST_CLEANUP_COUNTERS;
+        List<Object> args = new ArrayList<>();
+        if (sharded) {
+            args.addAll(filter.args());
+        }
+        args.add(floor);
+        args.add(cutoff);
+        args.add(GuildLimits.CLEANUP_BATCH_SIZE);
         List<CounterKey> keys;
         try {
-            keys = tx.autocommit(Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS), db -> db.list(LIST_CLEANUP_COUNTERS,
+            keys = tx.autocommit(Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS), db -> db.list(sql,
                     rs -> new CounterKey(GuildJdbc.u64(rs, 1), rs.getInt(2), GuildJdbc.u32(rs, 3), GuildJdbc.u32(rs, 4)),
-                    floor, cutoff, GuildLimits.CLEANUP_BATCH_SIZE));
+                    args.toArray()));
         } catch (RuntimeException e) {
             return new Batch(0, 0, e);
         }

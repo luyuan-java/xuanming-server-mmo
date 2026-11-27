@@ -48,9 +48,37 @@ public class GlobalMatchConfiguration {
     @Bean @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     GlobalMatchStore globalMatchStore(DataSource source,GlobalMatchProperties config,MatchProperties properties)throws java.sql.SQLException{return new GlobalMatchStore(source,config,properties);}
     @Bean(initMethod="start",destroyMethod="close") @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
+    com.game.discovery.workshard.RedisWorkShardMembership matchWorkShardMembership(
+            org.redisson.api.RedissonClient redis, com.game.discovery.RedisKeys keys,
+            com.game.match.MatchInstance instance,
+            @Value("${game.track:stable}") String track,
+            ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters){
+        var membership = new com.game.discovery.workshard.RedisWorkShardMembership(
+                redis, keys, com.game.discovery.NodeTypes.MATCH, 0, instance.id(), track);
+        var registry = meters.getIfAvailable();
+        if (registry != null) {
+            com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "match", "match_terminal_result", membership.membership());
+            com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "match", "match_terminal_player", membership.membership());
+            com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "match", "match_rank_removal", membership.membership());
+        }
+        return membership;
+    }
+    @Bean(initMethod="start",destroyMethod="close") @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     RatingRankOutbox ratingRankOutbox(DataSource source,GlobalRankProperties config,GlobalMatchStore schema,
-            ObjectProvider<com.game.match.ranked.RankedStore> rankedStore){
-        return new RatingRankOutbox(source,config).withRankedStore(rankedStore.getIfAvailable());}
+            ObjectProvider<com.game.match.ranked.RankedStore> rankedStore,
+            ObjectProvider<com.game.discovery.workshard.RedisWorkShardMembership> workShard,
+            ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters){
+        var outbox = new RatingRankOutbox(source,config).withRankedStore(rankedStore.getIfAvailable());
+        var shards = workShard.getIfAvailable();
+        if (shards != null) {
+            outbox.withWorkShard(shards.membership());
+        }
+        var live = new com.game.common.workshard.LoopLiveness("match", "rank_outbox", 300L, System::currentTimeMillis);
+        var registry = meters.getIfAvailable();
+        if (registry != null) {
+            com.game.discovery.workshard.LoopLivenessMeters.bind(registry, live);
+        }
+        return outbox.withLiveness(live);}
     @Bean(initMethod="start",destroyMethod="close") @ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     GlobalMatchService globalMatchService(GlobalMatchStore store,GlobalMatchProperties config,MatchProperties props,NodeDirectory<BattleNodeInfo> directory,
             MatchIds ids,RatingReader ratings,ScenePreparer scenes,NodeCalls<BattleNodeService> calls,PlayerStatusReader players,PlacementStore projections,GatherHooks hooks,

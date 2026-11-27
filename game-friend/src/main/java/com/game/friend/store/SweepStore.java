@@ -83,13 +83,30 @@ public final class SweepStore {
 
     /** 终态好友申请（mode 不是 delete 时只数不删）。{@code keepGoing} 在逐行删之间检查（单轮预算）。 */
     public Result sweepTerminalRequests(String mode, int retentionDays, int batchLimit, long nowMs, BooleanSupplier keepGoing) {
+        return sweepTerminalRequests(mode, retentionDays, batchLimit, nowMs, keepGoing,
+                com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+
+    /** 按 64 片 HRW 分片清理终态好友申请（分片条件 {@code MOD(to_player_id,64) IN(...)} 放在 LIMIT 之前，提交点仍逐行复核条件）。 */
+    public Result sweepTerminalRequests(String mode, int retentionDays, int batchLimit, long nowMs, BooleanSupplier keepGoing,
+                                        com.game.common.workshard.WorkShard.SqlFilter filter) {
         long cutoff = cutoffMs(retentionDays, batchLimit, nowMs);
-        if (cutoff < 0) {
+        if (cutoff < 0 || (filter != null && filter.isNone())) {
             return Result.ok(0, 0);
         }
+        boolean sharded = filter != null && !filter.isAll();
+        String countSql = sharded
+                ? "SELECT COUNT(*) FROM (SELECT 1 FROM friend_request WHERE status IN (?, ?) AND " + filter.sql()
+                        + " AND updated_ms < ? LIMIT ?) AS bounded"
+                : COUNT_TERMINAL;
+        String listSql = sharded
+                ? "SELECT from_player_id, to_player_id FROM friend_request WHERE status IN (?, ?) AND " + filter.sql()
+                        + " AND updated_ms < ? LIMIT ?"
+                : LIST_TERMINAL;
         long pending;
         try {
-            pending = count(COUNT_TERMINAL, JdbcFriendStore.STATUS_ACCEPTED, JdbcFriendStore.STATUS_REJECTED, cutoff, batchLimit);
+            pending = count(countSql, buildArgs(sharded ? filter.args() : List.of(),
+                    JdbcFriendStore.STATUS_ACCEPTED, JdbcFriendStore.STATUS_REJECTED, cutoff, batchLimit));
         } catch (SQLException e) {
             return new Result(0, 0, e);
         }
@@ -110,8 +127,8 @@ public final class SweepStore {
         }
         List<long[]> candidates = new ArrayList<>();
         try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = prepare(c, LIST_TERMINAL, JdbcFriendStore.STATUS_ACCEPTED,
-                     JdbcFriendStore.STATUS_REJECTED, cutoff, batchLimit);
+             PreparedStatement ps = prepare(c, listSql, buildArgs(sharded ? filter.args() : List.of(),
+                     JdbcFriendStore.STATUS_ACCEPTED, JdbcFriendStore.STATUS_REJECTED, cutoff, batchLimit));
              ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
                 candidates.add(new long[] {JdbcFriendStore.readUid(rs, 1), JdbcFriendStore.readUid(rs, 2)});
@@ -136,13 +153,30 @@ public final class SweepStore {
 
     /** 零好友容量行（没有 updated_ms 那道保险：created_ms = 0 的零好友行被回收无害，补行时按权威边数重算）。 */
     public Result sweepIdleCapacityRows(String mode, int retentionDays, int batchLimit, long nowMs, BooleanSupplier keepGoing) {
+        return sweepIdleCapacityRows(mode, retentionDays, batchLimit, nowMs, keepGoing,
+                com.game.common.workshard.WorkShard.SqlFilter.ALL);
+    }
+
+    /** 按 64 片 HRW 分片回收零好友容量行（{@code MOD(player_id,64) IN(...)} 放在 LIMIT 之前）。 */
+    public Result sweepIdleCapacityRows(String mode, int retentionDays, int batchLimit, long nowMs, BooleanSupplier keepGoing,
+                                        com.game.common.workshard.WorkShard.SqlFilter filter) {
         long cutoff = cutoffMs(retentionDays, batchLimit, nowMs);
-        if (cutoff < 0) {
+        if (cutoff < 0 || (filter != null && filter.isNone())) {
             return Result.ok(0, 0);
         }
+        boolean sharded = filter != null && !filter.isAll();
+        String listSql = sharded
+                ? "SELECT player_id FROM friend_capacity WHERE friend_count = 0 AND " + filter.sql() + " AND created_ms < ? LIMIT ?"
+                : LIST_IDLE_CAPACITY;
+        List<Object> listArgs = new ArrayList<>();
+        if (sharded) {
+            listArgs.addAll(filter.args());
+        }
+        listArgs.add(cutoff);
+        listArgs.add(batchLimit);
         List<Long> ids = new ArrayList<>();
         try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = prepare(c, LIST_IDLE_CAPACITY, cutoff, batchLimit);
+             PreparedStatement ps = prepare(c, listSql, listArgs.toArray());
              ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
                 ids.add(JdbcFriendStore.readUid(rs, 1));
@@ -166,6 +200,16 @@ public final class SweepStore {
             }
         }
         return Result.ok(idle, deleted);
+    }
+
+    private static Object[] buildArgs(List<Object> shardArgs, int status1, int status2, long cutoff, int batchLimit) {
+        List<Object> args = new ArrayList<>(shardArgs.size() + 4);
+        args.add(status1);
+        args.add(status2);
+        args.addAll(shardArgs);
+        args.add(cutoff);
+        args.add(batchLimit);
+        return args.toArray();
     }
 
     /** 直调用：按主键删一行容量行（提交点复核由 WHERE 保证；测试钉住）。 */

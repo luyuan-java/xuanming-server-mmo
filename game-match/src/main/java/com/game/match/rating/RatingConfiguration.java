@@ -110,9 +110,21 @@ public class RatingConfiguration {
     @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name="game.match.global.enabled",havingValue="true")
     public BattleCompletionReplay battleCompletionReplay(BattleCompletionStore source,com.game.match.global.GlobalMatchStore formations,OutcomePublisher publisher,
             @org.springframework.beans.factory.annotation.Qualifier("matchBattleInboxClient")
-            org.apache.dubbo.config.ReferenceConfig<com.game.api.PlayerInboxService> inbox, MatchMetrics metrics) {
-        return new BattleCompletionReplay(source,formations,inbox.get(),publisher,
+            org.apache.dubbo.config.ReferenceConfig<com.game.api.PlayerInboxService> inbox, MatchMetrics metrics,
+            ObjectProvider<com.game.discovery.workshard.RedisWorkShardMembership> workShard,
+            ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters) {
+        var replay = new BattleCompletionReplay(source,formations,inbox.get(),publisher,
                 System.getenv(com.game.api.PlayerInboxService.BATTLE_SECRET_ENV),System::currentTimeMillis,metrics);
+        var shards = workShard.getIfAvailable();
+        if (shards != null) {
+            replay.withWorkShard(shards.membership());
+        }
+        var live = new com.game.common.workshard.LoopLiveness("match", "terminal_replay", 300L, System::currentTimeMillis);
+        var registry = meters.getIfAvailable();
+        if (registry != null) {
+            com.game.discovery.workshard.LoopLivenessMeters.bind(registry, live);
+        }
+        return replay.withLiveness(live);
     }
 
     /** COMPLETE同TX留下的全局去向，和个人Inbox投递独立；仅原字节的RF3/all ACK后标记已投。 */

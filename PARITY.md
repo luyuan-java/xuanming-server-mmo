@@ -1482,19 +1482,12 @@ Java 版 `0.1.0-SNAPSHOT` 待做,做同一组行为:
 - **验证口径**:加分区后不停服,新分区被消费、旧分区照常;同一实例几个分区同时落库时无死锁、无重复行;清理时两个实例不会同删一个桶。
 - 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-06 后台分片归属哈希修复与收件箱对账分工（Java 待做补充）
+### 2026-11-06 后台分片归属哈希修复与收件箱对账分工（Java 已对齐）
 
-主仓 commit：工作区未提交；Java 版本 `0.1.0-SNAPSHOT`，待做。本条补充已有「全服匹配」与「交易合同推进按片分工」记录，并登记收件箱对账的分工缺口；旧记录保留。
-
-- **主仓实现**：`go/shared/workshard.Owner` 成为 player_inbox、match、trade 共用的 HRW 打分入口，使用 `SHA-256(成员 + NUL 字节 + 键)` 的前 8 字节按大端序取 `uint64`。inbox 保留片号的十进制键，Match 保留池与后台工作的原键；各服务继续维护自己的成员表和未同步、空表处理。旧 FNV-1a 对短数字后缀扩散不足，可能让同一副本承担整组分片。
-- **切换边界**：本次更换算法会重新分配现有键；主仓尚未上线，归属不进持久数据，无需数据迁移。最小迁移只指固定新算法后的成员增删，不指此次算法替换；固定样本的分散回归不保证任意成员集合、任意键都均匀分配。分工只减少重复劳动，写入仍由各自提交点的锁、版本条件或租约保证正确性。
-- **Java 待做**：
-  - `game-inbox` 的 `InboxMaintenance.elected` 仍只在当选领导者后启动 `reconcileRound`。将只读对账按固定分片分给 stable 副本，每副本保留独立轮次预算；canary 不参与，成员表未就绪或自身未注册时跳过对账，临时重连保留上一份成员表。成员变化时清理不再归本副本的 gauge，保留不一致告警；其他领导者维护任务不随之迁移。
-  - `game-match` 的按池撮合及后台分工、`game-trade` 的合同推进与收据 ACK，继续按各自已有待做记录实施。归属只负责分工，保持成员表为空时继续工作的策略与 SQL 提交互斥、幂等边界。
-  - 服务端内部按 Java 惯用方式实现，不要求复制 Go 的 SHA-256 选型或逐键归属映射。公开接口回归覆盖固定生产形状短键的分散、成员顺序与重复成员不影响结果、增加成员只迁移给新成员、删除成员只迁移原属它的键，以及空身份、未注册、未同步和 canary 的行为。
-- **设计来源**：主仓 `docs/design/player-inbox-service.md` §9.3、`docs/design/global-match-hierarchical-pools.md` §5.2、`docs/design/jubaozhai-market.md` §15.8。
-- **已有验证证据**：Codex 在修复前运行新增共享分布用例，最初 7 组前缀均失败，其中 `team-launch:` 与 `rank-source:3:` 的 64 片曾全部归同一副本；修复后 `shared/workshard` 与 `shared/inboxcontract` 的完整包测试通过。这些证据不代表 Go 服务与 C++ 整体已通过，后续验证以主仓 `docs/PROGRESS.md` 为准。
-- 本条仅补充 Java 待做记录，没有修改 Java 代码，也没有运行 Java 构建或测试。
+2026-11-27 已对齐：
+- `game-common` `WorkShard` 采用 `SHA-256(member + 0x00 + key)` 大端前 8 字节 HRW 打分，支持 64 片 `SqlFilter`、`hasActiveMembers()`、`isSelfRegistered()` 与 `ownedCount(kind)`；`game-discovery` `RedisWorkShardMembership` 维护 stable 活跃成员表（canary 不注册且不占片）。
+- `game-inbox`：`ReconcileRound` 新增按 64 片过滤的 `run`/`collect` 与 `Tally.retainShards`（成员变化时清理非本副本片 gauge、保留本片不一致计数）；`InboxMaintenance` 挂载 `WorkShard.Membership` 与 `LoopLiveness`，只读对账在每个 stable 副本独立定时分片运行（成员表未就绪、为空或未注册/canary 跳过，其他领导者任务 `notifyRound`/`gaugeRound` 仍仅在领导者运行）；`InboxConfiguration` 完成装配并绑定 Micrometer。
+- **验证**：`game-common` `WorkShardTest` + `LoopLivenessTest` **3/3 PASS**；`game-discovery` `RedisWorkShardMembershipTest` + `LoopLivenessMetersTest` + `RedisKeysGoldenTest` + `RedisKeysNamespaceTest` **10/10 PASS**；`game-inbox` `InboxReconcileShardingTest` + `BattleInboxRecoveryTest` + `InboxOwnerAdmissionTest` **14/14 PASS**。
 
 ### 2026-11-06 Match 损坏结果与原件冲突保留位点（Java 已对齐）
 
@@ -1688,18 +1681,13 @@ Go login 与 Java game-login 的创角白名单均移除 `06_thunder_caster_boy`
 - **写者闸门耗时指标**（主仓缺口清单第 20 条，先测再改）：
   - 2026-11-27 已对齐：`game-common` `WriterAuthority` 新增低基数阶段耗时回调 `GateObserver`（`before_begin`/`enter`/`read`/`pin`/`revalidate`），在 `verifyPhysical` 与 `begin` 中采集真实耗时；`game-discovery` `AuthorityDataSourcePolicy` 通过 Micrometer `Timer("writer.gate")` 导出同口径 `writer_gate_seconds{logical_db, phase}` 及 12 档指数桶（`0.2ms..409.6ms`）；`WriterGateMetricsTest` 1/1 PASS。
 
-### 2026-11-10 资产指令重投与匹配终局发件箱按玩家分片(主仓第 25 条已落码未编译,Java 待做)
+### 2026-11-10 资产指令重投与匹配终局发件箱按玩家分片（Java 已对齐）
 
-主仓 commit:未提交;Java 版本 `0.1.0-SNAPSHOT`,待做。服务端内部改动,不涉及客户端契约。说明见主仓 `docs/PROGRESS.md` 2026-11-10「资产指令重投与终局发件箱按玩家分片」条目,设计见主仓 `docs/design/assetop-redelivery-sharding-20261110.md`。
-
-- **主仓的口径**:帮会、交易的资产指令重投,以及全服匹配的终局发件箱,以前每个副本都读同一个到期队头,再在租约 CAS 上互撞,加副本吞吐不涨。现在按 64 片分工,片条件写在 SQL 的 `LIMIT` 之前,每个副本只读自己负责的片:
-  - 资产指令(帮会 / 交易)片号 = `player_id % 64`,同一玩家的未决指令只归一个副本;
-  - 匹配的整局结果表一局一行、没有玩家列,片号 = `battle_id % 64`;个人结算片号 = `player_id % 64`,首投与等待确认两页共用;
-  - 成员表 = 本 zone(帮会、交易)或全服(匹配)注册的 stable 实例,canary 不进;成员表为空时全部副本都做,本实例不在表里时不做;
-  - 正确性仍由原有的租约 / 状态 CAS 保证,分工只省重复劳动;落地唤醒、提交后的同步投递、日对账与自动放弃不看归属。
-- **Java 要核对**:Java 版帮会 / 交易的资产重投循环和匹配的终局发件箱,是不是每个副本都扫同一个到期队头。是的话按同一口径分片(条件在 SQL 的 `LIMIT` 之前,片号按玩家,结果行没有玩家列时按局号),成员表只圈连同一个库的副本(圈多了会有片没人做,圈少了只是重复)。选主、打分、成员表按 Java 惯用方式实现,不必照抄 Go。
-- **回归要覆盖**:只读本副本的片、成员表为空时全做、本实例不在表里时不做;两个副本互补分工时每一行恰好投一次;一片都不负责时一行都不领;落地唤醒不受归属影响。
-- 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐（设计见 `docs/design/assetop-redelivery-sharding-20261110.md`）：
+- **帮会资产重投**：`game-guild` `GuildAssetStore` / `JdbcGuildAssetStore` / `AssetOpLoop` / `GuildConfiguration` 接入 `RedisWorkShardMembership`（本 zone stable 实例），`listDue` 将 `MOD(player_id,64) IN(...)` 置于 `LIMIT ?` 之前；成员表空全做、未注册/canary 跳过；租约 CAS 不变。
+- **交易资产重投**：`game-trade` `CommerceRuntime` / `CommerceStore` / `CommerceConfiguration` 对 `trade_asset_op`（`player_id % 64`）、合同（`commerce_id % 64`）、收据 ACK（`op_id % 64`）全量按 64 片 HRW 分工，条件置于 `LIMIT ?` 之前。
+- **匹配终局发件箱与投榜/摘榜发件箱**：`game-match` `BattleCompletionStore` / `BattleCompletionReplay` 对整局结果表（`match_battle_completion`）按 `MOD(battle_id,64) IN(...)` 前置于 `LIMIT 16`、对个人结算首投与等待确认两页（`match_battle_player_completion`）共用 `MOD(player_id,64) IN(...)` 前置于 `LIMIT 8`，截止自动放弃（`terminalDeadlineCandidates`）不看归属；`RatingRankOutbox` 对 `source_epoch` 投榜与 `match_rank_removal` 摘榜（`MOD(player_id,64) IN(...)` 前置于 `LIMIT 16`）按全服 `matchWorkShardMembership` 分工；`GlobalMatchConfiguration` / `RatingConfiguration` 完成装配。
+- **验证**：`game-guild` 64/64 PASS、`game-match` `MatchOutboxShardingAndLivenessTest` + `BattleCompletionShardingTest` 等 **5/5 PASS**、`game-trade` `TradeShardingAndEventWakeTest` + `CommerceRuntimeTest` 等 **18/18 PASS**（1 TiDB skip）。
 
 ### 2026-11-10 战斗道具预留(Java 待做)
 
@@ -1809,39 +1797,21 @@ C++ 版设计见 C++ 仓 `docs/design/gate-client-heartbeat.md` §14。
 
 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
-### 2026-11-11 资产指令重投分片第二批:邮件附件与 GM 回收的重投、帮会与交易的终态清理、缺片告警(主仓第 25 条已落码未编译,Java 待做)
+### 2026-11-11 资产指令重投分片第二批:邮件附件与 GM 回收的重投、帮会与交易的终态清理、缺片告警（Java 已对齐）
 
-主仓 commit:未提交;Java 版本 `0.1.0-SNAPSHOT`,待做。服务端内部改动,不涉及客户端契约。说明见主仓 `docs/PROGRESS.md` 2026-11-11「资产指令重投分片第二批」条目,设计见主仓 `docs/design/assetop-redelivery-sharding-20261110.md` §10~§12。
+2026-11-27 已对齐（设计见 `docs/design/assetop-redelivery-sharding-20261110.md` §10~§12）：
+- **邮件附件重投**：`game-mail` `MailStore.due(d, now, filter)` 与 `MailDeliveryWorker` 按本 zone stable 成员表以 `MOD(player_id,64) IN(...)`（置于 `LIMIT 32` 之前）分片重投附件。
+- **GM 批量回收核对**：Java 版当前未包含 GM 批量回收表与后台派发/重投服务（不适用）。
+- **帮会 / 交易终态清理**：`game-guild` `AssetOpCleanup` / `JdbcGuildAssetStore.cleanupOnce` 复用帮会成员表按独立类别键 `guild_asset_cleanup` + `MOD(player_id,64) IN(...)`（置于 `LIMIT ?` 之前）分片清理终态指令/去重键/过期计数行，资产通道关闭（未注册成员表）时照旧清全量；`game-trade` 无后台终态删除任务（交易合同与资产指令行长期保留）。
+- **缺片指标与告警同源**：`game-discovery` `LoopLivenessMeters.bindOwnedShards` 导出低基数 Gauge `game.workshard.owned_shards{service,kind}`（已绑定至 `guild`/`mail`/`trade`/`friend`/`match` 各分片类别），供各副本求和 < 64 的缺片告警同源判定。
+- **验证**：`game-discovery` 10/10 PASS、`game-mail` `MailShardingAndLivenessTest` 等 **3/3 PASS**、`game-guild` `GuildShardingAndRankVersionTest` 等 **64/64 PASS**、`game-trade` 18/18 PASS。
 
-- **主仓的口径**:
-  - 邮件附件到账与 GM 批量回收的资产重投,和帮会 / 交易一样按 `player_id % 64` 分片,片条件写在 SQL 的 `LIMIT` 之前;
-  - 成员表只圈本 zone 注册的 stable 实例。回收的流水库虽然全集群一份,但 data_service 随 zone 部署、开关各 zone 自有,圈全服会让关了回收的 zone 名下的片没人做,所以宁可每个 zone 各扫一份;
-  - 帮会 / 交易的终态行清理(终态指令、幂等键去重记录、过期计数行)不再每个副本都清全部行,复用重投那份成员表按 `player_id` 分片,类别键与重投分开;没有成员表(通道关着)时照旧清全部行;
-  - 告警:各副本负责片数之和低于 64 持续 5 分钟报 warning;再与最老未决年龄超过 30 分钟同时持续 30 分钟升 critical。
-- **Java 要核对**:Java 版邮件附件、GM 回收的资产重投,以及帮会 / 交易的终态清理,是不是每个实例都扫同一批行。是的话按同一口径分片:成员表只圈连同一个库、而且都在跑这项工作的实例,圈不准宁可不分;清理的删除仍在提交点复核原条件。再补「各实例负责片数之和应为 64」的指标与告警。实现按 Java 惯用方式,不必照抄 Go。
-- **回归要覆盖**:只读、只删本实例的片;成员表为空时全做;本实例不在表里时不做;不分工时与改前行为相同;告警阈值与片数同源。
-- 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+### 2026-11-11 帮会积分写入不再抢全服锁（Java 已对齐）
 
-### 2026-11-11 帮会积分写入不再抢全服锁(主仓第 23 条已落码未编译,Java 待核对)
-
-主仓 commit:工作区未提交(main,落码时 HEAD 为 `e0790ad40`);Java 版本 `0.1.0-SNAPSHOT`,待核对。服务端内部改动,客户端不可见,客户端契约不变。
-
-主仓资料:设计 `docs/design/guild_ranking_architecture_zh.md` §2、§3、§5、§7、§8;进度与验收 `docs/PROGRESS.md` 2026-11-11「帮会积分写入不再抢全服锁」。
-
-- **主仓改了什么**:原来写分、解散摘榜、启动重建、合服折叠都抢一把全服锁,全服帮会的写分串行。现在:
-  - `guild` 表加 `score_version`,写分事务里加 1;
-  - 榜上每项的版本记在同区 HASH,所有写榜走一段 Lua 条件写入:版本不比已记的旧才写,乱序到达的旧写入被丢弃;
-  - 解散时在帮会合服组的每个区立墓碑(同区 ZSET,存到期时刻,保留 24 小时;立新墓碑时删掉到期的,墓碑键带 TTL),立墓碑与摘榜是同一段脚本;
-  - 重建按版本合并,不再整键替换,删条目之前回库复核;折叠按版本合并,按读到的版本摘源区;
-  - 锁只留给重建与折叠互斥。
-- **Java 要核对**:「帮会核心」行有意差异⑧写着 Java 的维护锁「请求路径等锁受预算约束」,Java 的写分、摘榜可能同样串在一把锁上。核对三件事:
-  - 写分是不是全服串行;
-  - 不靠锁时,乱序到达的旧分会不会盖掉新分;
-  - 解散之后迟到的写分,会不会把帮会写回榜上。
-
-  有问题就按同一口径改:MySQL 分数带版本,写榜按版本条件写,解散留有期限的墓碑,重建不整键替换。实现按 Java 惯用方式,不必照抄 Go。Java 的排行键已统一 hash tag,墓碑要放在同一个 tag 下。
-- **回归要覆盖**:乱序旧写入被拒;重建不覆盖并发的新写入;解散后迟到的写入不复活;折叠遵守版本;快照之后新建的帮会不被重建删除。
-- 本条只登记待核对,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐（设计见 `docs/design/guild_ranking_architecture_zh.md` §2、§3、§5、§7、§8）：
+- **同槽版本 HASH 与墓碑 ZSET**：`game-discovery` `RedisKeys` 新增与 `{rank}` 同槽的 `guildRankVersions()`（`game:guild:{rank}:ver`）与 `guildRankTombstones()`（`game:guild:{rank}:tomb`），`RedisKeysSamples`/`RedisKeysGoldenTest` 同步更新（112 项全通过）。
+- **无锁条件写榜与墓碑摘榜**：`game-guild` `GuildRankRedis` / `RedissonGuildRankRedis` 新增 Lua 原子脚本 `writeVersioned`（拒旧版本与有效墓碑，并写 `all`/`zone`/`zones`）、`tombstoneRemove`（立 24h 墓碑、清理过期墓碑、`HDEL ver` 与 `ZREM` 同脚本完成）、`removeZoneIfVersionAtMost`；`GuildRanks` 新增 `writeVersioned`、`disbandTombstone`、`rebuildVersioned`（仅重建/折叠互斥，按版本合并且删多余条目之前回库复核）、`foldZoneVersioned`；`GuildService` 写分（`updateGuildScore`）、创建与解散及 `GuildInternalServiceProvider` 删除角色解散帮会全部切换至无锁版本写与墓碑摘榜，不再抢全服维护锁。
+- **验证**：`game-discovery` `RedisKeysGoldenTest` 4/4 + `RedisKeysNamespaceTest` 4/4 PASS；`game-guild` `GuildShardingAndRankVersionTest` 2/2 + `GuildRanksTest` 18/18 + `GuildParityClosureTest` 6/6 + `GuildStoreResultsTest` 6/6 + `GuildServiceTest` 32/32 = **64/64 PASS**。
 
 ### 2026-11-11 gate 大厅心跳真实端到端验收（主仓已通过，Java 历史验证保持原范围）
 
@@ -2131,17 +2101,14 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
   - `game-gateway` 新增 `AdminKillSwitchController`（`GET`/`PUT`/`DELETE /admin/killswitch`，支持 `all`/`type`/`instance` 并经 `RedisKillSwitchRuleStore` 核对在线节点）与 `AdminApiKeyFilter`（SHA-256 常量时间比较口令、规范化路径防 `/admin;x=1/...` 绕过、未配口令 fail-closed、写接口强校验单值 `X-Admin-Operator` 与审计日志、可选 `machine-key` 仅限 `/admin/tables`）。
   - **验证**：`game-common` `KillSwitchTest` 7/7 PASS；`game-api` `KillSwitchProviderFilterTest` 5/5 PASS；`game-gateway` `AdminKillSwitchAndApiKeyTest` 2/2 + `LoginHttpServiceTest` 13/13 + `PassportEventControllerTest` 2/2 = **17/17 PASS**（注：robot 真实集群端到端关停演练待集成环境联调）。
 
-### 2026-11-12 去单点第二轮遗留项:清理任务按片分工、主从档连接复核、口令凭据归属、按副本计的限速(主仓已落码未编译,Java 待核对)
+### 2026-11-12 去单点第二轮遗留项:清理任务按片分工、主从档连接复核、口令凭据归属、按副本计的限速（Java 已对齐）
 
-主仓 commit:工作区未提交(main);Java 版本 `0.1.0-SNAPSHOT`,待核对。服务端内部与部署改动,不涉及客户端契约。设计见主仓 `docs/design/no-single-node-horizontal-scaling-20261001.md` §6.2、§6.5、§9,进度见主仓 `docs/PROGRESS.md` 2026-11-12「去单点第二轮的遗留项清零」。
-
-1. **每个副本都跑同一批的后台清理**:主仓好友服务的过期清理原来每个副本读同一批候选、删同一批行,加副本只多出重复读;改成按玩家 id 分 64 片,各副本只清自己的片。核对 Java 版各服务的定时清理是不是每个副本都跑全量。
-2. **MySQL 主从部署下的连接复用**:主仓的受管数据源原来只在新建物理连接时核对对端是可写主库,计划内切换后池里的老连接会继续读旧主库;改成每个事务进入前、连接池探活时都复核,复核不过丢弃连接并回可重试的错误。核对 Java 版的数据源(若支持 MySQL 主从部署)有没有同样的窗口。
-3. **口令凭据放哪**:主仓定为全服一份、放在登录服务自己的逻辑库,读库强一致,表结构由建表约束加启动时核对保证,不靠迁移脚本。核对 Java 版口令登录的凭据表归属与读一致性。
-4. **按副本计的限速**:主仓把会话索引补建 / 审计的扫描限速从每个副本各一份改成全服一份预算按份额分摊。核对 Java 版分给多个副本的后台扫描,限速是不是随副本数成倍放大。
-5. 核对结论是「不适用」或「已有等价」的项按 Java 仓规矩不再单独登记。
-
-本条只登记待核对,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 逐项核对并补齐（设计见 `docs/design/no-single-node-horizontal-scaling-20261001.md` §6.2、§6.5、§9）：
+1. **定时清理按 64 片分工**：`game-friend` `SweepStore` / `FriendSweep` / `FriendConfiguration` 接入 `RedisWorkShardMembership` + `LoopLiveness`，好友申请与待删关系过期清理按 `MOD(to_player_id,64) IN(...)` / `MOD(player_id,64) IN(...)`（置于 `LIMIT ?` 之前）分工，不再多副本重复扫同一批行；叠加 `game-mail`、`game-guild`、`game-inbox`、`game-match`、`game-trade` 全部后台扫描已完成 64 片分工。
+2. **MySQL 主从部署连接复用（已有等价）**：Java 写路径由 `AuthorityConnection.require` + `WriterAuthority.verifyPhysical` 与 `PlayerRouteAuthority.requireMeta(c, timeout, true)` 在**每笔事务内部**复核 `route_meta.writable=1`、代次 UUID 与 slot 围栏（`StrongTiDbConnectionPolicy` 强读会话策略同步兜底），不存在连接池复用旧主库连接的窗口。
+3. **口令凭据归属（已有等价）**：`game-login` `ProductionPasswordAuthenticator` / `PasswordAdmin` 将 `account.password_hash`（Argon2id）存于全局登录逻辑库、强一致直读，不依赖跨库迁移脚本。
+4. **按副本计的扫描限速（已有等价/不适用）**：Java 无多副本会话索引补建扫描器，其余多副本后台清理/重投已按固定 64 片 HRW 拆分给各副本，总扫描吞吐不随副本数成倍放大。
+- **验证**：`game-friend` `FriendSweepShardingTest` 1/1 + `FriendSweepTest` 4/4 = **5/5 PASS**。
 
 ### 2026-11-12 换场景节点期间客户端请求在 gate 暂存并按序重投(场景 lane;主仓已落码未编译,Java 待做)
 
@@ -2224,30 +2191,17 @@ Java 版按自己的 Netty、Dubbo 与部署形态实现同一套规则(不照�
 
 **验证**(Java 仓口径):移植主仓用例 `retire_removed_slots_test.go` 的 `TestRetireRemovedSlotsLeavesGenerationsRegisteredElsewhere`(别的集群的 UID、别的 namespace、空身份、认不出的文本、ServiceAccount 不在)、`TestRetireRemovedSlotsChecksOwnershipOnlyBeforeRetiring`、`TestRetireRemovedSlotsDoesNotRetireWhenOwnershipCannotBeRead`;`main_test.go` 的 `TestBootRecordsWhoRegisteredIt`、`TestIdentityFailureRegistersNothing`;真库 `TestRetireRemovedSlotsLeavesGenerationRegisteredElsewhereOnRealCatalog`、`TestRegistrationReadsBackTheRegisterRequest`。
 
-### 2026-11-12 回收派发与邮件过期清理按片分工、后台循环活性与每轮各自 recover(主仓第 25 条残余与第 35 条已落码未编译,Java 待做;补 11-11「资产指令重投分片第二批」)
+### 2026-11-12 回收派发与邮件过期清理按片分工、后台循环活性与每轮各自 recover（Java 已对齐）
 
-主仓 commit:11-11 写的部分已随 `4edb25640` 进 main,11-12 的部分在 main 工作区,未提交;Java 版本 `0.1.0-SNAPSHOT`,待做。服务端内部改动,不涉及客户端契约。说明与验证命令见主仓 `docs/PROGRESS.md` 2026-11-12「回收派发与 mail 过期清理按片分工、循环活性指标、删 mail 截断计数」「其余按片分工循环的活性、每轮各自 recover」两条,设计见主仓 `docs/design/assetop-redelivery-sharding-20261110.md` §14。
-
-- **主仓的口径**:
-  - GM 批量回收的派发循环(把已计划的回收指令推进到已派发)按 `player_id % 64` 分片,复用回收重投那份成员表(只圈本 zone 的 stable 实例),类别键与重投分开;邮件过期清理按邮件号分片(全服邮件没有收件人,不能按玩家分),复用附件重投那份成员表。片条件都写在 SQL 的 `LIMIT` 之前;正确性仍在提交点(状态推进与删除都复核原条件),分片只分工。
-  - 每个按片分工的后台循环各有一个「最近一次完整跑完一轮的时刻」指标:循环起跑时记一次,每一轮正常返回后记一次(这一轮业务失败也算跑完,panic 不算),只在有意退出前删掉序列。删序列不放进 defer:panic 退栈时 defer 也会跑,会把循环已死的证据一起删掉。没在跑这项工作的副本没有序列。这套语义只在一处实现(主仓 `go/shared/looplive`),各服务只给指标名。
-  - 停摆告警按副本判:当前时刻减指标值超过阈值并持续 5 分钟报 warning,不用 `max()` 聚合——别的副本活着不代表这个副本名下的片有人做。阈值取最坏一轮预算的若干倍,与代码常量同源,由契约测试钉住。
-  - 这些循环每一轮各自兜住 panic:一轮 panic 既不能打死进程(片会换主,一条解释不了的行会把副本挨个打死),也不能让循环悄悄退出(进程还在成员表里,名下的片从此没人做)。兜住后这一轮按结局未知处理(排空证明停在 HOLD),循环接着跑下一轮;另有一条通用告警,任何后台循环兜住过 panic 就报。
-  - 匹配服务经同一个包装函数起的十几个后台循环(撮合、成局推进、到期终局恢复、整队维护、观战维护)与投榜循环共用一个活性指标名,用一个固定的「点位」标签区分循环(值是代码里写死的循环名),停摆告警按实例、按点位判;阈值按最慢的循环(1 分钟一拍、一轮 30 秒预算)取 300 秒。
-  - 第 35 条:邮件列表读是所有类别一条查询、按(发件时刻, 邮件号)翻页,不存在「系统邮件活跃集被截断」的路径,所以删了截断计数与对应告警,同时删了另一个没有调用点的短路计数。
-- **Java 要核对**:
-  - Java 版 GM 回收的派发与邮件过期清理是不是每个实例都扫同一批行。是的话按同一口径分片;状态推进与删除仍在提交点复核原条件。
-  - Java 版的定时任务有没有「最近一次跑完」的指标和按实例判的停摆告警。没有就补,指标只用固定的少量标签,不带玩家号。
-  - 定时任务里一轮抛出未捕获异常之后的行为要逐个看:Spring 的 `@Scheduled` 默认记日志后继续下一拍;直接交给 `ScheduledExecutorService` 的周期任务抛异常后不再执行;自管线程会直接结束。目标是一轮失败不停循环、不退进程、有告警。
-  - 邮件列表读有没有同类「截断」指标或告警;没有对应的代码路径就不要照抄。
-- **回归要覆盖**:只读、只处理本实例的片;成员变化后新属主接手;成员表为空时全做,本实例不在表里时不做;一轮正常返回才更新活性,抛异常的一轮不更新但循环继续;有意退出后序列消失;告警阈值与代码常量同源。
-- 本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
+2026-11-27 已对齐（设计见 `docs/design/assetop-redelivery-sharding-20261110.md` §14）：
+- **邮件过期清理按邮件号分片**：`game-mail` `MailStore.cleanupExpired(d, now, limit, filter)` 与 `MailDeliveryWorker` 复用邮件成员表按 `MOD(mail_id,64) IN(...)`（置于 `LIMIT ?` 之前）分片清理过期邮件，跳过待领附件（`claim_state=2`）且绝不删 `mail_request_receipt`；Java 无 GM 批量回收派发服务（不适用）；经核对 `game-mail` 无死「截断」计数/指标，未做冗余照抄。
+- **统一循环活性与每轮 `Throwable` 兜底**：`game-common` 新增 `LoopLiveness`（启动记初始时刻、每轮正常返回刷新 `lastCompletedEpochSeconds`、未捕获 `Throwable` 兜住防 `ScheduledExecutorService` 静默停摆且不刷新活性并递增 panic 计数、仅在有意 `close()` 时触发摘除回调不放异常路径）；`game-discovery` 新增 `LoopLivenessMeters` 导出低基数 `game.loop.last_completed.epoch_seconds{service,loop}` 与 `game.loop.panic.total{service,loop}`（停摆阈值与代码常量同源，按单实例判定）。
+- **全服务接入**：已接入 `game-mail`（`MailDeliveryWorker`）、`game-guild`（`AssetOpLoop`/`AssetOpCleanup`）、`game-friend`（`FriendSweep`）、`game-inbox`（`InboxMaintenance` 分片对账）、`game-match`（`RatingRankOutbox`/`BattleCompletionReplay`）与 `game-trade`（`CommerceRuntime`）。
+- **验证**：`game-common` 3/3、`game-discovery` 10/10、`game-mail` 3/3、`game-friend` 5/5、`game-inbox` 14/14、`game-guild` 64/64、`game-match` 5/5、`game-trade` 18/18（1 TiDB skip）= **122/122 PASS**。
 
 ### 2026-11-12 收件箱删除空转的清理循环与两个配置项（Java 已对齐）
 
 主仓设计见 `docs/design/player-inbox-service.md` §9.1。2026-11-27 已对齐：删除 `game-inbox` 中空转的 `InboxMaintenance.sweepRound`、`InboxMaintenanceStore.sweepTerminal`、`InboxProperties` / `application.yaml` 的 `terminalRetention` 与 `sweepInterval`（Spring Boot 默认忽略未知配置键，旧配置照常启动）以及 `InboxMetrics` 的 `SWEEP_DELETED`；`BattleInboxRecoveryTest`（6/6）与 `InboxOwnerAdmissionTest`（6/6）12/12 PASS。
-
-本条只登记待做,没有修改 Java 代码,也没有运行 Java 构建或测试。
 
 ### 2026-11-12 断线重连清单收尾(主仓 R18 重连抖动、R7 世界频道登记不超过期望数、R8 两把锁已落码未编译,Java 待做)
 

@@ -105,13 +105,34 @@ public class MailConfiguration {
     ScheduledExecutorService assetTimer() {
         return Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("mail-asset-timer").daemon(true).factory());
     }
+    @Bean(initMethod = "start", destroyMethod = "close")
+    com.game.discovery.workshard.RedisWorkShardMembership mailWorkShardMembership(
+            org.redisson.api.RedissonClient redis, RedisKeys keys,
+            @Value("${game.zone-id:0}") int zoneId,
+            @Value("${game.instance-id:}") String configuredInstanceId,
+            @Value("${game.track:stable}") String track) {
+        String instanceId = configuredInstanceId == null || configuredInstanceId.isBlank()
+                ? "mail-" + UUID.randomUUID()
+                : configuredInstanceId.strip();
+        return new com.game.discovery.workshard.RedisWorkShardMembership(redis, keys, "mail", zoneId, instanceId, track);
+    }
     @Bean(destroyMethod = "close")
     MailDeliveryWorker deliveryWorker(MailStore store, DataSource source, org.redisson.api.RedissonClient redis, RedisKeys keys,
-            SceneAssetOpClients clients, ScheduledExecutorService assetTimer) {
+            SceneAssetOpClients clients, ScheduledExecutorService assetTimer,
+            com.game.discovery.workshard.RedisWorkShardMembership shards,
+            io.micrometer.core.instrument.MeterRegistry registry) {
         var scenes = new NodeDirectory<SceneNodeInfo>(redis, keys, NodeTypes.SCENE, SceneNodeInfo.parser());
         var locator = new SceneAssetLocator(new PlayerLocationDirectory(redis, keys), scenes, result -> {});
         var delivery = new com.game.discovery.asset.ReliableAssetDelivery(
                 locator, clients, "mail", System.getenv("GAME_ASSET_OP_SECRET_MAIL"), assetTimer, System::currentTimeMillis);
-        return new MailDeliveryWorker(store, delivery, new com.game.player.store.asset.PersistedAssetLedgerReader(source));
+        com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "mail", "mail_asset_op", shards.membership());
+        com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(registry, "mail", "mail_expiry_cleanup", shards.membership());
+        var deliveryLive = com.game.discovery.workshard.LoopLivenessMeters.bind(
+                registry, new com.game.common.workshard.LoopLiveness("mail", "asset_delivery"));
+        var cleanupLive = com.game.discovery.workshard.LoopLivenessMeters.bind(
+                registry, new com.game.common.workshard.LoopLiveness("mail", "expiry_cleanup"));
+        return new MailDeliveryWorker(store, delivery, new com.game.player.store.asset.PersistedAssetLedgerReader(source))
+                .withWorkShard(shards.membership())
+                .withLiveness(deliveryLive, cleanupLive);
     }
 }

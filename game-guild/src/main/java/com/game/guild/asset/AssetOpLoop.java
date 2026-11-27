@@ -128,6 +128,8 @@ public final class AssetOpLoop implements AssetOpProcessor {
 
     private final Object lifecycle = new Object();
     private volatile boolean running;
+    private volatile com.game.common.workshard.WorkShard.Membership workShard;
+    private volatile com.game.common.workshard.LoopLiveness liveness;
     /** 持 {@link #lifecycle}。 */
     private ScheduledExecutorService scheduler;
 
@@ -162,6 +164,18 @@ public final class AssetOpLoop implements AssetOpProcessor {
         return ledger != null;
     }
 
+    /** 挂载 64 片 HRW 成员表（按 player_id 分工重投；未挂载或空表时全片保活）。 */
+    public AssetOpLoop withWorkShard(com.game.common.workshard.WorkShard.Membership membership) {
+        this.workShard = membership;
+        return this;
+    }
+
+    /** 挂载循环活性跟踪器（每轮兜底 + 停摆告警）。 */
+    public AssetOpLoop withLiveness(com.game.common.workshard.LoopLiveness liveness) {
+        this.liveness = liveness;
+        return this;
+    }
+
     // ================================================================ 生命周期
 
     /** 启动 Tick（每 interval）与最老未决年龄刷新（每 30 s）。重复调用是空操作。 */
@@ -175,8 +189,14 @@ public final class AssetOpLoop implements AssetOpProcessor {
                     Thread.ofPlatform().name("guild-asset-reconcile").daemon(true).factory());
             long interval = config.interval().toMillis();
             // 固定间隔（上一轮结束后再等 interval）：Tick 等本批 worker 全部结束才返回，不会叠加；基线 Ticker 在慢 Tick 后会补发一次
-            scheduler.scheduleWithFixedDelay(() -> guarded("reconcile_tick", this::tick), interval, interval,
-                    TimeUnit.MILLISECONDS);
+            scheduler.scheduleWithFixedDelay(() -> {
+                var live = this.liveness;
+                if (live != null) {
+                    live.runGuarded(this::tick);
+                } else {
+                    guarded("reconcile_tick", this::tick);
+                }
+            }, interval, interval, TimeUnit.MILLISECONDS);
             scheduler.scheduleWithFixedDelay(() -> guarded("pending_age", this::refreshPendingAge),
                     GuildLimits.ASSET_PENDING_AGE_INTERVAL_MS, GuildLimits.ASSET_PENDING_AGE_INTERVAL_MS,
                     TimeUnit.MILLISECONDS);
@@ -198,6 +218,9 @@ public final class AssetOpLoop implements AssetOpProcessor {
             running = false;
             s = scheduler;
             scheduler = null;
+        }
+        if (liveness != null) {
+            liveness.close();
         }
         if (s == null) {
             return;
@@ -239,7 +262,13 @@ public final class AssetOpLoop implements AssetOpProcessor {
         }
         List<Long> ids;
         try {
-            ids = store.listDue(clockMs.getAsLong(), config.batch(), Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS));
+            var membership = this.workShard;
+            var filter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                    : membership.sqlFilter("guild_asset_op", "player_id");
+            Deadline readDeadline = Deadline.after(GuildLimits.ASSET_STORE_READ_BUDGET_MS);
+            ids = filter.isAll()
+                    ? store.listDue(clockMs.getAsLong(), config.batch(), readDeadline)
+                    : store.listDue(clockMs.getAsLong(), config.batch(), readDeadline, filter);
         } catch (RuntimeException e) {
             metrics.storeError(StoreOp.LIST);
             log.error("[AssetOp] 列出到期行失败: {}", e.toString());

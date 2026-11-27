@@ -164,13 +164,18 @@ class GuildParityClosureTest {
                 com.game.proto.guild.GuildChangeKind.GUILD_CHANGE_KIND_LEADER_TRANSFERRED,
                 700L, 10L, 20L, List.of(20L, 30L));
         org.mockito.Mockito.verify(ranks, org.mockito.Mockito.never())
-                .remove(org.mockito.ArgumentMatchers.anyLong(), anyInt(), any());
+                .disbandTombstone(org.mockito.ArgumentMatchers.anyLong(), anyInt(),
+                        org.mockito.ArgumentMatchers.anyLong(), any());
 
-        // 2. 独人帮主解散 -> 失效缓存 + 摘帮会榜
+        // 2. 独人帮主解散 -> 失效缓存 + 摘帮会榜（墓碑无锁摘除）
         when(store.purgeDeletedPlayer(org.mockito.ArgumentMatchers.eq(99L), org.mockito.ArgumentMatchers.anyLong(), any()))
                 .thenReturn(new GuildStore.DeletionOutcome(GuildStore.DeletionOutcome.Kind.DISBANDED,
                         800L, 3, 0L, List.of()));
         assertThat(provider.purgeRemovedRole(99L).join()).isTrue();
-        org.mockito.Mockito.verify(ranks).remove(org.mockito.ArgumentMatchers.eq(800L), org.mockito.ArgumentMatchers.eq(3), any());
+        org.mockito.Mockito.verify(ranks).disbandTombstone(
+                org.mockito.ArgumentMatchers.eq(800L),
+                org.mockito.ArgumentMatchers.eq(3),
+                org.mockito.ArgumentMatchers.anyLong(),
+                any());
     }
 }

@@ -19,30 +19,89 @@ public final class MailDeliveryWorker implements SmartLifecycle, AutoCloseable {
     private final ReliableAssetDelivery delivery;
     private final PersistedAssetLedgerReader ledger;
     private final AtomicBoolean running = new AtomicBoolean();
+    private volatile com.game.common.workshard.WorkShard.Membership workShard;
+    private volatile com.game.common.workshard.LoopLiveness deliveryLiveness;
+    private volatile com.game.common.workshard.LoopLiveness cleanupLiveness;
     private ScheduledExecutorService workers;
     public MailDeliveryWorker(MailStore store, ReliableAssetDelivery delivery, PersistedAssetLedgerReader ledger) {
         this.store = store;
         this.delivery = delivery;
         this.ledger = ledger;
     }
+    /** 挂载 64 片 HRW 分工成员表（附件重投按 player_id、过期清理按 mail_id，类别键分开）。 */
+    public MailDeliveryWorker withWorkShard(com.game.common.workshard.WorkShard.Membership membership) {
+        this.workShard = membership;
+        return this;
+    }
+    /** 挂载重投与过期清理循环的活性跟踪器（每轮兜底 Throwable 防调度器静默停摆，有意关闭时摘除序列）。 */
+    public MailDeliveryWorker withLiveness(com.game.common.workshard.LoopLiveness deliveryLiveness,
+                                           com.game.common.workshard.LoopLiveness cleanupLiveness) {
+        this.deliveryLiveness = deliveryLiveness;
+        this.cleanupLiveness = cleanupLiveness;
+        return this;
+    }
     @Override
     public synchronized void start() {
         if (!running.compareAndSet(false, true))
             return;
-        workers = Executors.newScheduledThreadPool(4, Thread.ofPlatform().name("mail-delivery-", 0).daemon(true).factory());
+        workers = Executors.newScheduledThreadPool(5, Thread.ofPlatform().name("mail-delivery-", 0).daemon(true).factory());
         for (int i = 0; i < 4; i++) workers.scheduleWithFixedDelay(this::tick, i * 100L, 1000, TimeUnit.MILLISECONDS);
+        workers.scheduleWithFixedDelay(this::cleanupTick, 30_000L, 60_000L, TimeUnit.MILLISECONDS);
     }
     private void tick() {
         if (!running.get())
             return;
-        pollDue(running::get);
+        var live = this.deliveryLiveness;
+        if (live != null) {
+            live.runGuarded(() -> pollDue(running::get));
+            return;
+        }
+        try {
+            pollDue(running::get);
+        } catch (Throwable panic) {
+            LOG.error("邮件资产重投循环单轮异常（循环继续）", panic);
+        }
+    }
+    void cleanupTick() {
+        if (!running.get())
+            return;
+        var live = this.cleanupLiveness;
+        if (live != null) {
+            live.runGuarded(this::cleanupExpiredOnce);
+            return;
+        }
+        try {
+            cleanupExpiredOnce();
+        } catch (Throwable panic) {
+            LOG.error("邮件过期清理循环单轮异常（循环继续）", panic);
+        }
+    }
+    int cleanupExpiredOnce() {
+        var membership = this.workShard;
+        var filter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                : membership.sqlFilter("mail_expiry_cleanup", "mail_id");
+        if (filter.isNone()) {
+            return 0;
+        }
+        try {
+            return store.cleanupExpired(Deadline.after(10_000), System.currentTimeMillis(), 100, filter);
+        } catch (Exception failure) {
+            LOG.warn("邮件过期清理单轮失败，下轮保留重试，类型={}", failure.getClass().getSimpleName());
+            return 0;
+        }
     }
     void pollDue() {
         pollDue(() -> true);
     }
     private void pollDue(BooleanSupplier active) {
         try {
-            for (long id : store.due(Deadline.after(2000), System.currentTimeMillis())) {
+            var membership = this.workShard;
+            var filter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                    : membership.sqlFilter("mail_asset_op", "player_id");
+            var dueIds = filter.isAll()
+                    ? store.due(Deadline.after(2000), System.currentTimeMillis())
+                    : store.due(Deadline.after(2000), System.currentTimeMillis(), filter);
+            for (long id : dueIds) {
                 if (!active.getAsBoolean())
                     break;
                 try {
@@ -92,6 +151,12 @@ public final class MailDeliveryWorker implements SmartLifecycle, AutoCloseable {
     @Override
     public synchronized void stop() {
         running.set(false);
+        if (deliveryLiveness != null) {
+            deliveryLiveness.close();
+        }
+        if (cleanupLiveness != null) {
+            cleanupLiveness.close();
+        }
         if (workers != null) {
             workers.shutdown();
             try {

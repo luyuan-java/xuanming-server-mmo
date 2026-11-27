@@ -184,6 +184,17 @@ public final class WorkShard {
             return cur;
         }
 
+        /** 成员表非空且未过期时返回 true（只读审计如收件箱对账未就绪时跳过，避免重复扫全量）。 */
+        public boolean hasActiveMembers() {
+            return !members().isEmpty();
+        }
+
+        /** 本副本是否已在当前活跃成员表中注册（canary 不入表故恒返回 false）。 */
+        public boolean isSelfRegistered() {
+            String s = self.get();
+            return !s.isEmpty() && members().contains(s);
+        }
+
         /** 成员表为空或已过期 -> true（全片保活）；本副本不在非空表内 -> false；否则按 HRW 判。 */
         public boolean owns(String key) {
             List<String> cur = members();
@@ -191,6 +202,17 @@ public final class WorkShard {
                 return true;
             }
             return WorkShard.owns(self.get(), key, cur);
+        }
+
+        /** 返回本副本对 kind 负责的片数（0..64），供缺片告警（各副本求和应等于 64）暴露指标。 */
+        public int ownedCount(String kind) {
+            int count = 0;
+            for (int s = 0; s < SHARDS; s++) {
+                if (owns(WorkShard.shardKey(kind, s))) {
+                    count++;
+                }
+            }
+            return count;
         }
 
         public SqlFilter sqlFilter(String kind, String column) {

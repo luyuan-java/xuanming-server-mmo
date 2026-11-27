@@ -62,6 +62,8 @@ final class RedisKeysSamples {
                 new Sample("guildTerminalCleanupWatermark", RedisKeys::guildTerminalCleanupWatermark,
                         "game:guild:asset-op:terminal-cleanup-watermark-ms"),
                 new Sample("guildRankAll", RedisKeys::guildRankAll, "game:guild:{rank}:all"),
+                new Sample("guildRankVersions", RedisKeys::guildRankVersions, "game:guild:{rank}:ver"),
+                new Sample("guildRankTombstones", RedisKeys::guildRankTombstones, "game:guild:{rank}:tomb"),
                 new Sample("guildRankZone", k -> k.guildRankZone(2), "game:guild:{rank}:zone:2"),
                 new Sample("guildRankZones", RedisKeys::guildRankZones, "game:guild:{rank}:zones"),
                 new Sample("guildRankLock", RedisKeys::guildRankLock, "game:guild:{rank}:lock"),

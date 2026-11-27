@@ -111,7 +111,7 @@ public class GuildInternalServiceProvider implements GuildInternalService {
         if (res.kind() == GuildStore.DeletionOutcome.Kind.DISBANDED) {
             if (ranks != null) {
                 try {
-                    ranks.remove(res.guildId(), res.zoneId(), deadline);
+                    ranks.disbandTombstone(res.guildId(), res.zoneId(), System.currentTimeMillis(), deadline);
                 } catch (RuntimeException e) {
                     log.error("[guild] role purge remove disbanded guild from rank failed guild={} zone={}: {}",
                             Long.toUnsignedString(res.guildId()), Integer.toUnsignedString(res.zoneId()), e.toString());

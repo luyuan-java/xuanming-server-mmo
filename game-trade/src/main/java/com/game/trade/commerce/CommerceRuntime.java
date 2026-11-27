@@ -34,6 +34,7 @@ public final class CommerceRuntime implements AutoCloseable {
     private final OfficialMallClient mall;
     private final RmbConsignmentService rmb;
     private volatile com.game.common.workshard.WorkShard.Membership shardMembership;
+    private volatile com.game.common.workshard.LoopLiveness liveness;
     // 仅由驱动 tick 的单个工作线程持有；尝试后前移、到表尾再绕回，不让离线玩家占满首页。
     private long ackAfterOpId;
     public CommerceRuntime(CommerceEngine e, ReliableAssetDelivery delivery, PersistedAssetLedgerReader ledger) {
@@ -58,16 +59,37 @@ public final class CommerceRuntime implements AutoCloseable {
         this.shardMembership = membership;
         return this;
     }
+
+    /** 挂载后台循环活性探针与每轮 Throwable 兜底。 */
+    public CommerceRuntime withLiveness(com.game.common.workshard.LoopLiveness liveness) {
+        this.liveness = liveness;
+        return this;
+    }
     public void start() {
-        if (started.compareAndSet(false, true))
-            worker.scheduleWithFixedDelay(() -> {
-                try {
-                    tick(Deadline.after(10000));
-                } catch (Exception failure) {
-                    if (!Thread.currentThread().isInterrupted())
-                        log.error("交易合同/资产恢复失败", failure);
-                }
-            }, 0, 1, TimeUnit.SECONDS);
+        if (started.compareAndSet(false, true)) {
+            worker.scheduleWithFixedDelay(this::runScheduledRound, 0, 1, TimeUnit.SECONDS);
+        }
+    }
+
+    void runScheduledRound() {
+        var live = this.liveness;
+        Runnable step = () -> {
+            try {
+                tick(Deadline.after(10000));
+            } catch (Exception failure) {
+                if (!Thread.currentThread().isInterrupted())
+                    log.error("交易合同/资产恢复失败", failure);
+            }
+        };
+        if (live != null) {
+            live.runGuarded(step);
+        } else {
+            try {
+                step.run();
+            } catch (Throwable failure) {
+                log.error("交易恢复循环未捕获异常，本轮停留在未知结局并继续下一拍", failure);
+            }
+        }
     }
     static AssetOpRequest request(TradeAssetOpRow op) throws InvalidProtocolBufferException {
         return AssetOpRequest.newBuilder()
@@ -438,6 +460,10 @@ public final class CommerceRuntime implements AutoCloseable {
     }
     @Override
     public void close() {
+        var live = this.liveness;
+        if (live != null) {
+            live.close();
+        }
         worker.shutdownNow();
         try {
             if (!worker.awaitTermination(10, TimeUnit.SECONDS))

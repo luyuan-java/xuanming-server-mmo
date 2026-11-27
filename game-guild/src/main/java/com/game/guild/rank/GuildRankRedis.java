@@ -37,6 +37,36 @@ public interface GuildRankRedis {
     CompletionStage<Boolean> add(String lockKey, String token, String allKey, String zonesKey, String zoneKey,
                                  String zoneMember, String score, String member);
 
+    /**
+     * 无全局锁的按版本条件写分（对齐主仓第 23 条）：
+     * 同槽清理过期墓碑 → 若成员在墓碑内则拒绝复活返回 false → 若已记 {@code score_version} 更大则拒旧写入返回 false →
+     * 写新版本并 {@code ZADD all / zone} 与 {@code SADD zones}。
+     */
+    default CompletionStage<Boolean> writeVersioned(String verKey, String tombKey, String allKey, String zonesKey,
+                                                    String zoneKey, String zoneMember, long nowMs, long scoreVersion,
+                                                    String score, String member) {
+        return java.util.concurrent.CompletableFuture.completedFuture(false);
+    }
+
+    /**
+     * 无全局锁的解散立墓碑并摘榜（同槽原子 Lua）：清理过期墓碑 → 立 24h 墓碑并刷 TTL → {@code HDEL ver} → 对全部榜 {@code ZREM}。
+     */
+    default CompletionStage<Boolean> tombstoneRemove(String verKey, String tombKey, List<String> rankKeys,
+                                                     long nowMs, long expireMs, long tombTtlMs, String member) {
+        return java.util.concurrent.CompletableFuture.completedFuture(false);
+    }
+
+    /** 合服折叠按版本条件从源区榜摘除（仅当已记版本不大于预期版本时 ZREM，避免误删并发迁回/新版本）。 */
+    default CompletionStage<Boolean> removeZoneIfVersionAtMost(String verKey, String sourceZoneKey,
+                                                               long maxVersion, String member) {
+        return java.util.concurrent.CompletableFuture.completedFuture(false);
+    }
+
+    /** 返回一个 ZSET 榜上的全部成员（用于按版本合并重建后的孤儿条目回库复核）。 */
+    default CompletionStage<Set<String>> allMembers(String rankKey) {
+        return java.util.concurrent.CompletableFuture.completedFuture(Set.of());
+    }
+
     /** {@code SMEMBERS}。 */
     CompletionStage<Set<String>> members(String setKey);
 

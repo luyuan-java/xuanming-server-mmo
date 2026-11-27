@@ -44,6 +44,8 @@ public final class BattleCompletionReplay implements AutoCloseable {
             Thread.ofPlatform().name("battle-terminal-replay").daemon(true).factory());
     private final java.util.concurrent.locks.ReentrantLock turn=new java.util.concurrent.locks.ReentrantLock();
     private volatile boolean quiesced;
+    private volatile com.game.common.workshard.WorkShard.Membership workShard;
+    private volatile com.game.common.workshard.LoopLiveness liveness;
     private long deadlineCursor,deadlineUpper,resultCursor;
     private final PlayerScanCursor firstPlayers=new PlayerScanCursor(),waitingPlayers=new PlayerScanCursor();
     public BattleCompletionReplay(BattleCompletionStore store,GlobalMatchStore formations,PlayerInboxService inbox,Results results,
@@ -54,9 +56,33 @@ public final class BattleCompletionReplay implements AutoCloseable {
         this.metrics=Objects.requireNonNull(metrics);
         this.replies=new ServiceCallSignatures(Map.of("inbox",secret),clock);
     }
-    public void start(){worker.scheduleWithFixedDelay(this::roundSafely,0,500,TimeUnit.MILLISECONDS);}
-    private void roundSafely() {
-        try{round();}catch(RuntimeException failure){log.warn("战斗永久来源扫描暂不可读，保留游标，类别={}",failure.getClass().getSimpleName());}
+    /** 挂载 64 片 HRW 后台分工（整局按 battle_id % 64，个人按 player_id % 64；截止自动放弃不看归属）。 */
+    public BattleCompletionReplay withWorkShard(com.game.common.workshard.WorkShard.Membership membership) {
+        this.workShard = membership;
+        return this;
+    }
+    /** 挂载后台循环活性探针与每轮 Throwable 兜底。 */
+    public BattleCompletionReplay withLiveness(com.game.common.workshard.LoopLiveness liveness) {
+        this.liveness = liveness;
+        return this;
+    }
+    public void start(){
+        worker.scheduleWithFixedDelay(this::roundSafely,0,500,TimeUnit.MILLISECONDS);
+    }
+    void roundSafely() {
+        var live = this.liveness;
+        Runnable step = () -> {
+            try{round();}catch(RuntimeException failure){log.warn("战斗永久来源扫描暂不可读，保留游标，类别={}",failure.getClass().getSimpleName());}
+        };
+        if (live != null) {
+            live.runGuarded(step);
+        } else {
+            try {
+                step.run();
+            } catch (Throwable failure) {
+                log.error("战斗终局重投循环异常，保留游标并继续下一拍", failure);
+            }
+        }
     }
     /** 单次至多16截止+16全局+8首投+8等待APPLIED；各类固定上界轮转，异常也推进游标。 */
     public void round(){if(quiesced||!turn.tryLock())return;try{roundOwned();}finally{turn.unlock();}}
@@ -70,7 +96,10 @@ public final class BattleCompletionReplay implements AutoCloseable {
             finally{deadlineCursor=battle;}
             if(Thread.currentThread().isInterrupted())return;
         }
-        var globals=store.pendingResults(resultCursor);
+        var membership = this.workShard;
+        var resultFilter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                : membership.sqlFilter("match_terminal_result", "battle_id");
+        var globals=resultFilter.isAll() ? store.pendingResults(resultCursor) : store.pendingResults(resultCursor, resultFilter);
         if(globals.isEmpty())resultCursor=0;
         for(var source:globals) {
             try{publish(source);}catch(InterruptedException stopped){Thread.currentThread().interrupt();return;}
@@ -78,13 +107,18 @@ public final class BattleCompletionReplay implements AutoCloseable {
             finally{resultCursor=source.getBattleId();}
             if(Thread.currentThread().isInterrupted())return;
         }
-        deliverPending(true,firstPlayers);
+        var playerFilter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                : membership.sqlFilter("match_terminal_player", "player_id");
+        deliverPending(true,firstPlayers,playerFilter);
         if(Thread.currentThread().isInterrupted())return;
-        deliverPending(false,waitingPlayers);
+        deliverPending(false,waitingPlayers,playerFilter);
     }
     private static final class PlayerScanCursor { long battle,player,upper; }
-    private void deliverPending(boolean first,PlayerScanCursor cursor) {
-        var batch=store.pendingInbox(first,cursor.battle,cursor.player,cursor.upper);cursor.upper=batch.upperBattle();
+    private void deliverPending(boolean first,PlayerScanCursor cursor,com.game.common.workshard.WorkShard.SqlFilter playerFilter) {
+        var batch=playerFilter.isAll()
+                ? store.pendingInbox(first,cursor.battle,cursor.player,cursor.upper)
+                : store.pendingInbox(first,cursor.battle,cursor.player,cursor.upper,playerFilter);
+        cursor.upper=batch.upperBattle();
         if(batch.sources().isEmpty()){cursor.battle=0;cursor.player=0;cursor.upper=0;}
         for(var source:batch.sources()) {
             try{deliver(source);}
@@ -181,6 +215,10 @@ public final class BattleCompletionReplay implements AutoCloseable {
         return worker.awaitTermination(Math.max(0,until-System.nanoTime()),TimeUnit.NANOSECONDS);
     }
     @Override public void close() {
+        var live = this.liveness;
+        if (live != null) {
+            live.close();
+        }
         worker.shutdownNow();
         try{if(!worker.awaitTermination(5,TimeUnit.SECONDS))log.error("战斗终局恢复线程尚未退出，不能假定投递已终结");}
         catch(InterruptedException interrupted){Thread.currentThread().interrupt();}

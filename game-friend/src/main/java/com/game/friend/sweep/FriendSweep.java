@@ -42,6 +42,8 @@ public final class FriendSweep implements AutoCloseable {
     private final int batchLimit;
     private final LongSupplier clockMs;
     private final Gauges gauges;
+    private volatile com.game.common.workshard.WorkShard.Membership workShard;
+    private volatile com.game.common.workshard.LoopLiveness liveness;
     private ScheduledExecutorService scheduler;
 
     public FriendSweep(SweepStore store, String mode, Duration interval, int retentionDays, int batchLimit,
@@ -53,6 +55,18 @@ public final class FriendSweep implements AutoCloseable {
         this.batchLimit = batchLimit;
         this.clockMs = clockMs;
         this.gauges = gauges;
+    }
+
+    /** 挂载 64 片 HRW 分工成员表（未挂载或空表时承担全片）。 */
+    public FriendSweep withWorkShard(com.game.common.workshard.WorkShard.Membership membership) {
+        this.workShard = membership;
+        return this;
+    }
+
+    /** 挂载循环活性跟踪器（每轮兜底 + 停摆告警）。 */
+    public FriendSweep withLiveness(com.game.common.workshard.LoopLiveness liveness) {
+        this.liveness = liveness;
+        return this;
     }
 
     public synchronized void start() {
@@ -68,6 +82,11 @@ public final class FriendSweep implements AutoCloseable {
     }
 
     private void runRoundSafely() {
+        var live = this.liveness;
+        if (live != null) {
+            live.runGuarded(this::runRound);
+            return;
+        }
         try {
             runRound();
         } catch (Throwable t) {
@@ -84,11 +103,18 @@ public final class FriendSweep implements AutoCloseable {
             log.error("[friend] sweep 模式 {} 不是 {} / {}，本轮未清理任何行", mode, SweepStore.MODE_REPORT_ONLY, SweepStore.MODE_DELETE);
         }
         long now = clockMs.getAsLong();
-        Result terminal = store.sweepTerminalRequests(mode, retentionDays, batchLimit, now,
-                () -> System.nanoTime() - deadline < 0);
+        var membership = this.workShard;
+        var reqFilter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                : membership.sqlFilter("friend_sweep_request", "to_player_id");
+        var capFilter = membership == null ? com.game.common.workshard.WorkShard.SqlFilter.ALL
+                : membership.sqlFilter("friend_sweep_capacity", "player_id");
+        Result terminal = reqFilter.isAll()
+                ? store.sweepTerminalRequests(mode, retentionDays, batchLimit, now, () -> System.nanoTime() - deadline < 0)
+                : store.sweepTerminalRequests(mode, retentionDays, batchLimit, now, () -> System.nanoTime() - deadline < 0, reqFilter);
         reportTerminal(terminal, known);
-        Result idle = store.sweepIdleCapacityRows(mode, retentionDays, batchLimit, now,
-                () -> System.nanoTime() - deadline < 0);
+        Result idle = capFilter.isAll()
+                ? store.sweepIdleCapacityRows(mode, retentionDays, batchLimit, now, () -> System.nanoTime() - deadline < 0)
+                : store.sweepIdleCapacityRows(mode, retentionDays, batchLimit, now, () -> System.nanoTime() - deadline < 0, capFilter);
         reportIdle(idle, known);
     }
 
@@ -141,6 +167,10 @@ public final class FriendSweep implements AutoCloseable {
         if (scheduler != null) {
             scheduler.shutdownNow();
             scheduler = null;
+        }
+        var live = this.liveness;
+        if (live != null) {
+            live.close();
         }
     }
 }

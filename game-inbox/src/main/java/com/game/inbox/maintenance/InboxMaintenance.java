@@ -81,7 +81,11 @@ public final class InboxMaintenance implements SmartLifecycle {
     private volatile boolean held;
     private volatile long lastRenewedNanos;
     /** 本任期的对账分片读数（只由对账那一个循环读写）。 */
-    private ReconcileRound.Tally tally;
+    private ReconcileRound.Tally tally = new ReconcileRound.Tally();
+    /** 可选 64 片 HRW 对账分工成员表（挂载后由各 stable 副本按片分工执行只读对账；未挂载则维持原领导者单副本模式）。 */
+    private volatile com.game.common.workshard.WorkShard.Membership workShard;
+    private volatile com.game.common.workshard.LoopLiveness reconcileLiveness;
+    private ScheduledFuture<?> shardedReconcileLoop;
 
     public InboxMaintenance(LeaderLease lease, InboxMaintenanceStore store, LedgerReader ledgers, InboxMetrics metrics, Settings settings,
                             LongSupplier wallClockMs, LongSupplier nanoClock, LongUnaryOperator jitterMs) {
@@ -93,6 +97,17 @@ public final class InboxMaintenance implements SmartLifecycle {
         this.wallClockMs = Objects.requireNonNull(wallClockMs, "wallClockMs");
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
         this.jitterMs = Objects.requireNonNull(jitterMs, "jitterMs");
+    }
+
+    /** 挂载 64 片 HRW 成员表（收件箱只读对账按片分给 stable 副本，canary / 未就绪跳过，其余领导者维护任务仍独占运行）。 */
+    public InboxMaintenance withWorkShard(com.game.common.workshard.WorkShard.Membership membership) {
+        this.workShard = membership;
+        return this;
+    }
+
+    public InboxMaintenance withReconcileLiveness(com.game.common.workshard.LoopLiveness liveness) {
+        this.reconcileLiveness = liveness;
+        return this;
     }
 
     @Override
@@ -108,6 +123,24 @@ public final class InboxMaintenance implements SmartLifecycle {
                     Thread.ofPlatform().name("inbox-ledger-read-", 0).daemon(true).factory());
             long renewMs = Math.max(1, lease.ttl().toMillis() / 3);
             leaseThread.scheduleWithFixedDelay(this::leaseTick, 0, renewMs, TimeUnit.MILLISECONDS);
+            if (workShard != null && !settings.reconcileInterval().isZero()) {
+                Duration first = reconcileFirstDelay(settings.reconcileInterval(), jitterMs);
+                shardedReconcileLoop = rounds.scheduleAtFixedRate(() -> {
+                    if (!running) {
+                        return;
+                    }
+                    Runnable body = () -> reconcileRoundSharded(new Round(settings.reconcileInterval(), false));
+                    if (reconcileLiveness != null) {
+                        reconcileLiveness.runGuarded(body);
+                    } else {
+                        try {
+                            body.run();
+                        } catch (Throwable t) {
+                            log.error("[PlayerInbox] 分片对账这一轮出错，下一轮照常", t);
+                        }
+                    }
+                }, first.toMillis(), settings.reconcileInterval().toMillis(), TimeUnit.MILLISECONDS);
+            }
         }
     }
 
@@ -121,9 +154,16 @@ public final class InboxMaintenance implements SmartLifecycle {
                 return;
             }
             running = false;
+            if (shardedReconcileLoop != null) {
+                shardedReconcileLoop.cancel(false);
+                shardedReconcileLoop = null;
+            }
             leaseExec = leaseThread;
             roundExec = rounds;
             readers = ledgerReaders;
+        }
+        if (reconcileLiveness != null) {
+            reconcileLiveness.close();
         }
         shutdown(leaseExec, "领导锁续期");
         deposed("关停");
@@ -203,7 +243,7 @@ public final class InboxMaintenance implements SmartLifecycle {
             // 终态item是永久幂等收据，不再调度物理删除。旧配置/运维方法只作兼容，不恢复删除行为。
             loops.add(every(settings.notifyInterval(), settings.notifyInterval(), this::notifyRound));
             loops.add(every(settings.gaugeInterval(), settings.gaugeInterval(), this::gaugeRound));
-            if (!settings.reconcileInterval().isZero()) {
+            if (workShard == null && !settings.reconcileInterval().isZero()) {
                 Duration first = reconcileFirstDelay(settings.reconcileInterval(), jitterMs);
                 log.info("[PlayerInbox] 第一轮对账在 {} 秒后，之后每 {}", first.toSeconds(), settings.reconcileInterval());
                 loops.add(every(first, settings.reconcileInterval(), this::reconcileRound));
@@ -234,12 +274,18 @@ public final class InboxMaintenance implements SmartLifecycle {
     }
 
     /** 本轮的控制：领导权丢失 / 关停（不计数）与本轮预算用完（计 timeout）分开。 */
-    private final class Round {
+    final class Round {
         private final long deadlineNanos;
+        private final boolean requireLeader;
 
         Round(Duration interval) {
+            this(interval, true);
+        }
+
+        Round(Duration interval, boolean requireLeader) {
             Duration budget = interval.compareTo(ROUND_BUDGET_CAP) < 0 ? interval : ROUND_BUDGET_CAP;
             deadlineNanos = nanoClock.getAsLong() + budget.toNanos();
+            this.requireLeader = requireLeader;
         }
 
         boolean expired() {
@@ -247,7 +293,7 @@ public final class InboxMaintenance implements SmartLifecycle {
         }
 
         boolean stop() {
-            return !leading() || expired() || Thread.currentThread().isInterrupted();
+            return (requireLeader && !leading()) || !running || expired() || Thread.currentThread().isInterrupted();
         }
     }
 
@@ -309,6 +355,49 @@ public final class InboxMaintenance implements SmartLifecycle {
         ScanGauges gauges = store.scanGauges(now, now - overdue, now > stale ? now - stale : 0, round::stop);
         if (leading()) {
             metrics.setScanGauges(gauges);
+        }
+    }
+
+    /** 按 64 片 HRW 成员表执行只读对账：canary、成员表未就绪或本副本未注册时跳过并清空旧片 gauge；成员变化时卸下旧片。 */
+    void reconcileRoundSharded(Round round) {
+        var membership = this.workShard;
+        if (membership == null) {
+            return;
+        }
+        if (!membership.hasActiveMembers() || !membership.isSelfRegistered()) {
+            metrics.setReconcileInconsistent(tally.retainShards(s -> false));
+            return;
+        }
+        java.util.function.IntPredicate ownsShard = shard -> membership.owns(Integer.toString(shard));
+        metrics.setReconcileInconsistent(tally.retainShards(ownsShard));
+        long now = wallClockMs.getAsLong();
+        long window = settings.reconcileWindow().toMillis();
+        long since = now > window ? now - window : 0;
+        int start = ReconcileRound.startShard(now, settings.reconcileInterval().toMillis());
+        ReconcileRound.Result result = null;
+        String outcome;
+        Exception failure = null;
+        try {
+            result = ReconcileRound.run(start, ReconcileRound.Limits.DEFAULT,
+                    (shard, before, limit) -> store.recentlyFinalized(shard, since, before, limit), ledgers, ledgerReaders,
+                    round::stop, metrics, ownsShard);
+            outcome = !running ? null : round.expired() ? "timeout" : "ok";
+        } catch (SQLException | RuntimeException e) {
+            failure = e;
+            outcome = !running ? null : round.expired() ? "timeout" : "error";
+        }
+        if (outcome == null) {
+            return;
+        }
+        metrics.reconcileRound(outcome);
+        if (result != null) {
+            metrics.setReconcileInconsistent(tally.apply(result.shards()));
+            if (result.inconsistent() > 0) {
+                log.error("[PlayerInbox] 分片对账发现 {} 处不一致（见前面的 ERROR 行）", result.inconsistent());
+            }
+        }
+        if ("error".equals(outcome)) {
+            log.error("[PlayerInbox] 分片对账轮次失败（start_shard={}）", start, failure);
         }
     }
 

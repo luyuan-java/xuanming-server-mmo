@@ -230,10 +230,27 @@ public class FriendConfiguration {
                 r.maxExclude());
     }
 
+    @Bean(initMethod = "start", destroyMethod = "close")
+    public com.game.discovery.workshard.RedisWorkShardMembership friendWorkShardMembership(
+            RedissonClient redis, RedisKeys keys,
+            @org.springframework.beans.factory.annotation.Value("${game.instance-id:}") String configuredInstanceId,
+            @org.springframework.beans.factory.annotation.Value("${game.track:stable}") String track) {
+        String instanceId = configuredInstanceId == null || configuredInstanceId.isBlank()
+                ? "friend-" + UUID.randomUUID()
+                : configuredInstanceId.strip();
+        return new com.game.discovery.workshard.RedisWorkShardMembership(redis, keys, "friend", 0, instanceId, track);
+    }
+
     /** 后台清理：终态好友申请与零好友容量行（缺省 report_only 只数不删）。 */
     @Bean(initMethod = "start", destroyMethod = "close")
-    public FriendSweep friendSweep(DataSource dataSource, FriendMetrics metrics, FriendProperties props) {
+    public FriendSweep friendSweep(DataSource dataSource, FriendMetrics metrics, FriendProperties props,
+                                   com.game.discovery.workshard.RedisWorkShardMembership shards,
+                                   io.micrometer.core.instrument.MeterRegistry registry) {
         FriendProperties.Sweep s = props.sweep();
+        com.game.discovery.workshard.LoopLivenessMeters.bindOwnedShards(
+                registry, "friend", "friend_sweep_request", shards.membership());
+        var liveness = com.game.discovery.workshard.LoopLivenessMeters.bind(
+                registry, new com.game.common.workshard.LoopLiveness("friend", "sweep"));
         return new FriendSweep(new SweepStore(dataSource, (int) Math.max(1, props.queryTimeout().toSeconds())),
                 s.mode(), s.interval(), s.retentionDays(), s.batchLimit(), System::currentTimeMillis,
                 new FriendSweep.Gauges() {
@@ -246,7 +263,9 @@ public class FriendConfiguration {
                     public void idleCapacityRows(String mode, long value) {
                         metrics.sweepIdleCapacityRows(mode, value);
                     }
-                });
+                })
+                .withWorkShard(shards.membership())
+                .withLiveness(liveness);
     }
 
     @Bean(destroyMethod = "close")

@@ -158,8 +158,8 @@ public final class GuildService {
             return createTip(access.replyFor(me, guildId, 0, outcome.rejection(), deadline));
         }
         access.invalidate(ok.value().invalidation(), deadline);
-        // 新帮以 0 分入榜：失败可容忍（权威分在 MySQL，缺口由下次启动的重建自愈；GuildRanks 永不抛）
-        ranks.add(guildId, zone.zoneId(), 0, deadline);
+        // 新帮以 0 分入榜（无全服锁版本条件写）：失败可容忍（权威分在 MySQL，缺口由下次启动重建自愈；GuildRanks 永不抛）
+        ranks.writeVersioned(guildId, zone.zoneId(), 0, 0L, now, deadline);
         log.info("[guild] CreateGuild ok guild={} leader={} zone={}", Long.toUnsignedString(guildId),
                 Long.toUnsignedString(me), Integer.toUnsignedString(zone.zoneId()));
         return CreateGuildResponse.newBuilder().setGuild(views.guildInfo(guild, me, deadline)).build();
@@ -321,12 +321,20 @@ public final class GuildService {
         }
         Disbanded disbanded = ok.value();
         access.invalidate(disbanded.invalidation(), deadline);
-        // 清榜只能用事务内读到的 zone：缓存里的 zone 在合服之后会陈旧一个 TTL（GuildRanks 永不抛，失败由下次启动重建自愈）
-        ranks.remove(guildId, disbanded.zoneId(), deadline);
+        // 无全服锁解散立 24h 墓碑并摘榜：只能用事务内读到的 zone，防止迟到写分复活
+        ranks.disbandTombstone(guildId, disbanded.zoneId(), clockMs.getAsLong(), deadline);
         pushes.notify(GuildChangeKind.GUILD_CHANGE_KIND_DISBANDED, guildId, me, 0, disbanded.pushRecipients());
         log.info("[guild] DisbandGuild ok guild={} leader={} members={}", Long.toUnsignedString(guildId),
                 Long.toUnsignedString(me), disbanded.memberIds().size());
         return DisbandGuildResponse.getDefaultInstance();
+    }
+
+    /** 原子更新帮会积分（同事务递增 score_version），再无全服锁按版本条件写入 Redis 榜。 */
+    public Optional<GuildStore.VersionedScore> updateGuildScore(long guildId, long score, Deadline deadline) {
+        Optional<GuildStore.VersionedScore> updated = store.updateGuildScore(guildId, score, deadline);
+        updated.ifPresent(v -> ranks.writeVersioned(v.guildId(), v.zoneId(), v.score(), v.scoreVersion(),
+                clockMs.getAsLong(), deadline));
+        return updated;
     }
 
     // ================================================================ SetAnnouncement（39）
